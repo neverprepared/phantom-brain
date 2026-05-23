@@ -73,28 +73,32 @@ export async function seedTaskFromVault(
     for (const kw of keywords) {
       const hits = await searchMemories({ query: kw, limit: 5, freshness: 'fresh' });
       for (const hit of hits) {
-        if (hit.resultKind !== 'atom' || !hit.entry) continue;
-        if (!seen.has(hit.entry.frontmatter.id)) {
-          seen.add(hit.entry.frontmatter.id);
-          results.push(hit);
+        if (hit.resultKind === 'atom' && hit.entry) {
+          const id = hit.entry.frontmatter.id;
+          if (!seen.has(id)) { seen.add(id); results.push(hit); }
+        } else if (hit.resultKind === 'wiki' && hit.wikiEntry) {
+          const key = `wiki:${hit.wikiEntry.relPath}`;
+          if (!seen.has(key)) { seen.add(key); results.push(hit); }
         }
       }
     }
     results.sort((a, b) => b.score - a.score);
-    const top = results.slice(0, 5);
+    const top = results.slice(0, 6);
 
     for (const result of top) {
-      if (!result.entry) continue;
-      const fm = result.entry.frontmatter;
-      const snippet = result.snippet
-        ? `\n\n> ${result.snippet}`
-        : '';
-
-      const lifecycleLabel = fm.lifecycle_status ?? (fm.para ?? 'unknown');
-      const content =
-        `[From long-term memory] **${fm.title}** (${lifecycleLabel}, score: ${result.score})` +
-        snippet;
-
+      let content: string;
+      if (result.resultKind === 'atom' && result.entry) {
+        const fm = result.entry.frontmatter;
+        const snippet = result.snippet ? `\n\n> ${result.snippet}` : '';
+        const lifecycleLabel = fm.lifecycle_status ?? 'unknown';
+        content = `[Memory atom] **${fm.title}** (${lifecycleLabel}, score: ${result.score})${snippet}`;
+      } else if (result.resultKind === 'wiki' && result.wikiEntry) {
+        const we = result.wikiEntry;
+        const snippet = result.snippet ? `\n\n> ${result.snippet}` : '';
+        content = `[Wiki/${we.kind}] **${we.title}** (score: ${result.score})${snippet}`;
+      } else {
+        continue;
+      }
       addFinding(task_id, content, 'high', 'semantic');
       seeded++;
     }
