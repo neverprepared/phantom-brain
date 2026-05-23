@@ -34,9 +34,9 @@ const GENERIC_SECTIONS = new Set<string>([
 
 const MIN_ENTITY_LEN = 3;
 const MAX_ENTITY_LEN = 50;
-const SNIPPET_LEN = 500;
-const SNIPPET_BEFORE = 200;
-const SNIPPET_AFTER = 300;
+const SNIPPET_LEN = 1500;
+const SNIPPET_BEFORE = 600;
+const SNIPPET_AFTER = 900;
 
 /**
  * Extract candidate entity names from raw markdown content.

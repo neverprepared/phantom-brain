@@ -65,7 +65,6 @@ export const brainSynthesizeToolDefinition = {
   },
 };
 
-const STUB_BODY_LIMIT = 2000;
 const FETCH_TIMEOUT_MS = 20_000;
 const FETCH_MAX_BYTES = 2 * 1024 * 1024; // 2 MB
 
@@ -146,8 +145,6 @@ function buildSummaryPage(opts: {
   const { title, rawPath, sourceUrl, capturedAt, synthesizedAt, body, verdict } = opts;
   const escapedTitle = escapeYaml(title);
   const sourceUrlLine = sourceUrl ? `source_url: "${sourceUrl}"\n` : '';
-  const truncated = body.slice(0, STUB_BODY_LIMIT);
-  const truncatedNote = body.length > STUB_BODY_LIMIT ? '\n\n<!-- Body truncated at 2000 chars for Phase 0 stub -->' : '';
   const categoryLine = verdict.category ? `category: ${verdict.category}\n` : '';
   return (
     `---\n` +
@@ -162,8 +159,7 @@ function buildSummaryPage(opts: {
     `reason: "${escapeYaml(verdict.reason)}"\n` +
     `tags: []\n` +
     `---\n\n` +
-    `${truncated}${truncatedNote}\n\n` +
-    `<!-- Full extraction: Phase 2 -->\n`
+    `${body}\n`
   );
 }
 
@@ -329,7 +325,7 @@ export async function runBrainSynthesize(_input: z.infer<typeof BrainSynthesizeS
     // Index the new summary page so brain_recall sees it without a full rebuild.
     // relPath for the wiki index is relative to Wiki/, not the vault root.
     const wikiRelPath = path.posix.join(CONFIG.WIKI_SUMMARIES, `${finalSlug}.md`);
-    indexWikiEntry(wikiRelPath, item.title, 'summary', [], rawContent.slice(0, STUB_BODY_LIMIT), synthesizedAt, synthesizedAt);
+    indexWikiEntry(wikiRelPath, item.title, 'summary', [], rawContent, synthesizedAt, synthesizedAt);
 
     logger.info('brain_synthesize processed item', {
       raw_path: rawPath,
