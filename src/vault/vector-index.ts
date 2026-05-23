@@ -4,9 +4,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import { CONFIG } from '../config.js';
-import { getIndex, getWikiIndex, type IndexEntry, type WikiIndexEntry } from './search.js';
-import { readMemoryFile } from './filesystem.js';
-import { parseMemoryFile } from './frontmatter.js';
+import { getWikiIndex, type WikiIndexEntry } from './search.js';
 import { embedBatch, buildEmbedText, isEmbeddingAvailable } from './embeddings.js';
 import { logger } from '../shared/logger.js';
 import { initFts, isFtsReady } from './fts-index.js';
@@ -154,7 +152,7 @@ export function getEmbeddedIds(): Set<string> {
 
 /** Returns embedding coverage stats. */
 export function getEmbeddingStats(): { embedded: number; total: number } {
-  const total = getIndex().size + getWikiIndex().size;
+  const total = getWikiIndex().size;
   const embedded = vecDb
     ? (vecDb.prepare('SELECT COUNT(*) as n FROM vec_map').get() as { n: number }).n
     : 0;
@@ -206,10 +204,8 @@ export function getVectorDiagnostics(): {
     } catch { /* */ }
   }
 
-  // Find unembedded notes
-  const index = getIndex();
   const embeddedIds = getEmbeddedIds();
-  const unembeddedIds = [...index.keys()].filter((id) => !embeddedIds.has(id));
+  const unembeddedIds = [...getWikiIndex().keys()].filter((id) => !embeddedIds.has(id));
 
   // Check sync lock state
   let syncLockHeld = false;
@@ -353,21 +349,13 @@ export function syncVectorIndex(): void {
       }
 
       try {
-        const index = getIndex();
         const wIndex = getWikiIndex();
 
-        // Categorize vec_map rows against the current in-memory indexes.
+        // Categorize vec_map rows against the current wiki index.
         const vecRows = vecDb!.prepare('SELECT id, updated FROM vec_map').all() as Array<{ id: string; updated: string }>;
         const orphans: string[] = [];
         const stale: string[] = [];
         for (const row of vecRows) {
-          const entry = index.get(row.id);
-          if (entry) {
-            if (Date.parse(row.updated) < Date.parse(entry.frontmatter.updated)) {
-              stale.push(row.id);
-            }
-            continue;
-          }
           const wEntry = wIndex.get(row.id);
           if (wEntry) {
             if (wEntry.updated && Date.parse(row.updated) < Date.parse(wEntry.updated)) {
@@ -378,7 +366,7 @@ export function syncVectorIndex(): void {
           orphans.push(row.id);
         }
 
-        // 1. Delete orphans — vectors for entries that no longer exist in any index.
+        // 1. Delete orphans — vectors for entries no longer in the index.
         for (const id of orphans) {
           deleteVector(id);
         }
@@ -387,30 +375,16 @@ export function syncVectorIndex(): void {
         }
 
         const embeddedIds = getEmbeddedIds();
-        const missingAtoms = [...index.entries()].filter(([id]) => !embeddedIds.has(id));
         const missingWiki = [...wIndex.entries()].filter(([id]) => !embeddedIds.has(id));
 
-        if (missingAtoms.length === 0 && missingWiki.length === 0 && stale.length === 0) {
+        if (missingWiki.length === 0 && stale.length === 0) {
           logger.info('Vector index up to date', { count: embeddedIds.size });
           return;
         }
 
-        // 2. Build the work list: missing + stale for both atoms and wiki pages.
+        // 2. Build the work list: missing + stale wiki pages.
         type Work = { id: string; title: string; tags: string[]; bodyFn: () => Promise<string> };
         const work: Work[] = [
-          ...missingAtoms.map(([id, entry]: [string, IndexEntry]) => ({
-            id,
-            title: entry.frontmatter.title,
-            tags: entry.frontmatter.tags,
-            bodyFn: async () => {
-              try {
-                const raw = await readMemoryFile(entry.filePath);
-                return parseMemoryFile(raw).content;
-              } catch {
-                return '';
-              }
-            },
-          })),
           ...missingWiki.map(([id, wEntry]: [string, WikiIndexEntry]) => ({
             id,
             title: wEntry.title,
@@ -418,24 +392,12 @@ export function syncVectorIndex(): void {
             bodyFn: async () => wEntry.body,
           })),
           ...stale.map((id) => {
-            const entry = index.get(id);
-            if (entry) return {
-              id,
-              title: entry.frontmatter.title,
-              tags: entry.frontmatter.tags,
-              bodyFn: async () => {
-                try {
-                  const raw = await readMemoryFile(entry.filePath);
-                  return parseMemoryFile(raw).content;
-                } catch { return ''; }
-              },
-            };
             const wEntry = wIndex.get(id)!;
             return { id, title: wEntry.title, tags: wEntry.tags, bodyFn: async () => wEntry.body };
           }),
         ];
 
-        logger.info('Syncing vector index', { missing: missingAtoms.length + missingWiki.length, stale: stale.length, total: index.size + wIndex.size });
+        logger.info('Syncing vector index', { missing: missingWiki.length, stale: stale.length, total: wIndex.size });
 
         const texts = await Promise.all(work.map(async (w) => {
           const body = await w.bodyFn();

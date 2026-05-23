@@ -37,28 +37,15 @@ export async function runBrainRecall(input: z.infer<typeof BrainRecallSchema>) {
     freshness: input.freshness,
   });
 
-  const atomResults = results.filter((r) => r.resultKind === 'atom');
-  const fresh = atomResults.filter((r) => !r.stale);
-  const stale = atomResults.filter((r) => r.stale);
-
-  let suggested_action: 'use_cached' | 'refresh' | 'learn_first';
-  if (results.length === 0) {
-    suggested_action = 'learn_first';
-  } else if (stale.length > 0 && fresh.length === 0) {
-    suggested_action = 'refresh';
-  } else {
-    suggested_action = 'use_cached';
-  }
+  const suggested_action: 'use_cached' | 'learn_first' = results.length === 0 ? 'learn_first' : 'use_cached';
 
   return {
     results: results.map((r) => ({
       kind: r.resultKind,
-      id: r.resultKind === 'atom' ? r.entry?.frontmatter.id : undefined,
-      path: r.resultKind === 'wiki' ? r.wikiEntry?.relPath : undefined,
-      title: r.resultKind === 'atom' ? r.entry?.frontmatter.title : r.wikiEntry?.title,
+      path: r.wikiEntry?.relPath,
+      title: r.wikiEntry?.title,
       excerpt: r.snippet ?? '',
-      confidence: r.resultKind === 'atom' ? r.entry?.frontmatter.confidence : undefined,
-      freshness: r.resultKind === 'atom' ? (r.stale ? 'stale' : 'fresh') : 'fresh',
+      freshness: 'fresh',
       score: r.score,
     })),
     suggested_action,

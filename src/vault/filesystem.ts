@@ -1,7 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { CONFIG } from '../config.js';
-import { VaultError } from '../shared/errors.js';
 import { logger } from '../shared/logger.js';
 import { todayDateString } from '../shared/utils.js';
 
@@ -35,81 +34,6 @@ export async function writeAtomicFile(filePath: string, content: string): Promis
   const tmp = `${filePath}.tmp`;
   await fs.writeFile(tmp, content, 'utf-8');
   await fs.rename(tmp, filePath);
-}
-
-// ---------------------------------------------------------------------------
-// Memory file helpers
-// ---------------------------------------------------------------------------
-
-export function memoryFilePath(slug: string): string {
-  return path.join(CONFIG.VAULT_PATH, CONFIG.MEMORY_FOLDER, `${slug}.md`);
-}
-
-export async function writeMemoryFile(filePath: string, content: string): Promise<void> {
-  await writeAtomicFile(filePath, content);
-  logger.debug('Wrote memory file', { path: filePath });
-}
-
-export async function readMemoryFile(filePath: string): Promise<string> {
-  try {
-    return await fs.readFile(filePath, 'utf-8');
-  } catch (err) {
-    throw new VaultError(`Failed to read memory file: ${filePath}`, {
-      path: filePath,
-      error: String(err),
-    });
-  }
-}
-
-export async function deleteMemoryFile(filePath: string): Promise<void> {
-  try {
-    await fs.unlink(filePath);
-    logger.debug('Deleted memory file', { path: filePath });
-  } catch (err) {
-    throw new VaultError(`Failed to delete memory file: ${filePath}`, {
-      path: filePath,
-      error: String(err),
-    });
-  }
-}
-
-export async function moveMemoryFile(oldPath: string, newPath: string): Promise<void> {
-  const dir = path.dirname(newPath);
-  await fs.mkdir(dir, { recursive: true });
-  await fs.rename(oldPath, newPath);
-  logger.debug('Moved memory file', { from: oldPath, to: newPath });
-}
-
-export interface MemoryFileEntry {
-  filePath: string;
-  slug: string;
-  paraFolder: string; // kept for backward compat; always 'Memory' now
-}
-
-/**
- * List all atom files in Memory/. Excludes _index.md and any non-.md files.
- * Never walks Input/, Wiki/, Output/, _log/, or _index/.
- */
-export async function listAllMemoryFiles(): Promise<MemoryFileEntry[]> {
-  const entries: MemoryFileEntry[] = [];
-  const dirPath = path.join(CONFIG.VAULT_PATH, CONFIG.MEMORY_FOLDER);
-
-  try {
-    const files = await fs.readdir(dirPath);
-    for (const file of files) {
-      if (!file.endsWith('.md')) continue;
-      if (file === CONFIG.INDEX_FILE) continue;
-      entries.push({
-        filePath: path.join(dirPath, file),
-        slug: file.replace(/\.md$/, ''),
-        paraFolder: CONFIG.MEMORY_FOLDER,
-      });
-    }
-  } catch {
-    // Memory/ may not exist yet on first run
-  }
-
-  return entries;
 }
 
 export interface WikiFileEntry {

@@ -16,7 +16,6 @@ function resolveVaultPath(): string {
 export const CONFIG = {
   VAULT_PATH: resolveVaultPath(),
   // Layer folders
-  MEMORY_FOLDER: 'Memory',
   WIKI_FOLDER: 'Wiki',
   WIKI_SUBFOLDERS: [] as const,
   // System folders
@@ -57,17 +56,6 @@ export const CONFIG = {
   GATE_MODEL: process.env['GATE_MODEL'] || 'claude-haiku-4-5-20251001',
   GATE_ENABLED: process.env['GATE_ENABLED'] !== 'false',  // default on
 } as const;
-
-/** Default TTL by lifecycle status (days). Used when ttl_days not set on atom. */
-export const DEFAULT_TTL_DAYS: Record<string, number> = {
-  active: 90,
-  reference: 180,
-  archive: 365,
-};
-
-export function memoryFolderPath(): string {
-  return path.join(CONFIG.VAULT_PATH, CONFIG.MEMORY_FOLDER);
-}
 
 export function getVaultPath(): string {
   return CONFIG.VAULT_PATH;

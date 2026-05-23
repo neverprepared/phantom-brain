@@ -1,15 +1,5 @@
 import { todayDateString } from '../shared/utils.js';
 
-export function memoryIndexTemplate(): string {
-  return `# Memory Index
-_Generated: ${todayDateString()} — 0 atoms_
-
-Machine-generated cluster map. Updated after task_complete and every 10 memory_store calls.
-
-<!-- clusters will be generated here -->
-`;
-}
-
 export function wikiIndexTemplate(): string {
   return `# Wiki Index
 _Updated: ${todayDateString()} — 0 pages_

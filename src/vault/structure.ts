@@ -3,7 +3,6 @@ import path from 'node:path';
 import { CONFIG } from '../config.js';
 import { logger } from '../shared/logger.js';
 import {
-  memoryIndexTemplate,
   wikiIndexTemplate,
   wikiSubfolderIndexTemplate,
   wikiClaudeMdTemplate,
@@ -23,8 +22,6 @@ export async function ensureVaultStructure(): Promise<void> {
 
   // Create all required directories
   const dirs = [
-    // Memory layer — flat, no subfolders
-    path.join(vaultPath, CONFIG.MEMORY_FOLDER),
     // Wiki layer
     path.join(vaultPath, CONFIG.WIKI_FOLDER),
     ...CONFIG.WIKI_SUBFOLDERS.map((s) => path.join(vaultPath, CONFIG.WIKI_FOLDER, s)),
@@ -50,10 +47,6 @@ export async function ensureVaultStructure(): Promise<void> {
   }
 
   // Seed index files if absent
-  await seedFileIfAbsent(
-    path.join(vaultPath, CONFIG.MEMORY_FOLDER, CONFIG.INDEX_FILE),
-    memoryIndexTemplate(),
-  );
   await seedFileIfAbsent(
     path.join(vaultPath, CONFIG.WIKI_FOLDER, CONFIG.INDEX_FILE),
     wikiIndexTemplate(),
