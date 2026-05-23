@@ -7,13 +7,13 @@ tags:
   - reasoning
   - critical-thinking
   - validation
-  - mcp-phantom-brain
+  - mcp-brain
 created: '2026-05-23T00:04:53.098Z'
 updated: '2026-05-23T00:04:53.098Z'
 sources: []
 ---
 
-> **Purpose:** Reference for `mcp-phantom-brain` evaluation layer. Used when validating incoming claims before committing to memory. The evaluation prompt inlines the Quick Reference; this page is consulted for edge cases and full taxonomy.
+> **Purpose:** Reference for `mcp-brain` evaluation layer. Used when validating incoming claims before committing to memory. The evaluation prompt inlines the Quick Reference; this page is consulted for edge cases and full taxonomy.
 
 ---
 

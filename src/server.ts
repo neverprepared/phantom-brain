@@ -19,7 +19,7 @@ const _require = createRequire(import.meta.url);
 const { version: pkgVersion } = _require('../package.json') as { version: string };
 
 const SERVER_INFO = {
-  name: 'mcp-brain',
+  name: 'mcp-phantom-brain',
   version: pkgVersion,
 };
 
@@ -40,7 +40,7 @@ const handlers: Record<string, (args: unknown) => Promise<CallToolResult>> = {
 };
 
 export async function startServer(): Promise<void> {
-  logger.info('Starting mcp-brain server', {
+  logger.info('Starting mcp-phantom-brain server', {
     version: SERVER_INFO.version,
     vaultPath: CONFIG.VAULT_PATH,
   });

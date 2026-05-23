@@ -9,13 +9,13 @@ tags:
   - fuzzy-logic
   - paraconsistent
   - reasoning
-  - mcp-phantom-brain
+  - mcp-brain
 created: '2026-05-23T00:09:25.720Z'
 updated: '2026-05-23T00:09:25.720Z'
 sources: []
 ---
 
-> **Purpose:** Classical binary logic (true/false) is insufficient for many real-world claims. This reference provides `mcp-phantom-brain`'s fallback frameworks when a claim cannot be cleanly evaluated as simply true or false. Consult this when the evaluation layer encounters ambiguity, contradiction, time-sensitivity, or vagueness.
+> **Purpose:** Classical binary logic (true/false) is insufficient for many real-world claims. This reference provides `mcp-brain`'s fallback frameworks when a claim cannot be cleanly evaluated as simply true or false. Consult this when the evaluation layer encounters ambiguity, contradiction, time-sensitivity, or vagueness.
 
 ---
 

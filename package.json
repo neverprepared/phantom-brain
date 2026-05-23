@@ -1,11 +1,11 @@
 {
-  "name": "@mindmorass/mcp-brain",
+  "name": "@mindmorass/mcp-phantom-brain",
   "version": "0.1.0",
-  "description": "MCP brain — unified memory, reasoning, and validation server",
+  "description": "MCP phantom brain — unified memory, reasoning, and validation server",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
-    "mcp-brain": "./dist/index.js"
+    "mcp-phantom-brain": "./dist/index.js"
   },
   "files": [
     "dist"

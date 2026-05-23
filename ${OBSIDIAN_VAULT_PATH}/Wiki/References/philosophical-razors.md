@@ -8,13 +8,13 @@ tags:
   - reasoning
   - critical-thinking
   - validation
-  - mcp-phantom-brain
+  - mcp-brain
 created: '2026-05-23T00:08:48.911Z'
 updated: '2026-05-23T00:08:48.911Z'
 sources: []
 ---
 
-> **Purpose:** Razors are decision heuristics used by `mcp-phantom-brain` when choosing between competing explanations or evaluating whether a claim warrants serious consideration. Where fallacies identify *what's wrong* with an argument, razors guide *which explanation to prefer* when evidence is ambiguous.
+> **Purpose:** Razors are decision heuristics used by `mcp-brain` when choosing between competing explanations or evaluating whether a claim warrants serious consideration. Where fallacies identify *what's wrong* with an argument, razors guide *which explanation to prefer* when evidence is ambiguous.
 
 ---
 

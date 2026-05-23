@@ -1,5 +1,5 @@
 /**
- * Core lifecycle for mcp-brain: vault structure, seed reference wiki pages,
+ * Core lifecycle for mcp-phantom-brain: vault structure, seed reference wiki pages,
  * search index, vector index, working memory DB.
  */
 import fs from 'node:fs/promises';
