@@ -14,6 +14,12 @@ import { brainLearnToolDefinition, handleBrainLearn } from './tools/brain-learn.
 import { brainPerceiveToolDefinition, handleBrainPerceive } from './tools/brain-perceive.js';
 import { brainSynthesizeToolDefinition, handleBrainSynthesize } from './tools/brain-synthesize.js';
 import { brainReflectToolDefinition, handleBrainReflect } from './tools/brain-reflect.js';
+import {
+  taskStartToolDefinition, handleTaskStart,
+  taskUpdateToolDefinition, handleTaskUpdate,
+  taskCompleteToolDefinition, handleTaskComplete,
+  taskGetToolDefinition, handleTaskGet,
+} from './tools/task.js';
 
 const _require = createRequire(import.meta.url);
 const { version: pkgVersion } = _require('../package.json') as { version: string };
@@ -29,6 +35,10 @@ const toolDefinitions = [
   brainPerceiveToolDefinition,
   brainSynthesizeToolDefinition,
   brainReflectToolDefinition,
+  taskStartToolDefinition,
+  taskUpdateToolDefinition,
+  taskCompleteToolDefinition,
+  taskGetToolDefinition,
 ];
 
 const handlers: Record<string, (args: unknown) => Promise<CallToolResult>> = {
@@ -37,6 +47,10 @@ const handlers: Record<string, (args: unknown) => Promise<CallToolResult>> = {
   brain_perceive: handleBrainPerceive,
   brain_synthesize: handleBrainSynthesize,
   brain_reflect: handleBrainReflect,
+  task_start: handleTaskStart,
+  task_update: handleTaskUpdate,
+  task_complete: handleTaskComplete,
+  task_get: handleTaskGet,
 };
 
 export async function startServer(): Promise<void> {
