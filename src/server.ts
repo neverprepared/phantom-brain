@@ -10,10 +10,16 @@ import { createRequire } from 'node:module';
 import { initialize, shutdown, logger, CONFIG } from './core/index.js';
 
 import { brainRecallToolDefinition, handleBrainRecall } from './tools/brain-recall.js';
-import { brainRememberToolDefinition, handleBrainRemember } from './tools/brain-remember.js';
-import { brainCommitToolDefinition, handleBrainCommit } from './tools/brain-commit.js';
+import { brainLearnToolDefinition, handleBrainLearn } from './tools/brain-learn.js';
+import { brainPerceiveToolDefinition, handleBrainPerceive } from './tools/brain-perceive.js';
+import { brainSynthesizeToolDefinition, handleBrainSynthesize } from './tools/brain-synthesize.js';
 import { brainReflectToolDefinition, handleBrainReflect } from './tools/brain-reflect.js';
-import { brainWhyRejectedToolDefinition, handleBrainWhyRejected } from './tools/brain-why-rejected.js';
+import {
+  taskStartToolDefinition, handleTaskStart,
+  taskUpdateToolDefinition, handleTaskUpdate,
+  taskCompleteToolDefinition, handleTaskComplete,
+  taskGetToolDefinition, handleTaskGet,
+} from './tools/task.js';
 
 const _require = createRequire(import.meta.url);
 const { version: pkgVersion } = _require('../package.json') as { version: string };
@@ -25,18 +31,26 @@ const SERVER_INFO = {
 
 const toolDefinitions = [
   brainRecallToolDefinition,
-  brainRememberToolDefinition,
-  brainCommitToolDefinition,
+  brainLearnToolDefinition,
+  brainPerceiveToolDefinition,
+  brainSynthesizeToolDefinition,
   brainReflectToolDefinition,
-  brainWhyRejectedToolDefinition,
+  taskStartToolDefinition,
+  taskUpdateToolDefinition,
+  taskCompleteToolDefinition,
+  taskGetToolDefinition,
 ];
 
 const handlers: Record<string, (args: unknown) => Promise<CallToolResult>> = {
   brain_recall: handleBrainRecall,
-  brain_remember: handleBrainRemember,
-  brain_commit: handleBrainCommit,
+  brain_learn: handleBrainLearn,
+  brain_perceive: handleBrainPerceive,
+  brain_synthesize: handleBrainSynthesize,
   brain_reflect: handleBrainReflect,
-  brain_why_rejected: handleBrainWhyRejected,
+  task_start: handleTaskStart,
+  task_update: handleTaskUpdate,
+  task_complete: handleTaskComplete,
+  task_get: handleTaskGet,
 };
 
 export async function startServer(): Promise<void> {

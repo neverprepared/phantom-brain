@@ -34,6 +34,9 @@ export async function ensureVaultStructure(): Promise<void> {
     // Wiki layer
     path.join(vaultPath, CONFIG.WIKI_FOLDER),
     ...CONFIG.WIKI_SUBFOLDERS.map((s) => path.join(vaultPath, CONFIG.WIKI_FOLDER, s)),
+    // Phase 0: Wiki/summaries and Wiki/entities
+    path.join(vaultPath, CONFIG.WIKI_FOLDER, CONFIG.WIKI_SUMMARIES),
+    path.join(vaultPath, CONFIG.WIKI_FOLDER, CONFIG.WIKI_ENTITIES),
     // Output layer
     path.join(vaultPath, CONFIG.OUTPUT_FOLDER),
     path.join(vaultPath, CONFIG.OUTPUT_FOLDER, '_attachments'),
@@ -43,6 +46,13 @@ export async function ensureVaultStructure(): Promise<void> {
     path.join(vaultPath, CONFIG.INDEX_FOLDER),
     path.join(vaultPath, CONFIG.TEMPLATE_FOLDER),
     path.join(vaultPath, CONFIG.LOG_FOLDER),
+    // Phase 0: Raw / queue
+    path.join(vaultPath, CONFIG.RAW_FOLDER),
+    path.join(vaultPath, CONFIG.RAW_GATHERED),
+    path.join(vaultPath, CONFIG.RAW_CURATED),
+    path.join(vaultPath, CONFIG.QUEUE_FOLDER),
+    path.join(vaultPath, CONFIG.QUEUE_PENDING),
+    path.join(vaultPath, CONFIG.QUEUE_DONE),
   ];
 
   for (const dir of dirs) {
@@ -83,6 +93,16 @@ export async function ensureVaultStructure(): Promise<void> {
   await seedFileIfAbsent(
     path.join(vaultPath, CONFIG.WIKI_FOLDER, 'CLAUDE.md'),
     wikiClaudeMdTemplate(),
+  );
+
+  // Phase 0: seed provenance.json and Wiki/_log.md if absent
+  await seedFileIfAbsent(
+    path.join(vaultPath, CONFIG.INDEX_FOLDER, CONFIG.PROVENANCE_FILE),
+    '{}\n',
+  );
+  await seedFileIfAbsent(
+    path.join(vaultPath, CONFIG.WIKI_FOLDER, CONFIG.WIKI_LOG_FILE),
+    '# Brain Synthesis Log\n\nAppend-only log of synthesis events. Newest entries at the bottom.\n\n',
   );
 
   logger.info('Vault structure ensured', { vaultPath });

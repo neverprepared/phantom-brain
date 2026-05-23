@@ -28,6 +28,17 @@ export const CONFIG = {
   INDEX_FOLDER: '_index',
   TEMPLATE_FOLDER: '_templates',
   LOG_FOLDER: '_log',
+  // Brain model Phase 0 — Raw / queue / wiki extensions
+  RAW_FOLDER: 'Raw',
+  RAW_GATHERED: 'Raw/gathered',
+  RAW_CURATED: 'Raw/curated',
+  QUEUE_FOLDER: '_queue',
+  QUEUE_PENDING: '_queue/pending',
+  QUEUE_DONE: '_queue/done',
+  WIKI_SUMMARIES: 'summaries',   // subfolder under Wiki/
+  WIKI_ENTITIES: 'entities',     // subfolder under Wiki/
+  WIKI_LOG_FILE: '_log.md',      // under Wiki/
+  PROVENANCE_FILE: 'provenance.json',  // under _index/
   // Index file name used at each layer root and subfolder
   INDEX_FILE: '_index.md',
   // Limits
@@ -46,6 +57,9 @@ export const CONFIG = {
   EMBEDDING_MODEL: process.env['EMBEDDING_MODEL'] || 'nomic-embed-text',
   EMBEDDING_DIMS: parseInt(process.env['EMBEDDING_DIMS'] || '768', 10),
   EMBEDDING_BATCH_SIZE: parseInt(process.env['EMBEDDING_BATCH_SIZE'] || '50', 10),
+  // Gate (Phase 2) — LLM source-reliability judgment
+  GATE_MODEL: process.env['GATE_MODEL'] || 'claude-haiku-4-5-20251001',
+  GATE_ENABLED: process.env['GATE_ENABLED'] !== 'false',  // default on
 } as const;
 
 /** Default TTL by lifecycle status (days). Used when ttl_days not set on atom. */

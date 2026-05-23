@@ -1,263 +1,116 @@
-import { searchMemories, findByTitle } from '../vault/search.js';
-import { handleStore } from '../tools/store.js';
-import { handleUpdate } from '../tools/update.js';
-import { isFtsReady, searchFts } from '../vault/fts-index.js';
-import { appendToLog } from '../vault/filesystem.js';
-import { writeWikiFile } from '../wiki/filesystem.js';
+/**
+ * Phase 5 promotion: write medium/high task findings as a curated raw document
+ * and enqueue for brain_synthesize. The gate treats curated sources as trusted
+ * (skips LLM evaluation) so findings land in the Wiki without an extra API call.
+ *
+ * Low-importance findings are skipped — they're ephemeral and don't warrant
+ * long-term storage.
+ */
+import fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import path from 'node:path';
+import { appendToLog, writeAtomicFile } from '../vault/filesystem.js';
 import { slugFromTitle } from '../vault/naming.js';
-import type { Finding, MemoryType, TaskState } from './db.js';
-import type { LifecycleStatus } from '../schemas/frontmatter.js';
+import { readProvenance, isHashKnown } from '../vault/provenance.js';
+import { enqueueItem, type QueueItem } from '../vault/queue.js';
+import { CONFIG } from '../config.js';
+import { todayDateString, nowISO } from '../shared/utils.js';
+import type { Finding, TaskState } from './db.js';
 import { logger } from '../shared/logger.js';
 
-/** Lifecycle routing per memory_type */
-const LIFECYCLE_FOR_TYPE: Record<MemoryType, LifecycleStatus> = {
-  semantic: 'reference',
-  episodic: 'active',
-  procedural: 'reference',
-};
-
-const TTL_FOR_TYPE: Record<MemoryType, number> = {
-  semantic: 180,
-  episodic: 90,
-  procedural: 180,
-};
-
-/** Tags appended per memory_type to aid future retrieval */
-const EXTRA_TAGS: Record<MemoryType, string[]> = {
-  semantic: ['fact', 'semantic-memory'],
-  episodic: ['episode', 'working-memory-log'],
-  procedural: ['procedure', 'runbook'],
-};
-
-/**
- * Derives a short title from the first sentence of content.
- * Falls back to the first 80 chars if no sentence boundary is found.
- */
-function titleFromContent(content: string): string {
-  const clean = content
-    .replace(/\[From long-term memory\]/g, '')
-    .replace(/\*\*/g, '')
-    .trim();
-
-  const boundary = clean.search(/[.!?\n]/);
-  const raw = boundary > 0 ? clean.slice(0, boundary) : clean;
-  return raw.trim().slice(0, 80).trim() || 'Promoted finding';
+function sha256(content: string): string {
+  return createHash('sha256').update(content).digest('hex');
 }
 
-/**
- * Extracts simple keywords from a goal string for tag generation.
- */
-function keywordsFromGoal(goal: string): string[] {
-  const stopWords = new Set(['a', 'an', 'the', 'in', 'on', 'at', 'for', 'to', 'of', 'and', 'or', 'is', 'are', 'was', 'with', 'by', 'from', 'this', 'that']);
-  return goal
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter((w) => w.length > 3 && !stopWords.has(w))
-    .slice(0, 5);
+function buildFindingsDocument(state: TaskState, findings: Finding[]): string {
+  const goal = state.task.goal;
+  const completedAt = nowISO();
+
+  let doc = `# Task findings: ${goal}\n\n`;
+  doc += `**Task ID:** ${state.task.task_id}  \n`;
+  doc += `**Completed:** ${completedAt}  \n\n`;
+
+  const byType: Record<string, Finding[]> = {};
+  for (const f of findings) {
+    const t = f.memory_type ?? 'episodic';
+    (byType[t] ??= []).push(f);
+  }
+
+  for (const [type, group] of Object.entries(byType)) {
+    doc += `## ${type.charAt(0).toUpperCase() + type.slice(1)} findings\n\n`;
+    for (const f of group) {
+      const importance = f.importance !== 'medium' ? ` *(${f.importance})*` : '';
+      doc += `- ${f.content}${importance}\n`;
+    }
+    doc += '\n';
+  }
+
+  return doc;
 }
 
-/**
- * Attempts to find an existing Obsidian note that matches a finding's content.
- * Uses multiple strategies to prevent near-duplicate creation:
- * 1. Exact/partial title match via index
- * 2. FTS5 ranked search (when available)
- * 3. Keyword search fallback with score threshold
- * 4. Tag overlap (2+ shared tags)
- * Returns the memory ID if found, otherwise undefined.
- */
-async function findMatchingNote(title: string, tags: string[], content: string): Promise<string | undefined> {
-  try {
-    // 1. Direct title match (exact or partial via index)
-    const titleMatch = findByTitle(title);
-    if (titleMatch) {
-      return titleMatch.frontmatter.id;
-    }
-
-    // 2. FTS5 search on content for near-duplicate detection
-    if (isFtsReady()) {
-      // Search using first sentence of content for semantic match
-      const contentQuery = content.slice(0, 100).replace(/[^a-zA-Z0-9\s]/g, ' ').trim();
-      if (contentQuery.length > 10) {
-        const ftsHits = searchFts(contentQuery, 3);
-        for (const hit of ftsHits) {
-          // High FTS rank indicates strong content overlap
-          if (hit.rank > 5) {
-            logger.info('Dedup: found near-duplicate via FTS content match', { id: hit.id, rank: hit.rank });
-            return hit.id;
-          }
-        }
-      }
-    }
-
-    // 3. Search by title words
-    const titleQuery = title.slice(0, 40);
-    const results = await searchMemories({ query: titleQuery, limit: 5 });
-
-    for (const result of results) {
-      if (result.resultKind !== 'atom' || !result.entry) continue;
-
-      // Strong title match
-      if (result.score >= 10) {
-        return result.entry.frontmatter.id;
-      }
-
-      // Tag overlap match (2+ shared tags)
-      const entryTags = result.entry.frontmatter.tags.map((t) => t.toLowerCase());
-      const sharedTags = tags.filter((t) => entryTags.includes(t.toLowerCase()));
-      if (sharedTags.length >= 2) {
-        return result.entry.frontmatter.id;
-      }
-    }
-  } catch (err) {
-    logger.warn('Match search failed during promotion', { error: String(err) });
-  }
-
-  return undefined;
-}
-
-/**
- * Derive input_sources from artifact references that start with 'Input/'.
- */
-function extractInputSources(artifacts: TaskState['artifacts']): string[] {
-  return artifacts
-    .map((a) => a.reference)
-    .filter((ref) => ref.startsWith('Input/'));
-}
-
-async function promoteFinding(
-  finding: Finding,
-  goalTags: string[],
-  inputSources: string[],
-): Promise<'created' | 'appended' | 'skipped'> {
-  const memoryType = (finding.memory_type ?? 'episodic') as MemoryType;
-
-  // Skip seeded long-term memory findings — they already live in the vault
-  if (finding.content.startsWith('[From long-term memory]')) {
-    return 'skipped';
-  }
-
-  const title = titleFromContent(finding.content);
-  const lifecycleStatus = LIFECYCLE_FOR_TYPE[memoryType];
-  const ttlDays = TTL_FOR_TYPE[memoryType];
-  const tags = [...goalTags, ...EXTRA_TAGS[memoryType]];
-
-  // --- Procedural findings: write to Wiki/, create stub atom ---
-  if (memoryType === 'procedural') {
-    const wikiSlug = slugFromTitle(title);
-    const wikiRelPath = `Runbooks/${wikiSlug}.md`;
-    const wikiContent = `## Steps\n\n${finding.content}`;
-
-    try {
-      await writeWikiFile({
-        relPath: wikiRelPath,
-        mode: 'create',
-        content: wikiContent,
-        title,
-        kind: 'runbook',
-        tags,
-        sources: [],
-      });
-    } catch {
-      // May already exist — ignore creation errors, still create stub atom
-    }
-
-    // Create stub atom in Memory/ pointing to the wiki page
-    const stubContent = `Procedure captured as wiki runbook. See [[Wiki/${wikiRelPath.replace(/\.md$/, '')}]].`;
-    const result = await handleStore({
-      title,
-      content: stubContent,
-      lifecycle_status: lifecycleStatus,
-      tags,
-      source: 'conversation',
-      confidence: finding.importance === 'high' ? 'high' : 'medium',
-      related: [],
-      source_urls: [],
-      ttl_days: ttlDays,
-      ...(inputSources.length > 0 && { input_sources: inputSources }),
-    });
-
-    if (result.isError) {
-      logger.warn('Failed to create stub atom for procedural finding', { title });
-      return 'skipped';
-    }
-
-    await appendToLog(`promoted procedural: "${title}" → Wiki/${wikiRelPath}`);
-    logger.info('Promoted procedural finding to Wiki + stub atom', { title });
-    return 'created';
-  }
-
-  // --- Semantic / episodic findings ---
-  const content = finding.content;
-
-  const existingId = await findMatchingNote(title, tags, content);
-
-  if (existingId) {
-    const result = await handleUpdate({
-      id: existingId,
-      content: `\n\n---\n\n${content}`,
-      append: true,
-      add_tags: tags,
-    });
-
-    if (result.isError) {
-      logger.warn('Failed to append finding to existing note', { id: existingId });
-      return 'skipped';
-    }
-
-    await appendToLog(`promoted ${memoryType} (appended): "${title}" → id:${existingId}`);
-    logger.info('Appended finding to existing note', { id: existingId, title });
-    return 'appended';
-  }
-
-  const storeArgs: Record<string, unknown> = {
-    title,
-    content,
-    lifecycle_status: lifecycleStatus,
-    tags,
-    source: 'conversation',
-    confidence: finding.importance === 'high' ? 'high' : 'medium',
-    related: [],
-    source_urls: [],
-    ttl_days: ttlDays,
-  };
-
-  if (inputSources.length > 0) {
-    storeArgs['input_sources'] = inputSources;
-  }
-
-  const result = await handleStore(storeArgs);
-
-  if (result.isError) {
-    logger.warn('Failed to create note for finding', { title });
-    return 'skipped';
-  }
-
-  await appendToLog(`promoted ${memoryType} (created): "${title}"`);
-  logger.info('Created new note from finding', { title, lifecycleStatus, memoryType });
-  return 'created';
-}
-
-/**
- * Promotes all medium/high importance findings from a completed task to Obsidian.
- * Called automatically by task_complete.
- */
 export async function promoteTaskToVault(state: TaskState): Promise<{ created: number; appended: number; skipped: number }> {
   const counts = { created: 0, appended: 0, skipped: 0 };
-  const goalTags = keywordsFromGoal(state.task.goal);
-  const inputSources = extractInputSources(state.artifacts);
 
-  for (const finding of state.findings) {
-    if (finding.importance === 'low') continue;
-
-    const outcome = await promoteFinding(finding, goalTags, inputSources);
-    counts[outcome]++;
+  const promotable = (state.findings as Finding[]).filter(f => f.importance !== 'low');
+  if (promotable.length === 0) {
+    logger.info('No promotable findings (all low importance)', { task_id: state.task.task_id });
+    await appendToLog(`task-complete: no promotable findings for ${state.task.task_id}`);
+    return counts;
   }
 
-  logger.info('Task promotion complete', {
+  const content = buildFindingsDocument(state, promotable);
+  const contentHash = sha256(content);
+
+  const provenance = await readProvenance();
+  if (await isHashKnown(contentHash, provenance)) {
+    logger.info('Task findings already in vault (SHA256 match)', { task_id: state.task.task_id });
+    counts.skipped = promotable.length;
+    return counts;
+  }
+
+  const title = `Task findings: ${state.task.goal.slice(0, 60)}`;
+  const slug = slugFromTitle(title);
+  const date = todayDateString();
+  const curatedDir = path.join(CONFIG.VAULT_PATH, CONFIG.RAW_CURATED);
+  await fs.mkdir(curatedDir, { recursive: true });
+
+  let candidate = `${date}-${slug}`;
+  let counter = 2;
+  let targetPath = path.join(curatedDir, `${candidate}.md`);
+  while (true) {
+    try {
+      await fs.stat(targetPath);
+      candidate = `${date}-${slug}-${counter}`;
+      targetPath = path.join(curatedDir, `${candidate}.md`);
+      counter++;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') break;
+      throw err;
+    }
+  }
+
+  const rawPathRel = path.posix.join(CONFIG.RAW_CURATED, `${candidate}.md`);
+  await writeAtomicFile(targetPath, content);
+
+  const item: QueueItem = {
+    raw_path: rawPathRel,
+    source: 'curated',
+    captured_at: nowISO(),
+    title,
+    format: 'markdown',
+    content_hash: contentHash,
+  };
+  await enqueueItem(item);
+
+  counts.created = promotable.length;
+
+  logger.info('Task findings promoted to vault queue', {
     task_id: state.task.task_id,
-    ...counts,
+    raw_path: rawPathRel,
+    findings: counts.created,
   });
+
+  await appendToLog(`task-promoted: ${state.task.task_id} → ${rawPathRel} (${counts.created} findings)`);
 
   return counts;
 }
