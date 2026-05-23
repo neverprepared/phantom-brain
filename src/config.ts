@@ -17,12 +17,8 @@ export const CONFIG = {
   VAULT_PATH: resolveVaultPath(),
   // Layer folders
   MEMORY_FOLDER: 'Memory',
-  INPUT_FOLDER: 'Input',
-  INPUT_SUBFOLDERS: ['articles', 'docs', 'transcripts', 'notes'] as const,
   WIKI_FOLDER: 'Wiki',
   WIKI_SUBFOLDERS: [] as const,
-  OUTPUT_FOLDER: 'Output',
-  OUTPUT_SUBFOLDERS: ['articles', 'reports', 'decks'] as const,
   // System folders
   DAILY_FOLDER: '_daily',
   INDEX_FOLDER: '_index',
