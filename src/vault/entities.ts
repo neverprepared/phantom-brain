@@ -17,6 +17,7 @@ import path from 'node:path';
 import { CONFIG } from '../config.js';
 import { writeAtomicFile, withFileLock } from './filesystem.js';
 import { slugFromTitle } from './naming.js';
+import type { GateVerdict } from '../gate/evaluate.js';
 
 const GENERIC_SECTIONS = new Set<string>([
   'overview',
@@ -167,9 +168,21 @@ function escapeYamlString(s: string): string {
   return s.replace(/"/g, '\\"');
 }
 
-function reliabilityRow(sourceTitle: string, rawPath: string): string {
-  const safeTitle = sourceTitle.replace(/\|/g, '\\|');
-  return `| General content | pending | — | Phase 2 gate not yet run | [${safeTitle}](${rawPath}) |`;
+function escapeCell(s: string): string {
+  // Markdown table cells: escape pipes and collapse newlines so a single row
+  // stays on one line.
+  return s.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim();
+}
+
+function reliabilityRow(
+  sourceTitle: string,
+  rawPath: string,
+  verdict: GateVerdict,
+): string {
+  const safeTitle = escapeCell(sourceTitle);
+  const category = verdict.category ?? '—';
+  const reason = escapeCell(verdict.reason);
+  return `| General content | ${verdict.reliability} | ${category} | ${reason} | [${safeTitle}](${rawPath}) |`;
 }
 
 /**
@@ -183,8 +196,9 @@ export async function createEntityPage(opts: {
   rawPath: string;
   contentSnippet: string;
   now: string;
+  verdict: GateVerdict;
 }): Promise<void> {
-  const { name, absPath, sourceTitle, rawPath, contentSnippet, now } = opts;
+  const { name, absPath, sourceTitle, rawPath, contentSnippet, now, verdict } = opts;
   const ymd = ymdFromISO(now);
   const page =
     `---\n` +
@@ -201,7 +215,7 @@ export async function createEntityPage(opts: {
     `## Source Reliability\n\n` +
     `| Claim | Reliability | Category | Reason | Source |\n` +
     `|---|---|---|---|---|\n` +
-    `${reliabilityRow(sourceTitle, rawPath)}\n`;
+    `${reliabilityRow(sourceTitle, rawPath, verdict)}\n`;
 
   await withFileLock(absPath, async () => {
     await writeAtomicFile(absPath, page);
@@ -226,8 +240,9 @@ export async function appendToEntityPage(opts: {
   rawPath: string;
   contentSnippet: string;
   now: string;
+  verdict: GateVerdict;
 }): Promise<void> {
-  const { absPath, sourceTitle, rawPath, contentSnippet, now } = opts;
+  const { absPath, sourceTitle, rawPath, contentSnippet, now, verdict } = opts;
   const ymd = ymdFromISO(now);
 
   await withFileLock(absPath, async () => {
@@ -238,6 +253,7 @@ export async function appendToEntityPage(opts: {
       contentSnippet,
       now,
       ymd,
+      verdict,
     });
     await writeAtomicFile(absPath, updated);
   });
@@ -249,13 +265,14 @@ interface AppendOpts {
   contentSnippet: string;
   now: string;
   ymd: string;
+  verdict: GateVerdict;
 }
 
 function applyAppend(existing: string, opts: AppendOpts): string {
   let content = bumpFrontmatter(existing, opts.now);
 
   const newSection = `\n## From: ${opts.sourceTitle} (${opts.ymd})\n\n${opts.contentSnippet}\n`;
-  const newRow = reliabilityRow(opts.sourceTitle, opts.rawPath);
+  const newRow = reliabilityRow(opts.sourceTitle, opts.rawPath, opts.verdict);
 
   const reliabilityHeader = '## Source Reliability';
   const relIdx = content.indexOf(reliabilityHeader);

@@ -57,6 +57,9 @@ export const CONFIG = {
   EMBEDDING_MODEL: process.env['EMBEDDING_MODEL'] || 'nomic-embed-text',
   EMBEDDING_DIMS: parseInt(process.env['EMBEDDING_DIMS'] || '768', 10),
   EMBEDDING_BATCH_SIZE: parseInt(process.env['EMBEDDING_BATCH_SIZE'] || '50', 10),
+  // Gate (Phase 2) — LLM source-reliability judgment
+  GATE_MODEL: process.env['GATE_MODEL'] || 'claude-haiku-4-5-20251001',
+  GATE_ENABLED: process.env['GATE_ENABLED'] !== 'false',  // default on
 } as const;
 
 /** Default TTL by lifecycle status (days). Used when ttl_days not set on atom. */

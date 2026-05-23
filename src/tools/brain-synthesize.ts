@@ -40,6 +40,7 @@ import {
   buildContentSnippet,
 } from '../vault/entities.js';
 import { updateWikiIndex } from '../vault/wiki-index-md.js';
+import { runGate, type GateVerdict } from '../gate/evaluate.js';
 import { nowISO } from '../shared/utils.js';
 import { logger } from '../shared/logger.js';
 import { formatError } from '../shared/errors.js';
@@ -49,11 +50,11 @@ export const BrainSynthesizeSchema = z.object({}).strict();
 export const brainSynthesizeToolDefinition = {
   name: 'brain_synthesize',
   description:
-    'Process the next queued item from brain_learn. Reads the raw document, writes a summary ' +
-    'page to Wiki/summaries/, extracts entities and creates or appends to entity pages under ' +
-    'Wiki/entities/, refreshes the graduated Wiki/_index.md, appends a line to Wiki/_log.md, ' +
-    'and records the Raw -> Wiki mapping in _index/provenance.json. Reliability verdicts are ' +
-    'pending until Phase 2 implements the gate.',
+    'Process the next queued item from brain_learn. Reads the raw document, runs the Gate to ' +
+    'judge source reliability, writes a summary page to Wiki/summaries/, extracts entities and ' +
+    'creates or appends to entity pages under Wiki/entities/, refreshes the graduated ' +
+    'Wiki/_index.md, appends a line to Wiki/_log.md, and records the Raw -> Wiki mapping in ' +
+    '_index/provenance.json.',
   inputSchema: {
     type: 'object' as const,
     properties: {},
@@ -83,6 +84,10 @@ async function nextAvailableSummaryPath(slug: string): Promise<{ relPath: string
   }
 }
 
+function escapeYaml(s: string): string {
+  return s.replace(/"/g, '\\"');
+}
+
 function buildSummaryPage(opts: {
   title: string;
   rawPath: string;
@@ -90,12 +95,14 @@ function buildSummaryPage(opts: {
   capturedAt: string;
   synthesizedAt: string;
   body: string;
+  verdict: GateVerdict;
 }): string {
-  const { title, rawPath, sourceUrl, capturedAt, synthesizedAt, body } = opts;
-  const escapedTitle = title.replace(/"/g, '\\"');
+  const { title, rawPath, sourceUrl, capturedAt, synthesizedAt, body, verdict } = opts;
+  const escapedTitle = escapeYaml(title);
   const sourceUrlLine = sourceUrl ? `source_url: "${sourceUrl}"\n` : '';
   const truncated = body.slice(0, STUB_BODY_LIMIT);
   const truncatedNote = body.length > STUB_BODY_LIMIT ? '\n\n<!-- Body truncated at 2000 chars for Phase 0 stub -->' : '';
+  const categoryLine = verdict.category ? `category: ${verdict.category}\n` : '';
   return (
     `---\n` +
     `title: "${escapedTitle}"\n` +
@@ -104,7 +111,9 @@ function buildSummaryPage(opts: {
     sourceUrlLine +
     `captured_at: "${capturedAt}"\n` +
     `synthesized_at: "${synthesizedAt}"\n` +
-    `reliability: pending\n` +
+    `reliability: ${verdict.reliability}\n` +
+    categoryLine +
+    `reason: "${escapeYaml(verdict.reason)}"\n` +
     `tags: []\n` +
     `---\n\n` +
     `${truncated}${truncatedNote}\n\n` +
@@ -128,6 +137,16 @@ export async function runBrainSynthesize(_input: z.infer<typeof BrainSynthesizeS
     const rawAbsPath = path.join(CONFIG.VAULT_PATH, item.raw_path);
     const rawContent = await fs.readFile(rawAbsPath, 'utf-8');
 
+    // Phase 2 — Gate the source. runGate never throws; on any failure it
+    // returns a safe medium fallback so synthesis can proceed.
+    const verdict = await runGate({
+      title: item.title,
+      ...(item.source_url !== undefined && { sourceUrl: item.source_url }),
+      content: rawContent,
+      format: item.format,
+      source: item.source,
+    });
+
     const synthesizedAt = nowISO();
     const { relPath: summaryRel, absPath: summaryAbs, finalSlug } = await nextAvailableSummaryPath(slugFromTitle(item.title));
 
@@ -139,6 +158,7 @@ export async function runBrainSynthesize(_input: z.infer<typeof BrainSynthesizeS
       capturedAt: item.captured_at,
       synthesizedAt,
       body: rawContent,
+      verdict,
     });
     await writeAtomicFile(summaryAbs, page);
 
@@ -162,6 +182,7 @@ export async function runBrainSynthesize(_input: z.infer<typeof BrainSynthesizeS
             rawPath: item.raw_path,
             contentSnippet: snippet,
             now: synthesizedAt,
+            verdict,
           });
         } else {
           await appendToEntityPage({
@@ -170,6 +191,7 @@ export async function runBrainSynthesize(_input: z.infer<typeof BrainSynthesizeS
             rawPath: item.raw_path,
             contentSnippet: snippet,
             now: synthesizedAt,
+            verdict,
           });
         }
 
@@ -204,7 +226,7 @@ export async function runBrainSynthesize(_input: z.infer<typeof BrainSynthesizeS
       `- Source: ${item.raw_path}\n` +
       `- Summary: ${summaryRel}\n` +
       entitiesLine +
-      `- Gate: pending (Phase 2 not yet implemented)\n`;
+      `- Gate: ${verdict.reliability} — ${verdict.reason}\n`;
     await withFileLock(logPath, async () => {
       await fs.mkdir(path.dirname(logPath), { recursive: true });
       await fs.appendFile(logPath, logLine, 'utf-8');
@@ -216,7 +238,8 @@ export async function runBrainSynthesize(_input: z.infer<typeof BrainSynthesizeS
     const entry: ProvenanceEntry = {
       wiki_pages: [summaryRel, ...entityPagePaths],
       synthesized_at: synthesizedAt,
-      reliability: 'pending',
+      reliability: verdict.reliability,
+      ...(verdict.category !== undefined && { category: verdict.category }),
       content_hash: item.content_hash,
     };
     provenance[item.raw_path] = entry;
@@ -241,6 +264,8 @@ export async function runBrainSynthesize(_input: z.infer<typeof BrainSynthesizeS
       raw_path: item.raw_path,
       summary: summaryRel,
       entities: entityNamesProcessed.length,
+      reliability: verdict.reliability,
+      ...(verdict.category !== undefined && { category: verdict.category }),
     });
 
     return {
@@ -250,10 +275,11 @@ export async function runBrainSynthesize(_input: z.infer<typeof BrainSynthesizeS
       entity_pages: entityPagePaths,
       entities: entityNamesProcessed,
       synthesized_at: synthesizedAt,
+      gate: verdict,
       message:
         `Synthesized ${item.raw_path} -> ${summaryRel} ` +
         `(+${entityPagePaths.length} entity pages). ` +
-        `Phase 1 — Phase 2 will add gate verdicts.`,
+        `Gate: ${verdict.reliability}.`,
     };
   } catch (err) {
     // Restore the queue item so the next call can retry.
