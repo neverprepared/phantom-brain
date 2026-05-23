@@ -20,16 +20,47 @@ import { slugFromTitle } from './naming.js';
 import type { GateVerdict } from '../gate/evaluate.js';
 
 const GENERIC_SECTIONS = new Set<string>([
-  'overview',
-  'summary',
-  'introduction',
-  'conclusion',
-  'references',
-  'notes',
-  'background',
-  'context',
-  'example',
-  'examples',
+  // Document structure
+  'overview', 'summary', 'introduction', 'conclusion', 'abstract',
+  'references', 'notes', 'appendix', 'prerequisites', 'outline',
+  'background', 'context', 'example', 'examples', 'definition', 'definitions',
+
+  // Common blog/article section names
+  'tldr', 'tl;dr', 'motivation', 'problem', 'solution', 'approach',
+  'results', 'findings', 'discussion', 'analysis', 'evaluation',
+  'methodology', 'implementation', 'architecture', 'design',
+  'limitations', 'future work', 'related work', 'next steps',
+
+  // Content headings that appear repeatedly
+  'sources', 'resources', 'key insight', 'key insights', 'key points',
+  'key takeaways', 'takeaways', 'highlights', 'quick takeaways',
+  'performance', 'simplicity', 'transparency', 'comparison', 'criteria',
+
+  // Setup/guide sections
+  'setup', 'installation', 'usage', 'tutorial', 'guide', 'steps',
+  'workflow', 'process', 'getting started', 'quick start',
+
+  // FAQ-style sections
+  'faq', 'questions', 'tips', 'best practices', 'recommendations',
+
+  // Generic single-word concepts too broad to be entities
+  'data', 'model', 'training', 'testing', 'deployment', 'inference',
+  'metrics', 'benchmark', 'output', 'input', 'format', 'structure',
+  'action', 'acting', 'agents', 'control', 'agent',
+
+  // Generic 2-4 word section headings (not caught by the 5-word rule)
+  'article overview', 'core concept', 'core concepts', 'core thesis',
+  'current state', 'current capability', 'decision framework', 'decision reasoning',
+  'comparative positioning', 'comparative properties table',
+  'core architecture changes', 'core reasoning patterns', 'core skill categories',
+  'cost efficiency', 'better conciseness', 'agent compressor', 'gateway safety net',
+  'key distinction', 'key results', 'open problems', 'article body',
+  'hosting options', 'notable performance gains', 'memory system approaches',
+  'core architecture', 'architectural innovations', 'architectural convergence',
+  'code interpreter', 'web browser', 'file inspector', 'key findings',
+  'article header', 'navigation menu', 'assessment forms', 'featured blogs',
+  'footer information', 'tags', 'article overview', 'closing remarks',
+  'code example', 'quick start', 'short answer',
 ]);
 
 const MIN_ENTITY_LEN = 3;
@@ -63,14 +94,22 @@ export function extractEntities(content: string): string[] {
   };
 
   // 1. Level-2 headings — `## Heading text`
+  // Only extract headings that look like named entities, not document structure.
+  // Reject: ends with ':', starts with question/action words, has 5+ words.
+  const HEADING_REJECT_PREFIX = /^(what|why|how|when|where|who|the|a |an |is |are |was |were |does |do |can |will |should |getting |building |using |creating |adding |running |making |understanding |comparing |introducing )/i;
   const headingRegex = /^##\s+(.+?)\s*$/gm;
   let hmatch: RegExpExecArray | null;
   while ((hmatch = headingRegex.exec(content)) !== null) {
     const text = (hmatch[1] ?? '')
-      // strip trailing markdown anchor/id markers like {#foo}
       .replace(/\{#[^}]+\}\s*$/, '')
       .trim();
     if (!text) continue;
+    // Reject metadata-style headings (ending with colon)
+    if (text.endsWith(':')) continue;
+    // Reject sentence-like headings (5+ words are almost always section titles)
+    if (text.split(/\s+/).length >= 5) continue;
+    // Reject headings that read like section titles or questions
+    if (HEADING_REJECT_PREFIX.test(text)) continue;
     consider(text);
   }
 

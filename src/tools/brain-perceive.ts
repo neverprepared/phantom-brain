@@ -31,9 +31,10 @@ export const brainPerceiveToolDefinition = {
   name: 'brain_perceive',
   description:
     'Ingest a gathered web source into the brain pipeline. Writes to Raw/gathered/ and queues ' +
-    'for gate evaluation + synthesis. Use for web content fetched during research — the hook ' +
-    'calls this automatically on every WebFetch/WebSearch; use manually to re-ingest or force ' +
-    'content that the hook may have skipped. Duplicate content (SHA256 match) is a no-op.',
+    'for gate evaluation + synthesis. Call this manually after every WebFetch — pass the full ' +
+    'fetched content directly, do NOT summarize before ingesting. The raw content is what gets ' +
+    'indexed and synthesized; summaries belong in the Wiki, not Raw/. ' +
+    'Duplicate content (SHA256 match) is a no-op.',
   inputSchema: {
     type: 'object' as const,
     properties: {
