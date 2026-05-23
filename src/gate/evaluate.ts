@@ -34,7 +34,7 @@ export interface GateVerdict {
 }
 
 const CONTENT_PREVIEW_CHARS = 800;
-const GATE_TIMEOUT_MS = 15_000;
+const GATE_TIMEOUT_MS = 30_000;
 
 const VALID_RELIABILITIES = new Set<Reliability>(['high', 'medium', 'low', 'contested']);
 const VALID_CATEGORIES = new Set<GateCategory>(['source', 'formal', 'informal', 'philosophical']);
