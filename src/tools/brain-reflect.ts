@@ -18,8 +18,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { CONFIG } from '../config.js';
-import { readProvenance, upsertProvenanceEntry } from '../vault/provenance.js';
+import { readProvenance, upsertProvenanceEntry, deleteProvenanceEntry } from '../vault/provenance.js';
 import type { ProvenanceEntry } from '../vault/provenance.js';
+import { updateWikiIndex } from '../vault/wiki-index-md.js';
 import { writeAtomicFile } from '../vault/filesystem.js';
 import { runGate } from '../gate/evaluate.js';
 import { logger } from '../shared/logger.js';
@@ -137,7 +138,7 @@ export async function runBrainReflect(input: z.infer<typeof BrainReflectSchema>)
   const curatedFiles = await scanDir(CONFIG.RAW_CURATED);
   const orphanRaw = [...gatheredFiles, ...curatedFiles].filter(f => !provenanceKeys.has(f));
 
-  // 2. Broken provenance — entry exists but raw file was deleted
+  // 2. Broken provenance — entry exists but raw file was deleted; clean up automatically
   const brokenEntries: string[] = [];
   for (const rawPath of provenanceKeys) {
     try {
@@ -145,6 +146,12 @@ export async function runBrainReflect(input: z.infer<typeof BrainReflectSchema>)
     } catch {
       brokenEntries.push(rawPath);
     }
+  }
+  for (const rawPath of brokenEntries) {
+    await deleteProvenanceEntry(rawPath);
+  }
+  if (brokenEntries.length > 0) {
+    try { await updateWikiIndex(); } catch { /* non-fatal */ }
   }
 
   // 3. Stale gates — summaries whose gate reason is a known fallback phrase

@@ -17,6 +17,7 @@ export interface WikiIndexEntry {
   created: string;
   updated: string;
   body: string;
+  topic?: string;
 }
 
 let wikiIndex: Map<string, WikiIndexEntry> = new Map();
@@ -38,6 +39,7 @@ export async function buildIndex(): Promise<void> {
         created: typeof data['created'] === 'string' ? data['created'] : '',
         updated: typeof data['updated'] === 'string' ? data['updated'] : '',
         body: content.trim(),
+        ...(typeof data['topic'] === 'string' && data['topic'] ? { topic: data['topic'] } : {}),
       };
       const id = `wiki:${relPath}`;
       newWikiIndex.set(id, wEntry);
@@ -60,9 +62,9 @@ export function getWikiIndex(): Map<string, WikiIndexEntry> {
   return wikiIndex;
 }
 
-export function indexWikiEntry(relPath: string, title: string, kind: string, tags: string[], body: string, updated: string, created: string): void {
+export function indexWikiEntry(relPath: string, title: string, kind: string, tags: string[], body: string, updated: string, created: string, topic?: string): void {
   const id = `wiki:${relPath}`;
-  wikiIndex.set(id, { relPath, title, kind, tags, created, updated, body });
+  wikiIndex.set(id, { relPath, title, kind, tags, created, updated, body, ...(topic ? { topic } : {}) });
   upsertFts(id, title, tags, body);
   void embedText(buildEmbedText(title, tags, body)).then((embedding) => {
     if (embedding) upsertVector(id, embedding);
@@ -98,6 +100,7 @@ async function resolveWikiEntry(id: string): Promise<WikiIndexEntry | null> {
       created: typeof data['created'] === 'string' ? data['created'] : '',
       updated: typeof data['updated'] === 'string' ? data['updated'] : '',
       body: content.trim(),
+      ...(typeof data['topic'] === 'string' && data['topic'] ? { topic: data['topic'] } : {}),
     };
     wikiIndex.set(id, entry);
     logger.debug('wikiIndex cache miss — loaded from disk', { relPath });
@@ -125,6 +128,7 @@ export interface SearchOptions extends DateFilters {
   sort_by?: 'relevance' | 'created' | 'updated' | 'title';
   limit: number;
   search_mode?: 'auto' | 'keyword' | 'vector';
+  topic?: string;
 }
 
 export type SearchResultKind = 'atom' | 'wiki';
@@ -141,6 +145,7 @@ function passesWikiFilters(wEntry: WikiIndexEntry, options: Omit<SearchOptions, 
   if (options.freshness === 'stale') return false;
   if (options.lifecycle_status) return false;
   if (options.status) return false;
+  if (options.topic && wEntry.topic !== options.topic) return false;
 
   if (options.tags && options.tags.length > 0) {
     const mode = options.tag_mode ?? 'and';

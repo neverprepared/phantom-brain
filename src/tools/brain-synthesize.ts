@@ -310,7 +310,7 @@ export async function runBrainSynthesize(_input: z.infer<typeof BrainSynthesizeS
     // Index the new summary page so brain_recall sees it without a full rebuild.
     // relPath for the wiki index is relative to Wiki/, not the vault root.
     const wikiRelPath = path.posix.join(CONFIG.WIKI_SUMMARIES, `${finalSlug}.md`);
-    indexWikiEntry(wikiRelPath, item.title, 'summary', [], rawContent, synthesizedAt, synthesizedAt);
+    indexWikiEntry(wikiRelPath, item.title, 'summary', [], rawContent, synthesizedAt, synthesizedAt, verdict.topic);
 
     logger.info('brain_synthesize processed item', {
       raw_path: rawPath,

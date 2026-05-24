@@ -8,6 +8,10 @@ export const BrainRecallSchema = z.object({
   query: z.string().describe('What to look up in memory'),
   freshness: z.enum(['all', 'fresh', 'stale']).optional().default('all'),
   limit: z.number().optional().default(10),
+  topic: z.enum([
+    'agents', 'memory', 'governance', 'tools', 'training',
+    'infrastructure', 'knowledge', 'multiagent', 'general',
+  ]).optional().describe('Restrict results to a specific subject-matter topic'),
 });
 
 export const brainRecallToolDefinition = {
@@ -25,6 +29,11 @@ export const brainRecallToolDefinition = {
         description: 'Restrict to fresh (within TTL), stale (past TTL), or all atoms. Wiki pages are always fresh.',
       },
       limit: { type: 'number', description: 'Max results to return (default 10)' },
+      topic: {
+        type: 'string',
+        enum: ['agents', 'memory', 'governance', 'tools', 'training', 'infrastructure', 'knowledge', 'multiagent', 'general'],
+        description: 'Restrict results to a specific subject-matter topic',
+      },
     },
     required: ['query'],
   },
@@ -35,6 +44,7 @@ export async function runBrainRecall(input: z.infer<typeof BrainRecallSchema>) {
     query: input.query,
     limit: input.limit,
     freshness: input.freshness,
+    ...(input.topic ? { topic: input.topic } : {}),
   });
 
   const suggested_action: 'use_cached' | 'learn_first' = results.length === 0 ? 'learn_first' : 'use_cached';

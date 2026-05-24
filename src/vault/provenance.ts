@@ -74,6 +74,20 @@ export async function upsertProvenanceEntry(rawPath: string, entry: ProvenanceEn
 }
 
 /**
+ * Atomically delete a single entry from provenance.json.
+ * Reads the current file inside the lock so concurrent agents are not affected.
+ */
+export async function deleteProvenanceEntry(rawPath: string): Promise<void> {
+  const filePath = provenanceFilePath();
+  await withFileLock(filePath, async () => {
+    const map = await readProvenance();
+    if (!(rawPath in map)) return;
+    delete map[rawPath];
+    await writeAtomicFile(filePath, JSON.stringify(map, null, 2) + '\n');
+  });
+}
+
+/**
  * Check whether a content hash already appears in the provenance map.
  * Async to match the broader provenance API surface (callers will often
  * pair this with reads/writes that are async).
