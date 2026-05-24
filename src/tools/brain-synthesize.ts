@@ -73,12 +73,23 @@ export const brainSynthesizeToolDefinition = {
 const FETCH_TIMEOUT_MS = 20_000;
 const FETCH_MAX_BYTES = 2 * 1024 * 1024; // 2 MB
 
+class FetchError extends Error {
+  constructor(public readonly status: number, statusText: string) {
+    super(`HTTP ${status} ${statusText}`);
+  }
+}
+
+// 4xx errors (except 429 rate-limit) are permanent — retrying will never succeed.
+function isPermanentFetchError(err: unknown): boolean {
+  return err instanceof FetchError && err.status >= 400 && err.status < 500 && err.status !== 429;
+}
+
 async function fetchUrl(url: string): Promise<string> {
   const res = await fetch(url, {
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     headers: { 'User-Agent': 'mcp-phantom-brain/1.0 (+research-bot)' },
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+  if (!res.ok) throw new FetchError(res.status, res.statusText);
   const buf = await res.arrayBuffer();
   const bytes = new Uint8Array(buf.slice(0, FETCH_MAX_BYTES));
   return Buffer.from(bytes).toString('utf-8');
@@ -337,7 +348,26 @@ async function processOneItem() {
         `Gate: ${verdict.reliability}.`,
     };
   } catch (err) {
-    // Restore the queue item so the next call can retry.
+    if (isPermanentFetchError(err)) {
+      // Permanent fetch failure (e.g. 403, 404) — retrying will never succeed.
+      // Mark done so the item doesn't block the queue indefinitely.
+      try {
+        await markDone(claimedPath);
+      } catch (doneErr) {
+        logger.error('Failed to mark permanently-failed item done', { claimedPath, error: String(doneErr) });
+      }
+      logger.warn('brain_synthesize: permanent fetch failure — item discarded', {
+        url: item.source_url,
+        error: String(err),
+      });
+      return {
+        status: 'fetch_failed' as const,
+        source_url: item.source_url,
+        message: `Permanent fetch failure — item discarded: ${String(err)}`,
+      };
+    }
+
+    // Transient error — restore so the next call can retry.
     try {
       await unclaimItem(claimedPath);
     } catch (unclaimErr) {
