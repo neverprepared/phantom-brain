@@ -217,6 +217,32 @@ function callClaudeCLI(prompt: string, model: string, timeoutMs: number): Promis
 }
 
 /**
+ * Generate a concise LLM summary of raw content.
+ * Returns null on any failure so callers can fall back to raw content.
+ */
+export async function summarizeContent(opts: {
+  title: string;
+  content: string;
+}): Promise<string | null> {
+  if (!CONFIG.GATE_ENABLED) return null;
+
+  const preview = opts.content.slice(0, 8000);
+  const prompt =
+    `Summarize the following document into 3-5 concise paragraphs. ` +
+    `Capture the key claims, findings, named entities, and significance. ` +
+    `Write in third person. No headers, no bullet points — flowing prose only.\n\n` +
+    `Title: ${opts.title}\n\nContent:\n${preview}`;
+
+  try {
+    const text = await callClaudeCLI(prompt, CONFIG.GATE_MODEL, 45_000);
+    return text || null;
+  } catch (err) {
+    logger.warn('summarizeContent failed', { error: String(err) });
+    return null;
+  }
+}
+
+/**
  * Run the Gate against a source. Returns a verdict on every code path —
  * any failure degrades to a medium fallback rather than throwing.
  */

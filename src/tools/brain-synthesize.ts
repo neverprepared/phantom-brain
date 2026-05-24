@@ -41,12 +41,14 @@ import {
   buildContentSnippet,
 } from '../vault/entities.js';
 import { updateWikiIndex } from '../vault/wiki-index-md.js';
-import { runGate, type GateVerdict } from '../gate/evaluate.js';
+import { runGate, summarizeContent, type GateVerdict } from '../gate/evaluate.js';
 import { nowISO } from '../shared/utils.js';
 import { logger } from '../shared/logger.js';
 import { formatError } from '../shared/errors.js';
 
-export const BrainSynthesizeSchema = z.object({}).strict();
+export const BrainSynthesizeSchema = z.object({
+  count: z.number().int().min(1).max(20).optional().default(1),
+}).strict();
 
 export const brainSynthesizeToolDefinition = {
   name: 'brain_synthesize',
@@ -58,7 +60,12 @@ export const brainSynthesizeToolDefinition = {
     '_index/provenance.json.',
   inputSchema: {
     type: 'object' as const,
-    properties: {},
+    properties: {
+      count: {
+        type: 'number',
+        description: 'Number of queued items to process in one call (1–20, default 1). Use higher values to drain the queue hands-free.',
+      },
+    },
     additionalProperties: false,
   },
 };
@@ -163,7 +170,7 @@ function buildSummaryPage(opts: {
   );
 }
 
-export async function runBrainSynthesize(_input: z.infer<typeof BrainSynthesizeSchema>) {
+async function processOneItem() {
   const claim = await claimNextItem();
   if (!claim) {
     return {
@@ -214,6 +221,9 @@ export async function runBrainSynthesize(_input: z.infer<typeof BrainSynthesizeS
       source: item.source,
     });
 
+    // Distill raw content into a concise summary via LLM; fall back to full raw content.
+    const summaryBody = (await summarizeContent({ title: item.title, content: rawContent })) ?? rawContent;
+
     const synthesizedAt = nowISO();
     const { relPath: summaryRel, absPath: summaryAbs, finalSlug } = await nextAvailableSummaryPath(slugFromTitle(item.title));
 
@@ -224,7 +234,7 @@ export async function runBrainSynthesize(_input: z.infer<typeof BrainSynthesizeS
       ...(item.source_url !== undefined && { sourceUrl: item.source_url }),
       capturedAt: item.captured_at,
       synthesizedAt,
-      body: rawContent,
+      body: summaryBody,
       verdict,
     });
     await writeAtomicFile(summaryAbs, page);
@@ -303,7 +313,7 @@ export async function runBrainSynthesize(_input: z.infer<typeof BrainSynthesizeS
     // Index the new summary page so brain_recall sees it without a full rebuild.
     // relPath for the wiki index is relative to Wiki/, not the vault root.
     const wikiRelPath = path.posix.join(CONFIG.WIKI_SUMMARIES, `${finalSlug}.md`);
-    indexWikiEntry(wikiRelPath, item.title, 'summary', [], rawContent, synthesizedAt, synthesizedAt, verdict.topic);
+    indexWikiEntry(wikiRelPath, item.title, 'summary', [], summaryBody, synthesizedAt, synthesizedAt, verdict.topic);
 
     logger.info('brain_synthesize processed item', {
       raw_path: rawPath,
@@ -336,8 +346,37 @@ export async function runBrainSynthesize(_input: z.infer<typeof BrainSynthesizeS
         error: String(unclaimErr),
       });
     }
-    throw err;
+    return {
+      status: 'error' as const,
+      message: String(err),
+    };
   }
+}
+
+export async function runBrainSynthesize(input: z.infer<typeof BrainSynthesizeSchema>) {
+  const { count } = input;
+
+  if (count === 1) {
+    return processOneItem();
+  }
+
+  const results: Awaited<ReturnType<typeof processOneItem>>[] = [];
+  for (let i = 0; i < count; i++) {
+    const result = await processOneItem();
+    results.push(result);
+    if (result.status === 'empty') break;
+  }
+
+  const synthesized = results.filter(r => r.status === 'synthesized').length;
+  const errors = results.filter(r => r.status === 'error').length;
+  return {
+    status: 'batch' as const,
+    results,
+    synthesized,
+    errors,
+    queue_empty: results[results.length - 1]?.status === 'empty',
+    message: `Batch complete: ${synthesized} synthesized, ${errors} errors.`,
+  };
 }
 
 export async function handleBrainSynthesize(args: unknown): Promise<CallToolResult> {

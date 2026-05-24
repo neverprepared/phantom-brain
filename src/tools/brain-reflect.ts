@@ -239,6 +239,66 @@ export async function runBrainReflect(input: z.infer<typeof BrainReflectSchema>)
     await upsertProvenanceEntry(rawPath, entry);
   }
 
+  // 5. Prune done/ queue items older than 30 days
+  const DONE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+  let donesPruned = 0;
+  try {
+    const doneDir = path.join(CONFIG.VAULT_PATH, CONFIG.QUEUE_DONE);
+    const doneEntries = await fs.readdir(doneDir).catch(() => [] as string[]);
+    const now = Date.now();
+    await Promise.all(doneEntries.map(async (name) => {
+      const filePath = path.join(doneDir, name);
+      try {
+        const stat = await fs.stat(filePath);
+        if (now - stat.mtimeMs > DONE_MAX_AGE_MS) {
+          await fs.unlink(filePath);
+          donesPruned++;
+        }
+      } catch { /* best-effort */ }
+    }));
+  } catch { /* done dir may not exist */ }
+
+  // 6. Rotate Wiki/_log.md if it exceeds 5000 lines
+  const LOG_MAX_LINES = 5000;
+  const LOG_KEEP_LINES = 4000;
+  let logRotated = false;
+  try {
+    const logPath = path.join(CONFIG.VAULT_PATH, CONFIG.WIKI_FOLDER, CONFIG.WIKI_LOG_FILE);
+    const logContent = await fs.readFile(logPath, 'utf-8').catch(() => '');
+    const lines = logContent.split('\n');
+    if (lines.length > LOG_MAX_LINES) {
+      const kept = lines.slice(-LOG_KEEP_LINES);
+      const notice = `# Log rotated at ${new Date().toISOString()} — older entries trimmed\n`;
+      await writeAtomicFile(logPath, notice + kept.join('\n'));
+      logRotated = true;
+      logger.info('brain_reflect rotated _log.md', { from: lines.length, to: kept.length });
+    }
+  } catch { /* log may not exist yet */ }
+
+  // 7. Reap dead working-memory shards (wm-<pid>.sqlite in _index/)
+  let shardsReaped = 0;
+  try {
+    const indexDir = path.join(CONFIG.VAULT_PATH, CONFIG.INDEX_FOLDER);
+    const indexEntries = await fs.readdir(indexDir).catch(() => [] as string[]);
+    await Promise.all(indexEntries
+      .filter(name => /^wm-\d+\.sqlite$/.test(name))
+      .map(async (name) => {
+        const pid = parseInt(name.slice(3, -7), 10);
+        let alive = false;
+        try { process.kill(pid, 0); alive = true; } catch { alive = false; }
+        if (!alive) {
+          // Delete the shard and any WAL/SHM companions
+          const base = path.join(indexDir, name);
+          await fs.unlink(base).catch(() => {});
+          await fs.unlink(base + '-wal').catch(() => {});
+          await fs.unlink(base + '-shm').catch(() => {});
+          shardsReaped++;
+          logger.info('brain_reflect reaped dead WM shard', { name });
+        }
+      })
+    );
+  } catch { /* best-effort */ }
+
   const issueCount = orphanRaw.length + brokenEntries.length + duplicateUrls.length;
   const status = issueCount === 0 && staleEntries.length === 0 ? 'ok' : 'issues_found';
 
@@ -253,6 +313,9 @@ export async function runBrainReflect(input: z.infer<typeof BrainReflectSchema>)
     );
   }
   if (duplicateUrls.length > 0) messageParts.push(`${duplicateUrls.length} URL(s) synthesized more than once.`);
+  if (donesPruned > 0) messageParts.push(`${donesPruned} done/ queue file(s) pruned.`);
+  if (logRotated) messageParts.push(`Wiki/_log.md rotated.`);
+  if (shardsReaped > 0) messageParts.push(`${shardsReaped} dead WM shard(s) reaped.`);
   if (issueCount === 0 && staleEntries.length === 0) messageParts.push('Wiki is clean.');
 
   logger.info('brain_reflect complete', {
@@ -261,6 +324,9 @@ export async function runBrainReflect(input: z.infer<typeof BrainReflectSchema>)
     stale: staleEntries.length,
     re_gated: reGated.length,
     duplicates: duplicateUrls.length,
+    donesPruned,
+    logRotated,
+    shardsReaped,
   });
 
   return {
@@ -271,6 +337,9 @@ export async function runBrainReflect(input: z.infer<typeof BrainReflectSchema>)
     stale_gates: staleEntries.map(e => ({ raw_path: e.rawPath, summary: e.summaryPath, reason: e.oldReason })),
     re_gated: reGated,
     duplicate_urls: duplicateUrls,
+    done_queue_pruned: donesPruned,
+    log_rotated: logRotated,
+    wm_shards_reaped: shardsReaped,
     message: messageParts.join(' '),
   };
 }
