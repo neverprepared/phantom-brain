@@ -117,6 +117,8 @@ function collectOrphanedTasks(): OrphanedTask[] {
 export function initWorkingDb(): OrphanedTask[] {
   const wmDbPath = getWmDbPath();
   db = new Database(wmDbPath);
+  db.pragma('journal_mode = WAL');
+  db.pragma('busy_timeout = 5000');
 
   db.exec(`
     DROP TABLE IF EXISTS questions;
