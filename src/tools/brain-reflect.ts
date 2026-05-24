@@ -18,7 +18,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { CONFIG } from '../config.js';
-import { readProvenance, writeProvenance } from '../vault/provenance.js';
+import { readProvenance, upsertProvenanceEntry } from '../vault/provenance.js';
+import type { ProvenanceEntry } from '../vault/provenance.js';
 import { writeAtomicFile } from '../vault/filesystem.js';
 import { runGate } from '../gate/evaluate.js';
 import { logger } from '../shared/logger.js';
@@ -155,6 +156,9 @@ export async function runBrainReflect(input: z.infer<typeof BrainReflectSchema>)
     newReliability: string;
     newReason: string;
   }> = [];
+  // Collect provenance updates separately so we apply them atomically per-entry
+  // rather than bulk-writing the stale snapshot read at the start of this pass.
+  const provenanceUpdates: Array<{ rawPath: string; entry: ProvenanceEntry }> = [];
 
   for (const [rawPath, entry] of Object.entries(provenance)) {
     const summaryPath = entry.wiki_pages.find(p => p.includes('/summaries/'));
@@ -187,11 +191,14 @@ export async function runBrainReflect(input: z.infer<typeof BrainReflectSchema>)
       };
       await writeAtomicFile(summaryAbs, patchFrontmatter(summaryContent, patches));
 
-      provenance[rawPath] = {
-        ...entry,
-        reliability: verdict.reliability,
-        ...(verdict.category ? { category: verdict.category } : {}),
-      };
+      provenanceUpdates.push({
+        rawPath,
+        entry: {
+          ...entry,
+          reliability: verdict.reliability,
+          ...(verdict.category ? { category: verdict.category } : {}),
+        },
+      });
 
       reGated.push({
         rawPath,
@@ -221,8 +228,8 @@ export async function runBrainReflect(input: z.infer<typeof BrainReflectSchema>)
     .filter(([, paths]) => paths.length > 1)
     .map(([url, summaries]) => ({ url, summaries }));
 
-  if (reGated.length > 0) {
-    await writeProvenance(provenance);
+  for (const { rawPath, entry } of provenanceUpdates) {
+    await upsertProvenanceEntry(rawPath, entry);
   }
 
   const issueCount = orphanRaw.length + brokenEntries.length + duplicateUrls.length;
