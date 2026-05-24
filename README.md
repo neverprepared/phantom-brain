@@ -8,7 +8,7 @@ Content enters through a **Raw → Gate → Wiki** pipeline. Sources are validat
 
 1. **Ingest** — `brain_perceive` (web content) or `brain_learn` (curated docs) writes raw content to `Raw/` and enqueues it for processing.
 2. **Gate** — `brain_synthesize` claims the next queue item and runs the Gate: a `claude` CLI call that scores the source for reliability (`high | medium | low | contested`), flags the failure category if unreliable, and classifies the subject-matter topic (`agents | memory | governance | tools | ...`).
-3. **Synthesize** — the summary page is written to `Wiki/summaries/`, named entities are extracted and fanned out to `Wiki/entities/`, and the `Raw → Wiki` mapping is recorded in `provenance.json`.
+3. **Synthesize** — the raw content is distilled into a concise prose summary via LLM, written to `Wiki/summaries/`, named entities are extracted from the raw content and fanned out to `Wiki/entities/`, and the `Raw → Wiki` mapping is recorded in `provenance.json`.
 4. **Recall** — `brain_recall` searches summaries and entity pages via hybrid FTS5 + vector RRF, with optional topic pre-filtering.
 
 ## Tools
@@ -17,9 +17,9 @@ Content enters through a **Raw → Gate → Wiki** pipeline. Sources are validat
 |---|---|
 | `brain_perceive` | Ingest a gathered web source (URL + content) into the pipeline |
 | `brain_learn` | Ingest a curated document (human-trusted content) into the pipeline |
-| `brain_synthesize` | Process the next queued item: run Gate, write summary + entity pages |
+| `brain_synthesize` | Process 1–20 queued items: run Gate, distill summary via LLM, write summary + entity pages |
 | `brain_recall` | Hybrid FTS5 + vector search; optional `topic` filter |
-| `brain_reflect` | Maintenance pass: orphan detection, stale gate re-scoring, broken provenance cleanup, duplicate URL flagging |
+| `brain_reflect` | Maintenance pass: orphan detection, stale gate re-scoring, broken provenance cleanup, duplicate URL flagging, done/ pruning, log rotation, dead shard reaping |
 | `brain_trace` | Query the synthesis audit trail (`_log.md`) by text, reliability, or date |
 | `task_start` | Create a working memory task, auto-seeded from vault context |
 | `task_update` | Append findings, steps, artifacts, and open questions to an active task |

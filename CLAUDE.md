@@ -39,9 +39,9 @@ mcp-phantom-brain is a **Model Context Protocol server** implementing a Raw → 
 |---|---|---|
 | `brain_learn` | `tools/brain-learn.ts` | Ingest a curated document into `Raw/curated/` and enqueue for synthesis |
 | `brain_perceive` | `tools/brain-perceive.ts` | Ingest a gathered web source into `Raw/gathered/` and enqueue for gate + synthesis |
-| `brain_synthesize` | `tools/brain-synthesize.ts` | Claim next queue item, run the Gate, write summary + entity pages, append to `_log.md` |
+| `brain_synthesize` | `tools/brain-synthesize.ts` | Claim 1–20 queue items (`count` param), run the Gate, distill summary via LLM, write summary + entity pages, append to `_log.md` |
 | `brain_recall` | `tools/brain-recall.ts` | FTS5 + vector hybrid search over Wiki summaries and entity pages; supports `topic` filter |
-| `brain_reflect` | `tools/brain-reflect.ts` | Maintenance pass: orphan detection, stale gate re-scoring, broken provenance auto-cleanup, duplicate URL flagging |
+| `brain_reflect` | `tools/brain-reflect.ts` | Maintenance pass: orphan detection, stale gate re-scoring, broken provenance auto-cleanup, duplicate URL flagging, done/ pruning (30d), log rotation (5000-line cap), dead WM shard reaping |
 | `brain_trace` | `tools/brain-trace.ts` | Query `Wiki/_log.md` synthesis audit trail; filter by query, reliability, or date |
 | `task_start` | `tools/task.ts` | Create a working memory task, auto-seeded from vault context |
 | `task_update` | `tools/task.ts` | Append findings, steps, artifacts, and open questions to an active task |
@@ -51,7 +51,7 @@ mcp-phantom-brain is a **Model Context Protocol server** implementing a Raw → 
 ### Ingest → Synthesis pipeline
 
 1. **`brain_learn`** (curated) or **`brain_perceive`** (gathered) writes raw content to `Raw/` and enqueues a `QueueItem` in `_index/queue/`.
-2. **`brain_synthesize`** claims one queue item, runs the Gate (`src/gate/evaluate.ts`), writes a summary page to `Wiki/summaries/`, fans out into entity pages under `Wiki/entities/`, appends a log line to `Wiki/_log.md`, and records the `Raw → Wiki` mapping in `_index/provenance.json`.
+2. **`brain_synthesize`** claims 1–20 queue items (optional `count` parameter, default 1), runs the Gate (`src/gate/evaluate.ts`), distills the raw content into concise prose via `summarizeContent()` (falls back to raw content on failure), writes the summary page to `Wiki/summaries/`, fans out into entity pages under `Wiki/entities/` (entity extraction still runs on raw content for full coverage), appends a log line to `Wiki/_log.md`, and records the `Raw → Wiki` mapping in `_index/provenance.json`.
 3. **`brain_recall`** searches the indexed summaries and entity pages via hybrid RRF (FTS5 + vector). Supports optional `topic` filter to scope results to a subject-matter bucket.
 4. **`brain_trace`** queries the append-only `_log.md` for audit and debugging.
 
@@ -73,6 +73,8 @@ Duplicate detection is by SHA256 at ingest time — re-submitting the same byte-
 Domain tiers: `authoritative | credible | unknown | low_quality`.
 
 The `topic` field is written to summary page frontmatter (`topic: agents`) and used by `brain_recall` for pre-filter scoping.
+
+`summarizeContent()` is also exported from `evaluate.ts`. It reuses `callClaudeCLI` with a 45s timeout and generates a 3–5 paragraph prose distillation of the raw content. Returns `null` on any failure (gate disabled, CLI error, timeout) so callers can fall back to raw content.
 
 ### Vault structure
 
@@ -117,7 +119,7 @@ Per-process SQLite DB (`_index/wm-<pid>.sqlite`) tracks in-progress tasks with f
 - `retrieval.ts` — seeds new tasks with relevant vault context via `brain_recall`
 - `promotion.ts` — on `task_complete`, promotes medium/high findings to `Raw/curated/` queue for synthesis
 
-Dead-process shards are detected at startup, orphaned active tasks are collected, and the shard files are deleted.
+Dead-process shards are detected at startup (orphaned active tasks collected, shard deleted) and also reaped by `brain_reflect` on every maintenance pass.
 
 ### Multi-agent safety
 
