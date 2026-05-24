@@ -146,6 +146,7 @@ function buildSummaryPage(opts: {
   const escapedTitle = escapeYaml(title);
   const sourceUrlLine = sourceUrl ? `source_url: "${sourceUrl}"\n` : '';
   const categoryLine = verdict.category ? `category: ${verdict.category}\n` : '';
+  const topicLine = verdict.topic ? `topic: ${verdict.topic}\n` : '';
   return (
     `---\n` +
     `title: "${escapedTitle}"\n` +
@@ -156,6 +157,7 @@ function buildSummaryPage(opts: {
     `synthesized_at: "${synthesizedAt}"\n` +
     `reliability: ${verdict.reliability}\n` +
     categoryLine +
+    topicLine +
     `reason: "${escapeYaml(verdict.reason)}"\n` +
     `tags: []\n` +
     `---\n\n` +

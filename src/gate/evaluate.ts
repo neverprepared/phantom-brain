@@ -26,10 +26,21 @@ import { logger } from '../shared/logger.js';
 
 export type Reliability = 'high' | 'medium' | 'low' | 'contested';
 export type GateCategory = 'source' | 'formal' | 'informal' | 'philosophical';
+export type GateTopic =
+  | 'agents'        // AI agents, agentic systems, agent frameworks
+  | 'memory'        // memory systems, context management, RAG
+  | 'governance'    // HITL, autonomy, AI regulation, risk
+  | 'tools'         // tool use, function calling, MCP
+  | 'training'      // fine-tuning, synthetic data, model training
+  | 'infrastructure'// vector DBs, deployment, embeddings, scaling
+  | 'knowledge'     // knowledge management, wikis, note-taking
+  | 'multiagent'    // multi-agent orchestration, swarms
+  | 'general';      // doesn't fit elsewhere
 
 export interface GateVerdict {
   reliability: Reliability;
   category?: GateCategory;  // required when reliability is 'low' or 'contested'
+  topic?: GateTopic;
   reason: string;
 }
 
@@ -38,6 +49,10 @@ const GATE_TIMEOUT_MS = 30_000;
 
 const VALID_RELIABILITIES = new Set<Reliability>(['high', 'medium', 'low', 'contested']);
 const VALID_CATEGORIES = new Set<GateCategory>(['source', 'formal', 'informal', 'philosophical']);
+const VALID_TOPICS = new Set<GateTopic>([
+  'agents', 'memory', 'governance', 'tools', 'training',
+  'infrastructure', 'knowledge', 'multiagent', 'general',
+]);
 
 const CURATED_VERDICT: GateVerdict = {
   reliability: 'medium',
@@ -82,10 +97,21 @@ function buildGatePrompt(opts: {
     `- medium: credible domain, secondary source, minor bias, useful with caveats\n` +
     `- low: unknown domain, clear commercial interest, vendor documentation, weak evidence\n` +
     `- contested: contradicts established knowledge, logical fallacies undermine credibility, extraordinary claims without evidence\n\n` +
+    `Topic classification (pick the single best fit):\n` +
+    `- agents: AI agents, agentic systems, agent frameworks\n` +
+    `- memory: memory systems, context management, RAG\n` +
+    `- governance: HITL, autonomy, AI regulation, risk\n` +
+    `- tools: tool use, function calling, MCP\n` +
+    `- training: fine-tuning, synthetic data, model training\n` +
+    `- infrastructure: vector DBs, deployment, embeddings, scaling\n` +
+    `- knowledge: knowledge management, wikis, note-taking\n` +
+    `- multiagent: multi-agent orchestration, swarms\n` +
+    `- general: doesn't fit elsewhere\n\n` +
     `Respond with ONLY valid JSON. No explanation outside the JSON.\n\n` +
-    `For high or medium: {"reliability": "high", "reason": "one sentence"}\n` +
-    `For low or contested: {"reliability": "low", "category": "source", "reason": "one sentence"}\n` +
-    `Valid categories: source | formal | informal | philosophical`
+    `For high or medium: {"reliability": "high", "topic": "agents", "reason": "one sentence"}\n` +
+    `For low or contested: {"reliability": "low", "category": "source", "topic": "agents", "reason": "one sentence"}\n` +
+    `Valid categories: source | formal | informal | philosophical\n` +
+    `Valid topics: agents | memory | governance | tools | training | infrastructure | knowledge | multiagent | general`
   );
 }
 
@@ -137,8 +163,13 @@ function coerceVerdict(parsed: unknown): GateVerdict {
       verdict.category = 'source';
     }
   } else if (typeof category === 'string' && VALID_CATEGORIES.has(category as GateCategory)) {
-    // Optional for high/medium, but honor it if the model supplied a valid one.
     verdict.category = category as GateCategory;
+  }
+
+  // Topic — optional but always honored when valid.
+  const topic = obj['topic'];
+  if (typeof topic === 'string' && VALID_TOPICS.has(topic as GateTopic)) {
+    verdict.topic = topic as GateTopic;
   }
 
   return verdict;
