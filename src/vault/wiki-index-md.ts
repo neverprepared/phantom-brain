@@ -15,8 +15,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { CONFIG } from '../config.js';
 import { writeAtomicFile, withFileLock } from './filesystem.js';
-import { readProvenance } from './provenance.js';
-import type { ProvenanceMap } from './provenance.js';
+import { readProvenance, type ProvenanceMap } from './provenance.js';
 
 const PRIMARY_HEADING = '## Primary Topics';
 const EMERGING_HEADING = '## Emerging Topics';
