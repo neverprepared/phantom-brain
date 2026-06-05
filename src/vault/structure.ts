@@ -29,9 +29,7 @@ export async function ensureVaultStructure(): Promise<void> {
     path.join(vaultPath, CONFIG.WIKI_FOLDER, CONFIG.WIKI_SUMMARIES),
     path.join(vaultPath, CONFIG.WIKI_FOLDER, CONFIG.WIKI_ENTITIES),
     // System folders
-    path.join(vaultPath, CONFIG.DAILY_FOLDER),
     path.join(vaultPath, CONFIG.INDEX_FOLDER),
-    path.join(vaultPath, CONFIG.TEMPLATE_FOLDER),
     path.join(vaultPath, CONFIG.LOG_FOLDER),
     // Phase 0: Raw / queue
     path.join(vaultPath, CONFIG.RAW_FOLDER),

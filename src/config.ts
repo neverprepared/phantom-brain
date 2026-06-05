@@ -19,9 +19,7 @@ export const CONFIG = {
   WIKI_FOLDER: 'Wiki',
   WIKI_SUBFOLDERS: [] as const,
   // System folders
-  DAILY_FOLDER: '_daily',
   INDEX_FOLDER: '_index',
-  TEMPLATE_FOLDER: '_templates',
   LOG_FOLDER: '_log',
   // Brain model Phase 0 — Raw / queue / wiki extensions
   RAW_FOLDER: 'Raw',

@@ -71,27 +71,6 @@ export async function listAllWikiFiles(): Promise<WikiFileEntry[]> {
 }
 
 // ---------------------------------------------------------------------------
-// Daily note append (atom creation log — unchanged)
-// ---------------------------------------------------------------------------
-
-export async function appendToDaily(line: string): Promise<void> {
-  const today = todayDateString();
-  const dailyPath = path.join(CONFIG.VAULT_PATH, CONFIG.DAILY_FOLDER, `${today}.md`);
-
-  await withFileLock(dailyPath, async () => {
-    let existing = '';
-    try {
-      existing = await fs.readFile(dailyPath, 'utf-8');
-    } catch {
-      existing = `# ${today}\n\n`;
-    }
-    const updated = existing.trimEnd() + '\n' + line + '\n';
-    await fs.mkdir(path.dirname(dailyPath), { recursive: true });
-    await writeAtomicFile(dailyPath, updated);
-  });
-}
-
-// ---------------------------------------------------------------------------
 // Provenance log — daily-rotated, append-only, server-internal
 // ---------------------------------------------------------------------------
 
