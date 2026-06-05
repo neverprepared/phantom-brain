@@ -6,7 +6,7 @@ Content enters through a **Raw → Gate → Wiki** pipeline. Sources are validat
 
 ## How it works
 
-1. **Ingest** — `brain_perceive` (web content) or `brain_learn` (curated docs) writes raw content to `Raw/` and enqueues it for processing.
+1. **Ingest** — `brain_perceive` (web content), `brain_learn` (curated docs), or `brain_attach` (binary files: PDF, Word, images) writes raw content to `Raw/` and enqueues it for processing. Both `brain_learn` and `brain_perceive` accept a single item or a batch of up to 100 via `items[]`.
 2. **Gate** — `brain_synthesize` claims the next queue item and runs the Gate: a `claude` CLI call that scores the source for reliability (`high | medium | low | contested`), flags the failure category if unreliable, and classifies the subject-matter topic (`agents | memory | governance | tools | ...`).
 3. **Synthesize** — the raw content is distilled into a concise prose summary via LLM, written to `Wiki/summaries/`, named entities are extracted from the raw content and fanned out to `Wiki/entities/`, and the `Raw → Wiki` mapping is recorded in `provenance.json`.
 4. **Recall** — `brain_recall` searches summaries and entity pages via hybrid FTS5 + vector RRF, with optional topic pre-filtering.
@@ -15,8 +15,9 @@ Content enters through a **Raw → Gate → Wiki** pipeline. Sources are validat
 
 | Tool | Purpose |
 |---|---|
-| `brain_perceive` | Ingest a gathered web source (URL + content) into the pipeline |
-| `brain_learn` | Ingest a curated document (human-trusted content) into the pipeline |
+| `brain_perceive` | Ingest a gathered web source (URL + content). Single item or batch via `items[]` (up to 100) |
+| `brain_learn` | Ingest a curated document (human-trusted content). Single item or batch via `items[]` (up to 100) |
+| `brain_attach` | Ingest a binary file (PDF, Word, image). Stores raw binary in `Raw/attachments/`, extracts text, queues for synthesis |
 | `brain_synthesize` | Process 1–20 queued items: run Gate, distill summary via LLM, write summary + entity pages |
 | `brain_recall` | Hybrid FTS5 + vector search; optional `topic` filter |
 | `brain_reflect` | Maintenance pass: orphan detection, stale gate re-scoring, broken provenance cleanup, duplicate URL flagging, done/ pruning, log rotation, dead shard reaping |
@@ -47,6 +48,7 @@ The `topic` field is stored in summary frontmatter and used by `brain_recall` fo
   Raw/
     curated/         ← brain_learn writes here
     gathered/        ← brain_perceive writes here
+    attachments/     ← brain_attach stores raw binaries here (immutable, never deleted)
   Wiki/
     summaries/       ← one page per synthesized source
     entities/        ← one page per extracted entity, appended across sources
@@ -58,6 +60,25 @@ The `topic` field is stored in summary frontmatter and used by `brain_recall` fo
     queue/           ← pending/ and done/ QueueItem JSON files
     wm-<pid>.sqlite  ← per-process working memory (tasks, findings, artifacts)
 ```
+
+### Obsidian drilldown
+
+Summary and entity pages produced by `brain_attach` ingests include `[[wiki links]]` back to the original binary in `Raw/attachments/`. Clicking the link in Obsidian opens the PDF, image, or document inline.
+
+### Batch ingest
+
+`brain_learn` and `brain_perceive` accept either a single item (existing behaviour) or a batch of up to 100 via the `items` array:
+
+```json
+{
+  "items": [
+    { "content": "...", "title": "Doc A", "filename": "doc-a.md" },
+    { "content": "...", "title": "Doc B", "filename": "doc-b.md" }
+  ]
+}
+```
+
+Provenance is read once per call; file writes are serialized to avoid slug collisions. Returns `{ status: "batch_complete", queued: N, duplicates: N, results: [...] }`.
 
 ## Search
 

@@ -37,8 +37,9 @@ mcp-phantom-brain is a **Model Context Protocol server** implementing a Raw → 
 
 | Tool | File | Purpose |
 |---|---|---|
-| `brain_learn` | `tools/brain-learn.ts` | Ingest a curated document into `Raw/curated/` and enqueue for synthesis |
-| `brain_perceive` | `tools/brain-perceive.ts` | Ingest a gathered web source into `Raw/gathered/` and enqueue for gate + synthesis |
+| `brain_learn` | `tools/brain-learn.ts` | Ingest a curated document into `Raw/curated/` and enqueue for synthesis. Accepts single item or `items[]` batch (up to 100) |
+| `brain_perceive` | `tools/brain-perceive.ts` | Ingest a gathered web source into `Raw/gathered/` and enqueue for gate + synthesis. Accepts single item or `items[]` batch (up to 100) |
+| `brain_attach` | `tools/brain-attach.ts` | Ingest a binary file (PDF, Word, image). Stores immutable binary in `Raw/attachments/<sha256><ext>`, extracts text via system tools, enqueues sidecar for synthesis |
 | `brain_synthesize` | `tools/brain-synthesize.ts` | Claim 1–20 queue items (`count` param), run the Gate, distill summary via LLM, write summary + entity pages, append to `_log.md` |
 | `brain_recall` | `tools/brain-recall.ts` | FTS5 + vector hybrid search over Wiki summaries and entity pages; supports `topic` filter |
 | `brain_reflect` | `tools/brain-reflect.ts` | Maintenance pass: orphan detection, stale gate re-scoring, broken provenance auto-cleanup, duplicate URL flagging, done/ pruning (30d), log rotation (5000-line cap), dead WM shard reaping |
@@ -50,7 +51,7 @@ mcp-phantom-brain is a **Model Context Protocol server** implementing a Raw → 
 
 ### Ingest → Synthesis pipeline
 
-1. **`brain_learn`** (curated) or **`brain_perceive`** (gathered) writes raw content to `Raw/` and enqueues a `QueueItem` in `_index/queue/`.
+1. **`brain_learn`** (curated), **`brain_perceive`** (gathered), or **`brain_attach`** (binary files) writes raw content to `Raw/` and enqueues a `QueueItem` in `_index/queue/`. `brain_learn` and `brain_perceive` accept a single item or a batch of up to 100 via `items[]` — provenance is read once, file writes are serialized to prevent slug collisions.
 2. **`brain_synthesize`** claims 1–20 queue items (optional `count` parameter, default 1), runs the Gate (`src/gate/evaluate.ts`), distills the raw content into concise prose via `summarizeContent()` (falls back to raw content on failure), writes the summary page to `Wiki/summaries/`, fans out into entity pages under `Wiki/entities/` (entity extraction still runs on raw content for full coverage), appends a log line to `Wiki/_log.md`, and records the `Raw → Wiki` mapping in `_index/provenance.json`.
 3. **`brain_recall`** searches the indexed summaries and entity pages via hybrid RRF (FTS5 + vector). Supports optional `topic` filter to scope results to a subject-matter bucket.
 4. **`brain_trace`** queries the append-only `_log.md` for audit and debugging.
@@ -85,6 +86,7 @@ Path is resolved from `BRAIN_VAULT_PATH` env var (falls back to `~/workspaces/pr
   Raw/
     curated/         ← brain_learn writes here (human-curated docs)
     gathered/        ← brain_perceive writes here (web content)
+    attachments/     ← brain_attach stores raw binaries here by SHA256 (immutable, no cleanup policy)
   Wiki/
     summaries/       ← one summary page per synthesized source
     entities/        ← one page per extracted entity, appended across sources
@@ -96,6 +98,17 @@ Path is resolved from `BRAIN_VAULT_PATH` env var (falls back to `~/workspaces/pr
     queue/           ← pending/ and done/ QueueItem JSON files
     wm-<pid>.sqlite  ← per-process working memory DB (tasks, findings, artifacts)
 ```
+
+### Binary attachment pipeline (`src/tools/brain-attach.ts`, `src/vault/extract-text.ts`)
+
+`brain_attach` accepts a local file path or base64-encoded bytes plus an `original_filename` and `title`.
+
+1. Computes SHA256 of the binary; deduplicates against provenance.
+2. Writes the binary atomically to `Raw/attachments/<sha256><ext>` — this file is never deleted.
+3. Extracts text via system tools: `pdftotext` (PDF), `textutil` (Word/RTF), `tesseract` (images), plaintext read (txt/md/csv/json/html). Falls back to a placeholder sidecar on failure.
+4. Writes the extracted text as a sidecar to `Raw/curated/` and enqueues with `source_attachment` pointing back to the binary.
+
+The `source_attachment` field propagates through synthesis: summary pages include `**Source attachment:** [[Raw/attachments/...]]` in the body and entity pages include an attachment link in the Source Reliability table. Both render as clickable Obsidian wiki links.
 
 ### Indexing pipeline (`src/vault/search.ts`)
 
