@@ -217,11 +217,15 @@ function reliabilityRow(
   sourceTitle: string,
   rawPath: string,
   verdict: GateVerdict,
+  sourceAttachment?: string,
 ): string {
   const safeTitle = escapeCell(sourceTitle);
   const category = verdict.category ?? '—';
   const reason = escapeCell(verdict.reason);
-  return `| General content | ${verdict.reliability} | ${category} | ${reason} | [${safeTitle}](${rawPath}) |`;
+  const sourceCell = sourceAttachment
+    ? `[${safeTitle}](${rawPath}) · [[${sourceAttachment}\\|attachment]]`
+    : `[${safeTitle}](${rawPath})`;
+  return `| General content | ${verdict.reliability} | ${category} | ${reason} | ${sourceCell} |`;
 }
 
 /**
@@ -236,8 +240,9 @@ export async function createEntityPage(opts: {
   contentSnippet: string;
   now: string;
   verdict: GateVerdict;
+  sourceAttachment?: string;
 }): Promise<void> {
-  const { name, absPath, sourceTitle, rawPath, contentSnippet, now, verdict } = opts;
+  const { name, absPath, sourceTitle, rawPath, contentSnippet, now, verdict, sourceAttachment } = opts;
   const ymd = ymdFromISO(now);
   const page =
     `---\n` +
@@ -254,7 +259,7 @@ export async function createEntityPage(opts: {
     `## Source Reliability\n\n` +
     `| Claim | Reliability | Category | Reason | Source |\n` +
     `|---|---|---|---|---|\n` +
-    `${reliabilityRow(sourceTitle, rawPath, verdict)}\n`;
+    `${reliabilityRow(sourceTitle, rawPath, verdict, sourceAttachment)}\n`;
 
   await withFileLock(absPath, async () => {
     await writeAtomicFile(absPath, page);
@@ -280,8 +285,9 @@ export async function appendToEntityPage(opts: {
   contentSnippet: string;
   now: string;
   verdict: GateVerdict;
+  sourceAttachment?: string;
 }): Promise<void> {
-  const { absPath, sourceTitle, rawPath, contentSnippet, now, verdict } = opts;
+  const { absPath, sourceTitle, rawPath, contentSnippet, now, verdict, sourceAttachment } = opts;
   const ymd = ymdFromISO(now);
 
   await withFileLock(absPath, async () => {
@@ -293,6 +299,7 @@ export async function appendToEntityPage(opts: {
       now,
       ymd,
       verdict,
+      sourceAttachment,
     });
     await writeAtomicFile(absPath, updated);
   });
@@ -312,8 +319,9 @@ export async function upsertEntityPage(opts: {
   contentSnippet: string;
   now: string;
   verdict: GateVerdict;
+  sourceAttachment?: string;
 }): Promise<void> {
-  const { name, absPath, sourceTitle, rawPath, contentSnippet, now, verdict } = opts;
+  const { name, absPath, sourceTitle, rawPath, contentSnippet, now, verdict, sourceAttachment } = opts;
   const ymd = ymdFromISO(now);
 
   await withFileLock(absPath, async () => {
@@ -340,10 +348,10 @@ export async function upsertEntityPage(opts: {
         `## Source Reliability\n\n` +
         `| Claim | Reliability | Category | Reason | Source |\n` +
         `|---|---|---|---|---|\n` +
-        `${reliabilityRow(sourceTitle, rawPath, verdict)}\n`;
+        `${reliabilityRow(sourceTitle, rawPath, verdict, sourceAttachment)}\n`;
       await writeAtomicFile(absPath, page);
     } else {
-      const updated = applyAppend(existing, { sourceTitle, rawPath, contentSnippet, now, ymd, verdict });
+      const updated = applyAppend(existing, { sourceTitle, rawPath, contentSnippet, now, ymd, verdict, sourceAttachment });
       await writeAtomicFile(absPath, updated);
     }
   });
@@ -356,13 +364,14 @@ interface AppendOpts {
   now: string;
   ymd: string;
   verdict: GateVerdict;
+  sourceAttachment?: string;
 }
 
 function applyAppend(existing: string, opts: AppendOpts): string {
   let content = bumpFrontmatter(existing, opts.now);
 
   const newSection = `\n## From: ${opts.sourceTitle} (${opts.ymd})\n\n${opts.contentSnippet}\n`;
-  const newRow = reliabilityRow(opts.sourceTitle, opts.rawPath, opts.verdict);
+  const newRow = reliabilityRow(opts.sourceTitle, opts.rawPath, opts.verdict, opts.sourceAttachment);
 
   const reliabilityHeader = '## Source Reliability';
   const relIdx = content.indexOf(reliabilityHeader);

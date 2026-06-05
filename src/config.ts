@@ -27,6 +27,7 @@ export const CONFIG = {
   RAW_FOLDER: 'Raw',
   RAW_GATHERED: 'Raw/gathered',
   RAW_CURATED: 'Raw/curated',
+  RAW_ATTACHMENTS: 'Raw/attachments',
   QUEUE_FOLDER: '_queue',
   QUEUE_PENDING: '_queue/pending',
   QUEUE_DONE: '_queue/done',

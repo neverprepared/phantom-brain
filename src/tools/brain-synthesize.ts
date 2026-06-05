@@ -153,14 +153,16 @@ function buildSummaryPage(opts: {
   title: string;
   rawPath: string;
   sourceUrl?: string;
+  sourceAttachment?: string;
   capturedAt: string;
   synthesizedAt: string;
   body: string;
   verdict: GateVerdict;
 }): string {
-  const { title, rawPath, sourceUrl, capturedAt, synthesizedAt, body, verdict } = opts;
+  const { title, rawPath, sourceUrl, sourceAttachment, capturedAt, synthesizedAt, body, verdict } = opts;
   const escapedTitle = escapeYaml(title);
   const sourceUrlLine = sourceUrl ? `source_url: "${sourceUrl}"\n` : '';
+  const sourceAttachmentLine = sourceAttachment ? `source_attachment: "${sourceAttachment}"\n` : '';
   const categoryLine = verdict.category ? `category: ${verdict.category}\n` : '';
   const topicLine = verdict.topic ? `topic: ${verdict.topic}\n` : '';
   return (
@@ -169,6 +171,7 @@ function buildSummaryPage(opts: {
     `kind: summary\n` +
     `source: "${rawPath}"\n` +
     sourceUrlLine +
+    sourceAttachmentLine +
     `captured_at: "${capturedAt}"\n` +
     `synthesized_at: "${synthesizedAt}"\n` +
     `reliability: ${verdict.reliability}\n` +
@@ -177,7 +180,8 @@ function buildSummaryPage(opts: {
     `reason: "${escapeYaml(verdict.reason)}"\n` +
     `tags: []\n` +
     `---\n\n` +
-    `${body}\n`
+    `${body}\n` +
+    (sourceAttachment ? `\n**Source attachment:** [[${sourceAttachment}]]\n` : '')
   );
 }
 
@@ -243,6 +247,7 @@ async function processOneItem() {
       title: item.title,
       rawPath,
       ...(item.source_url !== undefined && { sourceUrl: item.source_url }),
+      ...(item.source_attachment !== undefined && { sourceAttachment: item.source_attachment }),
       capturedAt: item.captured_at,
       synthesizedAt,
       body: summaryBody,
@@ -268,6 +273,7 @@ async function processOneItem() {
           contentSnippet: snippet,
           now: synthesizedAt,
           verdict,
+          ...(item.source_attachment !== undefined && { sourceAttachment: item.source_attachment }),
         });
 
         const wikiRelForIndex = path.posix.join(CONFIG.WIKI_ENTITIES, `${slugFromTitle(name)}.md`);
@@ -324,7 +330,7 @@ async function processOneItem() {
     // Index the new summary page so brain_recall sees it without a full rebuild.
     // relPath for the wiki index is relative to Wiki/, not the vault root.
     const wikiRelPath = path.posix.join(CONFIG.WIKI_SUMMARIES, `${finalSlug}.md`);
-    indexWikiEntry(wikiRelPath, item.title, 'summary', [], summaryBody, synthesizedAt, synthesizedAt, verdict.topic);
+    indexWikiEntry(wikiRelPath, item.title, 'summary', [], summaryBody, synthesizedAt, synthesizedAt, verdict.topic, item.source_attachment);
 
     logger.info('brain_synthesize processed item', {
       raw_path: rawPath,

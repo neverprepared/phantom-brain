@@ -25,6 +25,7 @@ export interface QueueItem {
   format: 'markdown' | 'html' | 'text' | 'pdf';
   content_hash?: string;    // SHA256 hex; absent for deferred-fetch items
   deferred_fetch?: boolean; // if true, brain_synthesize fetches source_url before processing
+  source_attachment?: string; // vault-relative path to Raw/attachments/<hash>.<ext>
 }
 
 function pendingDir(): string {

@@ -57,6 +57,7 @@ export async function runBrainRecall(input: z.infer<typeof BrainRecallSchema>) {
       excerpt: r.snippet ?? '',
       freshness: 'fresh',
       score: r.score,
+      ...(r.wikiEntry?.source_attachment ? { source_attachment: r.wikiEntry.source_attachment } : {}),
     })),
     suggested_action,
     summary: `Found ${results.length} result(s). Suggested action: ${suggested_action}.`,

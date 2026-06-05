@@ -18,6 +18,7 @@ export interface WikiIndexEntry {
   updated: string;
   body: string;
   topic?: string;
+  source_attachment?: string;
 }
 
 let wikiIndex: Map<string, WikiIndexEntry> = new Map();
@@ -40,6 +41,7 @@ export async function buildIndex(): Promise<void> {
         updated: typeof data['updated'] === 'string' ? data['updated'] : '',
         body: content.trim(),
         ...(typeof data['topic'] === 'string' && data['topic'] ? { topic: data['topic'] } : {}),
+        ...(typeof data['source_attachment'] === 'string' && data['source_attachment'] ? { source_attachment: data['source_attachment'] } : {}),
       };
       const id = `wiki:${relPath}`;
       newWikiIndex.set(id, wEntry);
@@ -62,9 +64,9 @@ export function getWikiIndex(): Map<string, WikiIndexEntry> {
   return wikiIndex;
 }
 
-export function indexWikiEntry(relPath: string, title: string, kind: string, tags: string[], body: string, updated: string, created: string, topic?: string): void {
+export function indexWikiEntry(relPath: string, title: string, kind: string, tags: string[], body: string, updated: string, created: string, topic?: string, source_attachment?: string): void {
   const id = `wiki:${relPath}`;
-  wikiIndex.set(id, { relPath, title, kind, tags, created, updated, body, ...(topic ? { topic } : {}) });
+  wikiIndex.set(id, { relPath, title, kind, tags, created, updated, body, ...(topic ? { topic } : {}), ...(source_attachment ? { source_attachment } : {}) });
   upsertFts(id, title, tags, body);
   void embedText(buildEmbedText(title, tags, body)).then((embedding) => {
     if (embedding) upsertVector(id, embedding);
@@ -101,6 +103,7 @@ async function resolveWikiEntry(id: string): Promise<WikiIndexEntry | null> {
       updated: typeof data['updated'] === 'string' ? data['updated'] : '',
       body: content.trim(),
       ...(typeof data['topic'] === 'string' && data['topic'] ? { topic: data['topic'] } : {}),
+      ...(typeof data['source_attachment'] === 'string' && data['source_attachment'] ? { source_attachment: data['source_attachment'] } : {}),
     };
     wikiIndex.set(id, entry);
     logger.debug('wikiIndex cache miss — loaded from disk', { relPath });

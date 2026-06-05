@@ -37,6 +37,7 @@ export async function ensureVaultStructure(): Promise<void> {
     path.join(vaultPath, CONFIG.RAW_FOLDER),
     path.join(vaultPath, CONFIG.RAW_GATHERED),
     path.join(vaultPath, CONFIG.RAW_CURATED),
+    path.join(vaultPath, CONFIG.RAW_ATTACHMENTS),
     path.join(vaultPath, CONFIG.QUEUE_FOLDER),
     path.join(vaultPath, CONFIG.QUEUE_PENDING),
     path.join(vaultPath, CONFIG.QUEUE_DONE),
