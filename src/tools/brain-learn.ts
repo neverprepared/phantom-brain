@@ -1,13 +1,9 @@
 /**
  * brain_learn — Phase 0 manual ingest.
  *
- * Drops a raw document into Raw/curated/ and queues it for synthesis.
- * Synthesis itself happens in brain_synthesize so the gate logic stays
- * separate from the storage write path.
- *
- * Dedup: if the same byte-for-byte content has already been ingested
- * (matched by SHA256 against provenance.json), we return early without
- * writing a duplicate Raw file or enqueueing a redundant job.
+ * Accepts a single item (content + title + filename) or a batch via items[].
+ * Each item is written to Raw/curated/ and queued for synthesis.
+ * Duplicate detection by SHA256 — re-submitting the same content is a no-op.
  */
 import { z } from 'zod';
 import fs from 'node:fs/promises';
@@ -17,13 +13,13 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { CONFIG } from '../config.js';
 import { writeAtomicFile } from '../vault/filesystem.js';
 import { slugFromTitle } from '../vault/naming.js';
-import { readProvenance, isHashKnown } from '../vault/provenance.js';
+import { readProvenance, isHashKnown, type ProvenanceMap } from '../vault/provenance.js';
 import { enqueueItem, type QueueItem } from '../vault/queue.js';
 import { todayDateString, nowISO } from '../shared/utils.js';
 import { logger } from '../shared/logger.js';
 import { formatError } from '../shared/errors.js';
 
-export const BrainLearnSchema = z.object({
+const LearnItemSchema = z.object({
   content: z.string().describe('Raw document content to ingest'),
   title: z.string().describe('Human-readable title for the source'),
   filename: z.string().describe('Original filename hint, e.g. "karpathy-wiki.md"'),
@@ -31,18 +27,31 @@ export const BrainLearnSchema = z.object({
   format: z.enum(['markdown', 'html', 'text']).optional().default('markdown'),
 });
 
+export const BrainLearnSchema = z.object({
+  content: z.string().optional().describe('Raw document content (single-item mode)'),
+  title: z.string().optional().describe('Human-readable title (single-item mode)'),
+  filename: z.string().optional().describe('Original filename hint (single-item mode)'),
+  source_url: z.string().optional().describe('URL the source came from, if known'),
+  format: z.enum(['markdown', 'html', 'text']).optional().default('markdown'),
+  items: z.array(LearnItemSchema).min(1).max(100).optional().describe(
+    'Batch mode: up to 100 items. When provided, top-level content/title/filename are ignored.'
+  ),
+}).refine(
+  (d) => d.items !== undefined || (d.content !== undefined && d.title !== undefined && d.filename !== undefined),
+  { message: 'Provide items[] for batch mode, or content + title + filename for single mode' },
+);
+
 export const brainLearnToolDefinition = {
   name: 'brain_learn',
   description:
-    'Ingest a raw document into the brain. Writes the content to Raw/curated/ and queues it ' +
-    'for synthesis. Duplicate detection by SHA256 — re-submitting the same content is a no-op. ' +
-    'After learning, call brain_synthesize to process the queued item (or wait for the next ' +
-    'scheduled run once that exists).',
+    'Ingest one or more raw documents into the brain. Single mode: pass content + title + filename. ' +
+    'Batch mode: pass items[] (up to 100). Each item is written to Raw/curated/ and queued for synthesis. ' +
+    'Duplicate detection by SHA256 — re-submitting the same content is a no-op.',
   inputSchema: {
     type: 'object' as const,
     properties: {
-      content: { type: 'string', description: 'Raw document content to ingest' },
-      title: { type: 'string', description: 'Human-readable title for the source' },
+      content: { type: 'string', description: 'Raw document content (single-item mode)' },
+      title: { type: 'string', description: 'Human-readable title (single-item mode)' },
       filename: { type: 'string', description: 'Original filename hint, e.g. "karpathy-wiki.md"' },
       source_url: { type: 'string', description: 'URL the source came from, if known' },
       format: {
@@ -50,8 +59,23 @@ export const brainLearnToolDefinition = {
         enum: ['markdown', 'html', 'text'],
         description: 'Source format (default markdown)',
       },
+      items: {
+        type: 'array',
+        description: 'Batch mode: up to 100 items. When provided, top-level fields are ignored.',
+        maxItems: 100,
+        items: {
+          type: 'object',
+          properties: {
+            content: { type: 'string' },
+            title: { type: 'string' },
+            filename: { type: 'string' },
+            source_url: { type: 'string' },
+            format: { type: 'string', enum: ['markdown', 'html', 'text'] },
+          },
+          required: ['content', 'title', 'filename'],
+        },
+      },
     },
-    required: ['content', 'title', 'filename'],
   },
 };
 
@@ -67,26 +91,17 @@ function sha256(content: string): string {
   return createHash('sha256').update(content).digest('hex');
 }
 
-export async function runBrainLearn(input: z.infer<typeof BrainLearnSchema>) {
-  const { content, title, source_url, format } = input;
-
+async function ingestOne(
+  item: z.infer<typeof LearnItemSchema>,
+  provenance: ProvenanceMap,
+): Promise<{ status: 'queued' | 'duplicate'; raw_path?: string; content_hash: string; title: string }> {
+  const { content, title, source_url, format } = item;
   const contentHash = sha256(content);
 
-  // Dedup against provenance map before doing any I/O on disk.
-  const provenance = await readProvenance();
   if (await isHashKnown(contentHash, provenance)) {
-    return {
-      status: 'duplicate' as const,
-      content_hash: contentHash,
-      message: 'This content has already been ingested (SHA256 match). No action taken.',
-    };
+    return { status: 'duplicate', content_hash: contentHash, title };
   }
 
-  // Build the Raw/curated filename: <YYYY-MM-DD>-<slug>.<ext>
-  // deduplicateSlug in vault/naming.ts hardcodes the .md extension, so we
-  // re-implement the same dedup loop here against the real target extension.
-  // The provenance hash check above already eliminates same-content duplicates;
-  // this loop only catches same-title-different-content collisions on a single day.
   const slug = slugFromTitle(title);
   const ext = extensionForFormat(format);
   const date = todayDateString();
@@ -110,7 +125,7 @@ export async function runBrainLearn(input: z.infer<typeof BrainLearnSchema>) {
   const rawPathRel = path.posix.join(CONFIG.RAW_CURATED, `${candidate}.${ext}`);
   await writeAtomicFile(targetPath, content);
 
-  const item: QueueItem = {
+  const queueItem: QueueItem = {
     raw_path: rawPathRel,
     source: 'curated',
     captured_at: nowISO(),
@@ -120,15 +135,57 @@ export async function runBrainLearn(input: z.infer<typeof BrainLearnSchema>) {
     content_hash: contentHash,
   };
 
-  await enqueueItem(item);
-
+  await enqueueItem(queueItem);
   logger.info('brain_learn ingested document', { raw_path: rawPathRel, content_hash: contentHash });
+
+  return { status: 'queued', raw_path: rawPathRel, content_hash: contentHash, title };
+}
+
+export async function runBrainLearn(input: z.infer<typeof BrainLearnSchema>) {
+  const provenance = await readProvenance();
+
+  // Batch mode
+  if (input.items) {
+    const results = [];
+    for (const item of input.items) {
+      results.push(await ingestOne(item, provenance));
+    }
+    const queued = results.filter((r) => r.status === 'queued').length;
+    const duplicates = results.filter((r) => r.status === 'duplicate').length;
+    return {
+      status: 'batch_complete' as const,
+      queued,
+      duplicates,
+      results,
+      message: `Batch complete: ${queued} queued, ${duplicates} duplicate(s). Call brain_synthesize to process.`,
+    };
+  }
+
+  // Single mode
+  const result = await ingestOne(
+    {
+      content: input.content!,
+      title: input.title!,
+      filename: input.filename!,
+      source_url: input.source_url,
+      format: input.format,
+    },
+    provenance,
+  );
+
+  if (result.status === 'duplicate') {
+    return {
+      status: 'duplicate' as const,
+      content_hash: result.content_hash,
+      message: 'This content has already been ingested (SHA256 match). No action taken.',
+    };
+  }
 
   return {
     status: 'queued' as const,
-    raw_path: rawPathRel,
-    content_hash: contentHash,
-    message: `Stored to ${rawPathRel}. Queued for synthesis — call brain_synthesize to process now, or it will be picked up on the next scheduled run.`,
+    raw_path: result.raw_path,
+    content_hash: result.content_hash,
+    message: `Stored to ${result.raw_path}. Queued for synthesis — call brain_synthesize to process.`,
   };
 }
 
