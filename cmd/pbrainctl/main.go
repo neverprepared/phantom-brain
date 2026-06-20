@@ -25,6 +25,7 @@ import (
 	"github.com/neverprepared/mcp-phantom-brain/internal/index"
 	pbmcp "github.com/neverprepared/mcp-phantom-brain/internal/mcp"
 	"github.com/neverprepared/mcp-phantom-brain/internal/ollama"
+	pbserver "github.com/neverprepared/mcp-phantom-brain/internal/server"
 	"github.com/neverprepared/mcp-phantom-brain/internal/vault"
 	"github.com/neverprepared/mcp-phantom-brain/internal/version"
 	"github.com/neverprepared/mcp-phantom-brain/internal/working"
@@ -293,12 +294,37 @@ func expandHome(p string) string {
 	return filepath.Join(home, strings.TrimPrefix(p, "~/"))
 }
 
+// serveCmd runs the v5.0 HTTP daemon (Phase 2). Reads config from
+// PHANTOM_BRAIN_CONFIG_DIR (default ~/.config/phantom-brain-server),
+// keeps state under PHANTOM_BRAIN_DATA_DIR (default /var/lib/phantom-
+// brain). SIGHUP reloads the vault registry; SIGINT/SIGTERM drain.
 func serveCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "serve",
-		Short: "Run as the HTTP daemon (not implemented in Phase 0)",
-		RunE: func(*cobra.Command, []string) error {
-			return fmt.Errorf("serve: not implemented in Phase 0 (see v5 spec, Phase 2)")
+		Short: "Run as the HTTP daemon (Phase 2)",
+		Long: `Starts the phantom-brain HTTP daemon: per-(profile, vault) reaper +
+synthesizer + snapshot publisher, plus the v4.4 §8 API.
+
+Required config dir layout (default ~/.config/phantom-brain-server):
+
+  server.toml
+  profiles/<profile>/vaults/<vault>/config.toml  (optional)
+  profiles/<profile>/vaults/<vault>/auth.toml    (bearer_token)
+
+State lives under PHANTOM_BRAIN_DATA_DIR (default /var/lib/phantom-brain).
+The daemon acquires an exclusive flock on {data}/_daemon/locks/brain-server.pid
+to prevent a second instance from corrupting the data dir.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+			d, err := pbserver.Start(pbserver.StartOpts{
+				ConfigDir: pbserver.DefaultConfigDir(),
+				DataDir:   pbserver.DefaultDataDir(),
+				Logger:    logger,
+			})
+			if err != nil {
+				return err
+			}
+			return d.Run()
 		},
 	}
 }

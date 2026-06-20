@@ -1,0 +1,202 @@
+package server
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/BurntSushi/toml"
+)
+
+// DefaultConfigDir is where the daemon expects server.toml and the
+// profiles/ tree. Overridable via PHANTOM_BRAIN_CONFIG_DIR.
+//
+// Production: ~/.config/phantom-brain-server (mounted read-only into
+// the container in deployments).
+func DefaultConfigDir() string {
+	if v := strings.TrimSpace(os.Getenv("PHANTOM_BRAIN_CONFIG_DIR")); v != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".config/phantom-brain-server" // last-ditch
+	}
+	return filepath.Join(home, ".config", "phantom-brain-server")
+}
+
+// ServerConfig mirrors server.toml. Defaults live in [defaults] and
+// are applied to every vault unless overridden by its config.toml.
+// Fields are exported because BurntSushi/toml uses reflection.
+type ServerConfig struct {
+	Server struct {
+		Port     int    `toml:"port"`
+		Host     string `toml:"host"`
+		LogLevel string `toml:"log_level"`
+	} `toml:"server"`
+
+	Storage struct {
+		// Backend selects the death-payload ship target. "local"
+		// (default) stores uploads under {data}/{profile}/{vault}/
+		// collective/brains/_pending/; "minio" presigns to a real
+		// S3-compatible bucket. Phase 2 ships local; minio is wired
+		// behind the flag but not exercised in default smoke tests.
+		Backend string `toml:"backend"`
+
+		// MinIO-only fields. Present here so a single TOML covers
+		// both backends; ignored when backend = "local".
+		MinIOEndpoint  string `toml:"minio_endpoint"`
+		MinIOBucket    string `toml:"minio_bucket"`
+		MinIOAccessKey string `toml:"minio_access_key"`
+		MinIOSecretKey string `toml:"minio_secret_key"`
+		MinIOUseSSL    bool   `toml:"minio_use_ssl"`
+	} `toml:"storage"`
+
+	Defaults VaultDefaults `toml:"defaults"`
+}
+
+// VaultDefaults are the per-vault knobs. Same shape lives in
+// profiles/{p}/vaults/{v}/config.toml; nonzero fields there override
+// the global defaults.
+type VaultDefaults struct {
+	RetentionGens                 int   `toml:"retention_gens"`
+	SnapshotRebuildDebounceSecs   int   `toml:"snapshot_rebuild_debounce_secs"`
+	ReaperPollIntervalSecs        int   `toml:"reaper_poll_interval_secs"`
+	MaxTarballBytes               int64 `toml:"max_tarball_bytes"`
+	MaxUncompressedBytes          int64 `toml:"max_uncompressed_bytes"`
+	ContributorQuotaBytesPerHour  int64 `toml:"contributor_quota_bytes_per_hour"`
+}
+
+// LoadServerConfig reads {configDir}/server.toml. Missing file is an
+// error — daemon refuses to start without an explicit config so
+// operators don't end up with surprising port/host defaults.
+func LoadServerConfig(configDir string) (*ServerConfig, error) {
+	path := filepath.Join(configDir, "server.toml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("server: read %s: %w", path, err)
+	}
+	var cfg ServerConfig
+	if _, err := toml.Decode(string(raw), &cfg); err != nil {
+		return nil, fmt.Errorf("server: parse %s: %w", path, err)
+	}
+	applyServerDefaults(&cfg)
+	return &cfg, nil
+}
+
+// applyServerDefaults fills in the values the spec requires when the
+// operator leaves a knob unset. Mirrors v4.4 §4 defaults verbatim so
+// behavior matches the spec's quoted examples.
+func applyServerDefaults(cfg *ServerConfig) {
+	if cfg.Server.Port == 0 {
+		cfg.Server.Port = 9998
+	}
+	if cfg.Server.Host == "" {
+		cfg.Server.Host = "0.0.0.0"
+	}
+	if cfg.Server.LogLevel == "" {
+		cfg.Server.LogLevel = "info"
+	}
+	if cfg.Storage.Backend == "" {
+		cfg.Storage.Backend = "local"
+	}
+	d := &cfg.Defaults
+	if d.RetentionGens == 0 {
+		d.RetentionGens = 30
+	}
+	if d.SnapshotRebuildDebounceSecs == 0 {
+		d.SnapshotRebuildDebounceSecs = 300
+	}
+	if d.ReaperPollIntervalSecs == 0 {
+		d.ReaperPollIntervalSecs = 5
+	}
+	if d.MaxTarballBytes == 0 {
+		d.MaxTarballBytes = 5 * 1024 * 1024 * 1024 // 5 GB
+	}
+	if d.MaxUncompressedBytes == 0 {
+		d.MaxUncompressedBytes = 30 * 1024 * 1024 * 1024 // 30 GB
+	}
+	if d.ContributorQuotaBytesPerHour == 0 {
+		d.ContributorQuotaBytesPerHour = 10 * 1024 * 1024 * 1024 // 10 GB
+	}
+}
+
+// VaultOverrides is parsed from profiles/{p}/vaults/{v}/config.toml.
+// Every field is optional — only nonzero values override the global
+// defaults via MergedDefaults.
+type VaultOverrides struct {
+	RetentionGens                int   `toml:"retention_gens"`
+	SnapshotRebuildDebounceSecs  int   `toml:"snapshot_rebuild_debounce_secs"`
+	ReaperPollIntervalSecs       int   `toml:"reaper_poll_interval_secs"`
+	MaxTarballBytes              int64 `toml:"max_tarball_bytes"`
+	MaxUncompressedBytes         int64 `toml:"max_uncompressed_bytes"`
+	ContributorQuotaBytesPerHour int64 `toml:"contributor_quota_bytes_per_hour"`
+}
+
+// VaultAuth is parsed from profiles/{p}/vaults/{v}/auth.toml.
+// BearerToken is the only required field; Description is operator-
+// facing only and never surfaces in API responses.
+type VaultAuth struct {
+	BearerToken string `toml:"bearer_token"`
+	Description string `toml:"description"`
+}
+
+// LoadVaultFiles reads config.toml + auth.toml for one vault.
+// Returns errors for missing/unreadable auth.toml (a vault without
+// auth is unusable) but tolerates a missing config.toml (the vault
+// inherits global defaults).
+func LoadVaultFiles(configDir, profile, vault string) (VaultOverrides, VaultAuth, error) {
+	base := filepath.Join(configDir, "profiles", profile, "vaults", vault)
+	var overrides VaultOverrides
+	if raw, err := os.ReadFile(filepath.Join(base, "config.toml")); err == nil {
+		if _, err := toml.Decode(string(raw), &overrides); err != nil {
+			return overrides, VaultAuth{}, fmt.Errorf("server: parse %s/config.toml: %w", base, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return overrides, VaultAuth{}, fmt.Errorf("server: read %s/config.toml: %w", base, err)
+	}
+
+	authPath := filepath.Join(base, "auth.toml")
+	authRaw, err := os.ReadFile(authPath)
+	if err != nil {
+		return overrides, VaultAuth{}, fmt.Errorf("server: read %s: %w", authPath, err)
+	}
+	var auth VaultAuth
+	if _, err := toml.Decode(string(authRaw), &auth); err != nil {
+		return overrides, VaultAuth{}, fmt.Errorf("server: parse %s: %w", authPath, err)
+	}
+	if strings.TrimSpace(auth.BearerToken) == "" {
+		return overrides, VaultAuth{}, fmt.Errorf("server: %s missing bearer_token", authPath)
+	}
+	return overrides, auth, nil
+}
+
+// MergedDefaults applies overrides over the global defaults. Zero
+// values in overrides leave the global default in place — that's the
+// only signal we have for "operator left this knob unset" since TOML
+// doesn't distinguish missing from zero. Operators who want to set a
+// limit to zero on purpose can't (acceptable — no such limit makes
+// sense in this domain).
+func MergedDefaults(global VaultDefaults, overrides VaultOverrides) VaultDefaults {
+	out := global
+	if overrides.RetentionGens != 0 {
+		out.RetentionGens = overrides.RetentionGens
+	}
+	if overrides.SnapshotRebuildDebounceSecs != 0 {
+		out.SnapshotRebuildDebounceSecs = overrides.SnapshotRebuildDebounceSecs
+	}
+	if overrides.ReaperPollIntervalSecs != 0 {
+		out.ReaperPollIntervalSecs = overrides.ReaperPollIntervalSecs
+	}
+	if overrides.MaxTarballBytes != 0 {
+		out.MaxTarballBytes = overrides.MaxTarballBytes
+	}
+	if overrides.MaxUncompressedBytes != 0 {
+		out.MaxUncompressedBytes = overrides.MaxUncompressedBytes
+	}
+	if overrides.ContributorQuotaBytesPerHour != 0 {
+		out.ContributorQuotaBytesPerHour = overrides.ContributorQuotaBytesPerHour
+	}
+	return out
+}
