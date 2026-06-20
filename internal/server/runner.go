@@ -55,14 +55,7 @@ func newVaultRunner(parentCtx context.Context, binding VaultBinding, dataDir Dat
 	return r
 }
 
-// synthesizerLoop is the per-vault queue consumer. Day 4 fills the
-// body — same day-1-stub story as the reaper.
-func (r *vaultRunner) synthesizerLoop(ctx context.Context) {
-	defer r.wg.Done()
-	r.logger.Info("phantom-brain: synthesizer loop started (day-1 stub)")
-	<-ctx.Done()
-	r.logger.Info("phantom-brain: synthesizer loop exiting")
-}
+// synthesizerLoop body lives in synthesizer.go.
 
 // Stop cancels the runner's context and waits for both goroutines to
 // return. Idempotent — a second call is a no-op. Called by the
