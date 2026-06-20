@@ -9,9 +9,9 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/mindmorass/mcp-phantom-brain/internal/canonicalize"
-	"github.com/mindmorass/mcp-phantom-brain/internal/index"
-	"github.com/mindmorass/mcp-phantom-brain/internal/vault"
+	"github.com/neverprepared/mcp-phantom-brain/internal/canonicalize"
+	"github.com/neverprepared/mcp-phantom-brain/internal/index"
+	"github.com/neverprepared/mcp-phantom-brain/internal/vault"
 )
 
 // perceiveTool defines the brain_perceive MCP tool schema.

@@ -16,12 +16,12 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/spf13/cobra"
 
-	"github.com/mindmorass/mcp-phantom-brain/internal/index"
-	pbmcp "github.com/mindmorass/mcp-phantom-brain/internal/mcp"
-	"github.com/mindmorass/mcp-phantom-brain/internal/ollama"
-	"github.com/mindmorass/mcp-phantom-brain/internal/vault"
-	"github.com/mindmorass/mcp-phantom-brain/internal/version"
-	"github.com/mindmorass/mcp-phantom-brain/internal/working"
+	"github.com/neverprepared/mcp-phantom-brain/internal/index"
+	pbmcp "github.com/neverprepared/mcp-phantom-brain/internal/mcp"
+	"github.com/neverprepared/mcp-phantom-brain/internal/ollama"
+	"github.com/neverprepared/mcp-phantom-brain/internal/vault"
+	"github.com/neverprepared/mcp-phantom-brain/internal/version"
+	"github.com/neverprepared/mcp-phantom-brain/internal/working"
 )
 
 func main() {
@@ -34,7 +34,7 @@ func main() {
   pbrainctl serve        HTTP daemon (per-(profile, vault) reaper + synthesizer)
   pbrainctl <op>         operator commands (list, snapshot, vault, ...)
 
-See https://github.com/mindmorass/mcp-phantom-brain for the v5 spec.`,
+See https://github.com/neverprepared/mcp-phantom-brain for the v5 spec.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}

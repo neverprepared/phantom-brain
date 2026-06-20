@@ -2,9 +2,9 @@
 //
 // Values are stamped at link time via -ldflags:
 //
-//	go build -ldflags "-X github.com/mindmorass/mcp-phantom-brain/internal/version.Version=v5.0.0-dev \
-//	                   -X github.com/mindmorass/mcp-phantom-brain/internal/version.Commit=$(git rev-parse --short HEAD) \
-//	                   -X github.com/mindmorass/mcp-phantom-brain/internal/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+//	go build -ldflags "-X github.com/neverprepared/mcp-phantom-brain/internal/version.Version=v5.0.0-dev \
+//	                   -X github.com/neverprepared/mcp-phantom-brain/internal/version.Commit=$(git rev-parse --short HEAD) \
+//	                   -X github.com/neverprepared/mcp-phantom-brain/internal/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
 //	    ./cmd/pbrainctl
 package version
 

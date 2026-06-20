@@ -23,7 +23,7 @@ import (
 	"path/filepath"
 	"time"
 
-	pbsqlite "github.com/mindmorass/mcp-phantom-brain/internal/sqlite"
+	pbsqlite "github.com/neverprepared/mcp-phantom-brain/internal/sqlite"
 )
 
 const schema = `

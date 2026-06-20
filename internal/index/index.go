@@ -35,7 +35,7 @@ import (
 	"fmt"
 	"path/filepath"
 
-	pbsqlite "github.com/mindmorass/mcp-phantom-brain/internal/sqlite"
+	pbsqlite "github.com/neverprepared/mcp-phantom-brain/internal/sqlite"
 )
 
 // Embedder is the minimal interface index needs from any embedding

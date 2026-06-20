@@ -16,9 +16,9 @@ PKGS := ./...
 VERSION  := v5.0.0-dev
 COMMIT   := $(shell git rev-parse --short HEAD)
 DATE     := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS  := -X github.com/mindmorass/mcp-phantom-brain/internal/version.Version=$(VERSION) \
-            -X github.com/mindmorass/mcp-phantom-brain/internal/version.Commit=$(COMMIT) \
-            -X github.com/mindmorass/mcp-phantom-brain/internal/version.BuildDate=$(DATE)
+LDFLAGS  := -X github.com/neverprepared/mcp-phantom-brain/internal/version.Version=$(VERSION) \
+            -X github.com/neverprepared/mcp-phantom-brain/internal/version.Commit=$(COMMIT) \
+            -X github.com/neverprepared/mcp-phantom-brain/internal/version.BuildDate=$(DATE)
 
 .PHONY: build test test-race vet tidy clean fmt all
 
