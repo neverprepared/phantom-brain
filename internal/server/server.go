@@ -31,6 +31,7 @@ type Daemon struct {
 
 	registry *Registry
 	runners  *runnerSet
+	storage  StorageBackend
 	router   chi.Router
 	srv      *http.Server
 	flock    *flock.Flock
@@ -92,6 +93,28 @@ func Start(opts StartOpts) (*Daemon, error) {
 
 	parentCtx, parentCancel := context.WithCancel(context.Background())
 
+	// Build the storage backend per server.toml. Local is the
+	// default and works against the daemon's own URL space.
+	baseURL := fmt.Sprintf("http://%s:%d", cfg.Server.Host, cfg.Server.Port)
+	if cfg.Server.Host == "0.0.0.0" {
+		baseURL = fmt.Sprintf("http://127.0.0.1:%d", cfg.Server.Port)
+	}
+	var backend StorageBackend
+	switch cfg.Storage.Backend {
+	case "minio":
+		_ = lk.Unlock()
+		parentCancel()
+		return nil, fmt.Errorf("server: minio backend not implemented (Phase 5); set [storage] backend = \"local\" or omit")
+	default:
+		lb, lerr := NewLocalBackend(opts.DataDir, baseURL)
+		if lerr != nil {
+			_ = lk.Unlock()
+			parentCancel()
+			return nil, lerr
+		}
+		backend = lb
+	}
+
 	d := &Daemon{
 		Config:       cfg,
 		ConfigDir:    opts.ConfigDir,
@@ -99,6 +122,7 @@ func Start(opts StartOpts) (*Daemon, error) {
 		Logger:       opts.Logger,
 		registry:     NewRegistry(),
 		runners:      newRunnerSet(),
+		storage:      backend,
 		flock:        lk,
 		parentCtx:    parentCtx,
 		parentCancel: parentCancel,
@@ -163,8 +187,19 @@ func (d *Daemon) buildRouter() chi.Router {
 			r.Get("/snapshot/current", d.handleSnapshotCurrent)
 			r.Get("/snapshot/{gen}", d.handleSnapshotByGen)
 			r.Get("/snapshot/{gen}/tarball", d.handleSnapshotTarball)
-			// Birth / merge / maintenance handlers land in days 3-5.
+			r.Post("/birth/claim", d.handleBirthClaim)
+			r.Post("/merge/init", d.handleMergeInit)
+			r.Post("/merge/complete/{uploadID}", d.handleMergeComplete)
+			r.Get("/merge/{brainID}", d.handleMergeStatus)
+			r.Get("/maintenance", d.handleMaintenanceGet)
+			r.Post("/maintenance/{action}", d.handleMaintenance)
 		})
+
+		// Upload route is local-backend only and uses its own
+		// HMAC-token auth rather than bearer (so brains can use
+		// the presigned URL with curl without forwarding their
+		// vault token).
+		r.Put("/merge/upload/{uploadID}", d.handleMergeUpload)
 	})
 	return r
 }
