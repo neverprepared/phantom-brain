@@ -160,9 +160,10 @@ func (d *Daemon) buildRouter() chi.Router {
 		// Everything else requires bearer auth.
 		r.Group(func(r chi.Router) {
 			r.Use(AuthMiddleware(d.registry))
-			// Snapshot / birth / merge / maintenance handlers land
-			// in days 2-5. Day 1 leaves the surface here so the
-			// auth path is exercisable in tests.
+			r.Get("/snapshot/current", d.handleSnapshotCurrent)
+			r.Get("/snapshot/{gen}", d.handleSnapshotByGen)
+			r.Get("/snapshot/{gen}/tarball", d.handleSnapshotTarball)
+			// Birth / merge / maintenance handlers land in days 3-5.
 		})
 	})
 	return r
