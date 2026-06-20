@@ -29,19 +29,27 @@ type Lifecycle struct {
 	platform Platform
 	logger   *slog.Logger
 
-	mu       sync.Mutex
-	brainDir string
-	manifest *Manifest
-	closed   bool
+	mu        sync.Mutex
+	brainDir  string
+	manifest  *Manifest
+	heartbeat *Heartbeat
+	closed    bool
 }
 
 // StartOpts narrows what callers must supply to instantiate a
 // Lifecycle. Logger is required even if it's slog.New(slog.DiscardHandler)
 // — we'd rather fail loud at construction than at the first warning.
+//
+// HeartbeatCtx scopes the heartbeat goroutine; pass the process root
+// context so the goroutine dies with the process. SkipHeartbeat is for
+// tests that don't want a background ticker firing through their
+// fixture lifetimes — production callers leave it false.
 type StartOpts struct {
-	Agent    *config.Agent
-	Platform Platform
-	Logger   *slog.Logger
+	Agent         *config.Agent
+	Platform      Platform
+	Logger        *slog.Logger
+	HeartbeatCtx  context.Context
+	SkipHeartbeat bool
 }
 
 // Start births (or rebinds) a brain and returns the running Lifecycle.
@@ -67,13 +75,29 @@ func Start(opts StartOpts) (*Lifecycle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("brain: start: %w", err)
 	}
-	return &Lifecycle{
+	lc := &Lifecycle{
 		agent:    opts.Agent,
 		platform: opts.Platform,
 		logger:   opts.Logger,
 		brainDir: dir,
 		manifest: m,
-	}, nil
+	}
+	if !opts.SkipHeartbeat {
+		hbCtx := opts.HeartbeatCtx
+		if hbCtx == nil {
+			hbCtx = context.Background()
+		}
+		hb, hberr := StartHeartbeat(hbCtx, HeartbeatOpts{
+			BrainDir: dir,
+			Interval: time.Duration(opts.Agent.HeartbeatIntervalSecs) * time.Second,
+			Logger:   opts.Logger,
+		})
+		if hberr != nil {
+			return nil, fmt.Errorf("brain: start heartbeat: %w", hberr)
+		}
+		lc.heartbeat = hb
+	}
+	return lc, nil
 }
 
 // BrainDir returns the on-disk root of the running brain. Callers
@@ -137,6 +161,14 @@ func (l *Lifecycle) Shutdown(ctx context.Context) (*DeathResult, error) {
 		return nil, errAlreadyShutDown
 	}
 	l.closed = true
+	// Stop the heartbeat before packing the death payload so the
+	// alive-marker touches don't race the tar walk and so the flock is
+	// released before this brain becomes a sweep candidate.
+	if l.heartbeat != nil {
+		if err := l.heartbeat.Stop(); err != nil {
+			l.logger.Warn("phantom-brain: heartbeat stop returned error", slog.String("err", err.Error()))
+		}
+	}
 	res, err := Death(DeathOpts{
 		Agent:    l.agent,
 		BrainDir: l.brainDir,
