@@ -50,19 +50,9 @@ func newVaultRunner(parentCtx context.Context, binding VaultBinding, dataDir Dat
 		logger:  logger.With(slog.String("vault", binding.Key.String())),
 	}
 	r.wg.Add(2)
-	go r.reaperLoop(ctx)
+	go r.runReaperLoop(ctx)
 	go r.synthesizerLoop(ctx)
 	return r
-}
-
-// reaperLoop is the per-vault death-payload merger. Day 3 fills the
-// body — day 1 ships a no-op that just exits on context cancel so
-// Stop() returns promptly.
-func (r *vaultRunner) reaperLoop(ctx context.Context) {
-	defer r.wg.Done()
-	r.logger.Info("phantom-brain: reaper loop started (day-1 stub)")
-	<-ctx.Done()
-	r.logger.Info("phantom-brain: reaper loop exiting")
 }
 
 // synthesizerLoop is the per-vault queue consumer. Day 4 fills the
