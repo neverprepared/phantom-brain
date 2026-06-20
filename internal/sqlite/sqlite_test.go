@@ -1,11 +1,23 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// serializeF32 mirrors what asg017's SerializeFloat32 does — turn a
+// []float32 into the little-endian byte blob sqlite-vec expects in a
+// vec0 BLOB column. Inlined here so the test has no dep on the binding
+// package whose history is documented in internal/sqlite/sqlite.go.
+func serializeF32(v []float32) []byte {
+	buf := new(bytes.Buffer)
+	_ = binary.Write(buf, binary.LittleEndian, v)
+	return buf.Bytes()
+}
 
 func TestOpenAppliesPRAGMAs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.db")
@@ -81,16 +93,38 @@ func TestReadOnlySkipsWAL(t *testing.T) {
 }
 
 // TestSqliteVecLoaded is the canary for the sqlite-vec extension
-// being available on every connection. Day-3 ships only the plain
-// SQLite wrapper; sqlite-vec loading is its own dep-management
-// problem that the internal/index package will solve when it lands
-// (see package docstring for the three rejected approaches).
-//
-// To re-enable: pick a sqlite-vec binding strategy in internal/index,
-// confirm the vec0 module is registered on connections returned by
-// Open(), then delete this Skip.
+// being available on every connection. Day-6a wires this via
+// internal/vec's per-connection LoadExtension hook.
 func TestSqliteVecLoaded(t *testing.T) {
-	t.Skip("sqlite-vec extension loading is internal/index work; see sqlite.go package doc")
+	db, err := Open(Options{Path: filepath.Join(t.TempDir(), "vec.db")})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer db.Close()
+
+	MustExec(t, db, `CREATE VIRTUAL TABLE vec_test USING vec0(embedding float[3])`)
+
+	v100 := serializeF32([]float32{1, 0, 0})
+	v010 := serializeF32([]float32{0, 1, 0})
+	v001 := serializeF32([]float32{0, 0, 1})
+
+	MustExec(t, db, `INSERT INTO vec_test(rowid, embedding) VALUES (1, ?), (2, ?), (3, ?)`, v100, v010, v001)
+
+	var rowid int
+	var distance float64
+	err = db.QueryRow(
+		`SELECT rowid, distance FROM vec_test WHERE embedding MATCH ? ORDER BY distance LIMIT 1`,
+		v100,
+	).Scan(&rowid, &distance)
+	if err != nil {
+		t.Fatalf("nearest-neighbor query: %v", err)
+	}
+	if rowid != 1 {
+		t.Errorf("nearest neighbor rowid = %d, want 1", rowid)
+	}
+	if distance > 1e-6 {
+		t.Errorf("self-match distance = %v, want ~0", distance)
+	}
 }
 
 func TestBackupProducesConsistentSingleFileCopy(t *testing.T) {
@@ -145,6 +179,44 @@ func TestBackupProducesConsistentSingleFileCopy(t *testing.T) {
 	}
 }
 
+// TestBackupPreservesVecData is the real-world test: snapshotting a
+// vectors.db with sqlite-vec data must preserve the vec0 virtual
+// table and its blob storage intact. This is what the Phase 2
+// snapshot builder relies on.
 func TestBackupPreservesVecData(t *testing.T) {
-	t.Skip("sqlite-vec extension loading is internal/index work; see sqlite.go package doc")
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "vec-src.db")
+	dstPath := filepath.Join(dir, "vec-dst.db")
+
+	src, err := Open(Options{Path: srcPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	MustExec(t, src, `CREATE VIRTUAL TABLE v USING vec0(embedding float[3])`)
+	v := serializeF32([]float32{0.5, 0.5, 0.5})
+	MustExec(t, src, `INSERT INTO v(rowid, embedding) VALUES (7, ?)`, v)
+	src.Close()
+
+	if err := Backup(context.Background(), srcPath, dstPath); err != nil {
+		t.Fatalf("Backup: %v", err)
+	}
+
+	dst, err := Open(Options{Path: dstPath, ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dst.Close()
+
+	var rowid int
+	var distance float64
+	err = dst.QueryRow(
+		`SELECT rowid, distance FROM v WHERE embedding MATCH ? ORDER BY distance LIMIT 1`,
+		v,
+	).Scan(&rowid, &distance)
+	if err != nil {
+		t.Fatalf("post-backup vec query: %v", err)
+	}
+	if rowid != 7 {
+		t.Errorf("rowid = %d, want 7", rowid)
+	}
 }

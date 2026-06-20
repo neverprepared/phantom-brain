@@ -1,0 +1,14 @@
+This directory vendors prebuilt `sqlite-vec` loadable binaries from
+https://github.com/asg017/sqlite-vec (Apache License 2.0).
+
+Upstream release: v0.1.9
+Upstream license: Apache-2.0
+
+We embed these binaries into pbrainctl at build time and extract them
+to a temp file at process startup to preserve single-binary
+distribution. See vec.go for the loading mechanism.
+
+To update: download the new release's loadable artifact for each
+platform from the upstream releases page and replace the dylib files
+in this directory. The filename convention is
+sqlite-vec-<GOOS>-<GOARCH>.<ext>.

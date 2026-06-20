@@ -6,36 +6,41 @@
 // consistent: WAL mode, NORMAL synchronous, foreign keys, a non-trivial
 // busy timeout.
 //
-// Driver: mattn/go-sqlite3 (CGO). The classic CGO bindings against the
-// system libsqlite. Fast, mature, well-understood.
+// Driver: mattn/go-sqlite3 (CGO) + a sqlite-vec loadable extension
+// registered per-connection. internal/vec embeds the sqlite-vec binary
+// for the host platform, extracts it to a temp file at process start,
+// and registers a custom database/sql driver name ("sqlite3_vec")
+// whose ConnectHook calls LoadExtension on every new conn. We open
+// against that driver name instead of the default "sqlite3", so every
+// *sql.DB this package returns already has the vec0 virtual-table
+// module available.
 //
-// # sqlite-vec extension: not loaded in this package
-//
-// vectors.db needs the sqlite-vec extension for the vec0 virtual table.
-// Loading sqlite-vec across all platforms is its own non-trivial
-// dependency problem:
-//
-//   - asg017/sqlite-vec-go-bindings/cgo uses sqlite3_auto_extension,
-//     which Apple stubbed out in macOS 10.10. Silently broken on macOS.
-//   - asg017/sqlite-vec-go-bindings/ncruces requires a specific (older)
-//     ncruces/go-sqlite3 version whose WASM SQLite uses wasm features
-//     the asg017-bundled SQLite WASM does not export. Version conflict.
-//   - Installing sqlite-vec.dylib system-wide and using LoadExtension
-//     defeats the single-binary distribution goal.
-//
-// Rather than wedge that decision into this Day-3 wrapper, we ship the
-// plain Open()/Backup() helpers now and handle sqlite-vec loading in
-// the package that actually needs it (internal/index, when it lands).
-// Callers that need the vec0 module will get an explicit error at
-// CREATE VIRTUAL TABLE time, not a silent miss.
+// History of failed approaches (kept here so the next session doesn't
+// re-litigate): see the internal/vec package doc. Three prior attempts
+// (asg017 cgo Auto, asg017 ncruces, system-installed dylib) all failed
+// on macOS for different reasons. The per-conn LoadExtension path is
+// the one that actually works.
 package sqlite
 
 import (
 	"database/sql"
 	"fmt"
 
-	_ "github.com/mattn/go-sqlite3" // sql driver
+	_ "github.com/mattn/go-sqlite3" // base driver — internal/vec registers a vec-enabled variant
+
+	"github.com/mindmorass/mcp-phantom-brain/internal/vec"
 )
+
+func init() {
+	// Fail-loud at package init if the vec driver can't be registered
+	// — for example because we're running on a GOOS/GOARCH for which
+	// no sqlite-vec binary is vendored yet. The alternative (lazy fail
+	// at first Open) hides the configuration problem behind whatever
+	// other code happens to run first.
+	if err := vec.Init(); err != nil {
+		panic(fmt.Sprintf("sqlite: vec driver init: %v", err))
+	}
+}
 
 // Options configures a database connection.
 type Options struct {
@@ -84,7 +89,7 @@ func Open(opts Options) (*sql.DB, error) {
 			opts.Path, busy)
 	}
 
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open(vec.DriverName, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite.Open %q: %w", opts.Path, err)
 	}
