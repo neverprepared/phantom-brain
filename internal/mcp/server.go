@@ -59,6 +59,8 @@ func NewServer(deps ServerDeps) *Server {
 func (s *Server) Register(srv *server.MCPServer) {
 	srv.AddTool(recallTool(), s.handleRecall)
 	srv.AddTool(perceiveTool(), s.handlePerceive)
-	// Day 11: learn, attach, trace.
+	srv.AddTool(learnTool(), s.handleLearn)
+	srv.AddTool(attachTool(), s.handleAttach)
+	srv.AddTool(traceTool(), s.handleTrace)
 	// Day 12: task_start, task_update, task_complete, task_get.
 }
