@@ -100,6 +100,17 @@ func NewLocalBackend(dataDir DataDir, baseURL string) (*LocalBackend, error) {
 	}, nil
 }
 
+// OverrideBaseURL replaces the URL fragment used to build presigned
+// upload URLs. Production callers never use this; integration tests
+// need it so URLs returned by /merge/init route back to the
+// httptest.Server they spun up (instead of the daemon's nominal :0
+// listener which isn't actually serving).
+func (b *LocalBackend) OverrideBaseURL(u string) {
+	b.mu.Lock()
+	b.baseURL = strings.TrimRight(u, "/")
+	b.mu.Unlock()
+}
+
 // RegisterUpload pre-records the binding for an upload_id so
 // AcceptUpload + CompleteUpload can confirm the upload was started
 // by an authenticated caller. Called from the /merge/init handler.

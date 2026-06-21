@@ -322,6 +322,23 @@ func (d *Daemon) Shutdown(ctx context.Context) error {
 // the full ListenAndServe path.
 func (d *Daemon) Router() chi.Router { return d.router }
 
+// LocalBackendForTest returns the underlying LocalBackend if the
+// daemon was configured with local storage. Test-only accessor so
+// integration tests can rewrite the baseURL after httptest assigns
+// a port. Returns (nil, false) when running against MinIO.
+func (d *Daemon) LocalBackendForTest() (*LocalBackend, bool) {
+	lb, ok := d.storage.(*LocalBackend)
+	return lb, ok
+}
+
+// LookupBindingForTest exposes the registry's vault-keyed lookup so
+// integration tests can drive ReapOnce / SynthesizeOne directly.
+// Production code goes through the chi middleware (binding from
+// context).
+func (d *Daemon) LookupBindingForTest(k VaultKey) (VaultBinding, bool) {
+	return d.registry.LookupByVault(k)
+}
+
 // healthResponse keeps the shape consistent with what Phase 2.5 brain
 // agents will parse out of /api/brain/health. Vaults are listed
 // alphabetically; tokens are NEVER returned.

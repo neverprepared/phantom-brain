@@ -50,6 +50,7 @@ See https://github.com/neverprepared/mcp-phantom-brain for the v5 spec.`,
 	root.AddCommand(versionCmd())
 	root.AddCommand(mcpCmd())
 	root.AddCommand(serveCmd())
+	root.AddCommand(migrateLegacyCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "pbrainctl: %v\n", err)
@@ -316,6 +317,49 @@ func expandHome(p string) string {
 // PHANTOM_BRAIN_CONFIG_DIR (default ~/.config/phantom-brain-server),
 // keeps state under PHANTOM_BRAIN_DATA_DIR (default /var/lib/phantom-
 // brain). SIGHUP reloads the vault registry; SIGINT/SIGTERM drain.
+// migrateLegacyCmd ports an existing v4.x TS-style vault into the
+// v5.0 agent layout. One-time operation; safe to run idempotently
+// (refuses if a brain already exists for the configured (profile,
+// vault)).
+//
+//	BRAIN_LEGACY_VAULT_PATH=/path/to/old/vault \
+//	  CL_BRAIN_API=... CL_WORKSPACE_PROFILE=personal CL_BRAIN_VAULT=memory \
+//	  pbrainctl migrate-legacy
+func migrateLegacyCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "migrate-legacy",
+		Short: "Copy a v4.x TS-era vault into the v5.0 agent layout (one-time)",
+		Long: `Reads BRAIN_LEGACY_VAULT_PATH and copies its contents into a fresh
+brain dir under $XDG_DATA_HOME/phantom-brain/{profile}/{vault}/brains/<brain_id>/.
+Stamps a manifest with seed_source = "legacy-migration". Refuses if a brain
+already exists for this (profile, vault) — delete the existing brain dir
+first if you want to force a fresh migration. The source vault is NOT
+deleted; remove it manually after verifying the next snapshot picks up
+the migrated content.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			legacyPath := strings.TrimSpace(os.Getenv("BRAIN_LEGACY_VAULT_PATH"))
+			if legacyPath == "" {
+				return fmt.Errorf("BRAIN_LEGACY_VAULT_PATH is required")
+			}
+			legacyPath = expandHome(legacyPath)
+			agent, err := config.LoadAgent()
+			if err != nil {
+				return err
+			}
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+			res, err := brain.MigrateLegacyVault(legacyPath, agent, logger)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(),
+				"migrated %d files to %s (brain_id=%s)\n",
+				res.CopiedFiles, res.BrainDir, res.BrainID,
+			)
+			return nil
+		},
+	}
+}
+
 func serveCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "serve",
