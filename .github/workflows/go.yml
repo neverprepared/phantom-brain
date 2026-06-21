@@ -8,11 +8,16 @@ on:
 
 jobs:
   test:
-    name: Build & Test
-    # macos-14 is GitHub's Apple Silicon (arm64) runner — matches the
-    # only sqlite-vec loadable currently vendored in internal/vec/dylibs/.
-    # Linux/amd64 vendoring + matrix expansion is tracked for Phase 5.
-    runs-on: macos-14
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Don't cancel the macOS run when Linux fails (or vice versa) —
+      # we want full signal on platform-specific regressions.
+      fail-fast: false
+      matrix:
+        os:
+          - macos-14       # Apple Silicon (arm64) — sqlite-vec-darwin-arm64.dylib
+          - ubuntu-latest  # x86_64 — sqlite-vec-linux-amd64.so (Phase 5)
 
     steps:
       - uses: actions/checkout@v4
