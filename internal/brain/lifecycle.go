@@ -159,14 +159,19 @@ func (l *Lifecycle) runCheckpointer(ctx context.Context, interval time.Duration)
 	defer close(l.ckptDone)
 	t := time.NewTicker(interval)
 	defer t.Stop()
-	l.logger.Info("phantom-brain: checkpoint ticker started",
+	// Drop to Debug — operators don't need to see the ticker boot/exit
+	// in normal logs. The Phase 1 INFO was useful when the cadence was
+	// new; in production it just generates a paired start/exit on
+	// every short-lived agent (MCP servers that init + immediately
+	// shutdown produce both lines back-to-back).
+	l.logger.Debug("phantom-brain: checkpoint ticker started",
 		slog.String("interval", interval.String()),
 		slog.Int("writes_threshold", l.agent.CheckpointWrites),
 	)
 	for {
 		select {
 		case <-ctx.Done():
-			l.logger.Info("phantom-brain: checkpoint ticker exiting")
+			l.logger.Debug("phantom-brain: checkpoint ticker exiting")
 			return
 		case <-t.C:
 			n := int(l.writes.Load())

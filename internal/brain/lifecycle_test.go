@@ -75,9 +75,9 @@ func TestDeath_PackagesPayloadToPendingDir(t *testing.T) {
 		t.Errorf("status=%q, want dead", m.Status)
 	}
 
-	// Warning about the daemon-stub ship queue must be emitted.
-	if !strings.Contains(buf.String(), "ship queue is no-op") {
-		t.Errorf("expected ship-queue stub warning, got: %s", buf.String())
+	// Death now logs the payload landing at INFO, not as a stub warning.
+	if !strings.Contains(buf.String(), "written to local ship queue") {
+		t.Errorf("expected ship-queue write log, got: %s", buf.String())
 	}
 
 	// Tar should contain at least the manifest and the seeded raw file.
