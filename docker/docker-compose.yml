@@ -88,4 +88,8 @@ services:
     volumes:
       - ./config:/config:ro
       - ./data/pbrainctl:/data
-    command: ["pbrainctl", "serve"]
+    # Dockerfile's ENTRYPOINT is `pbrainctl` and CMD is `serve`,
+    # so no override needed. Including a `command:` here would
+    # be appended after ENTRYPOINT and produce `pbrainctl <cmd>` —
+    # the literal `pbrainctl serve` form would fail with
+    # "unknown command 'pbrainctl' for 'pbrainctl'".
