@@ -56,7 +56,8 @@ func TestHandler_BirthClaim_HappyPath(t *testing.T) {
 	body, _ := json.Marshal(birthClaimRequest{BrainID: "brain-1", Gen: 1, TTLSecs: 3600})
 	req, _ := http.NewRequest(http.MethodPost, baseURL+"/api/brain/birth/claim", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+tok)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil { t.Fatal(err) }
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
@@ -75,7 +76,8 @@ func TestHandler_BirthClaim_StaleGenReturns409(t *testing.T) {
 	body, _ := json.Marshal(birthClaimRequest{BrainID: "brain-x", Gen: 999})
 	req, _ := http.NewRequest(http.MethodPost, baseURL+"/api/brain/birth/claim", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+tok)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil { t.Fatal(err) }
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
 		t.Errorf("status=%d, want 409", resp.StatusCode)
@@ -145,7 +147,8 @@ func TestHandler_MergeFlow_EndToEnd(t *testing.T) {
 	// 4. GET /merge/{brain_id} — pending state before reaper runs.
 	req, _ = http.NewRequest(http.MethodGet, baseURL+"/api/brain/merge/brain-A", nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
-	resp, _ = http.DefaultClient.Do(req)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil { t.Fatal(err) }
 	defer resp.Body.Close()
 	var status map[string]any
 	_ = json.NewDecoder(resp.Body).Decode(&status)
@@ -160,7 +163,8 @@ func TestHandler_MergeFlow_EndToEnd(t *testing.T) {
 	}
 	req, _ = http.NewRequest(http.MethodGet, baseURL+"/api/brain/merge/brain-A", nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
-	resp, _ = http.DefaultClient.Do(req)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil { t.Fatal(err) }
 	defer resp.Body.Close()
 	_ = json.NewDecoder(resp.Body).Decode(&status)
 	if status["state"] != "merged" {
@@ -174,7 +178,8 @@ func TestHandler_MergeInit_RejectsOversizedPayload(t *testing.T) {
 	body, _ := json.Marshal(mergeInitRequest{BrainID: "x", PayloadSize: 10 * 1024 * 1024 * 1024 * 1024}) // 10 TB
 	req, _ := http.NewRequest(http.MethodPost, baseURL+"/api/brain/merge/init", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+tok)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil { t.Fatal(err) }
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusRequestEntityTooLarge {
 		t.Errorf("status=%d, want 413", resp.StatusCode)
@@ -188,7 +193,8 @@ func TestHandler_MergeInit_RejectsWhenMaintenance(t *testing.T) {
 	body, _ := json.Marshal(mergeInitRequest{BrainID: "x", PayloadSize: 100})
 	req, _ := http.NewRequest(http.MethodPost, baseURL+"/api/brain/merge/init", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+tok)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil { t.Fatal(err) }
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("status=%d, want 503", resp.StatusCode)
@@ -204,7 +210,8 @@ func TestHandler_Maintenance_EnterExitGet(t *testing.T) {
 	enter := func() int {
 		req, _ := http.NewRequest(http.MethodPost, baseURL+"/api/brain/maintenance/enter", nil)
 		req.Header.Set("Authorization", "Bearer "+tok)
-		resp, _ := http.DefaultClient.Do(req)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil { t.Fatal(err) }
 		resp.Body.Close()
 		return resp.StatusCode
 	}
@@ -215,7 +222,8 @@ func TestHandler_Maintenance_EnterExitGet(t *testing.T) {
 	getState := func() bool {
 		req, _ := http.NewRequest(http.MethodGet, baseURL+"/api/brain/maintenance", nil)
 		req.Header.Set("Authorization", "Bearer "+tok)
-		resp, _ := http.DefaultClient.Do(req)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil { t.Fatal(err) }
 		defer resp.Body.Close()
 		var m map[string]any
 		_ = json.NewDecoder(resp.Body).Decode(&m)
@@ -228,7 +236,8 @@ func TestHandler_Maintenance_EnterExitGet(t *testing.T) {
 
 	req, _ := http.NewRequest(http.MethodPost, baseURL+"/api/brain/maintenance/exit", nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil { t.Fatal(err) }
 	resp.Body.Close()
 	if getState() {
 		t.Fatal("expected maintenance false after exit")
