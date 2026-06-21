@@ -114,5 +114,13 @@ func (s *Server) ingestMarkdown(ctx context.Context, p ingestParams) (*ingestRes
 		return nil, fmt.Sprintf("index upsert: %v", err), false
 	}
 
+	// Phase 4: feed the checkpoint cadence's writes-threshold so
+	// automatic checkpoints fire when there's real activity.
+	// Lifecycle is nil in legacy BRAIN_VAULT_PATH startup mode —
+	// no checkpointer to feed, no-op.
+	if s.deps.Lifecycle != nil {
+		s.deps.Lifecycle.RecordWrite()
+	}
+
 	return &ingestResult{Status: "stored", RelativePath: destRel, SHA: sha}, "", true
 }

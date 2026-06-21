@@ -169,6 +169,10 @@ func (s *Server) handleAttach(ctx context.Context, req mcp.CallToolRequest) (*mc
 		return mcp.NewToolResultError(fmt.Sprintf("index upsert: %v", err)), nil
 	}
 
+	if s.deps.Lifecycle != nil {
+		s.deps.Lifecycle.RecordWrite()
+	}
+
 	return mcp.NewToolResultText(fmt.Sprintf(
 		"Attached %d bytes to %s. Stub: %s. Blob SHA: %s.",
 		st.Size(), stubRel, stubSHA, blobSHA,
