@@ -87,7 +87,26 @@ $PHANTOM_BRAIN_DATA_DIR/{profile}/{vault}/collective/
 
 ## Setup
 
-**Prerequisites:** Go 1.26+ for build; the `claude` CLI on `$PATH` for the gate / summarizer; optionally [Ollama](https://ollama.ai) with `nomic-embed-text` for vector search.
+**Prerequisites:** the `claude` CLI on `$PATH` for the gate / summarizer; optionally [Ollama](https://ollama.ai) with `nomic-embed-text` for vector search.
+
+### Install
+
+**macOS — homebrew tap (recommended):**
+
+```bash
+brew install neverprepared/tap/pbrainctl
+```
+
+**Linux — release tarball:**
+
+```bash
+curl -L -o pb.tar.gz https://github.com/neverprepared/mcp-phantom-brain/releases/latest/download/pbrainctl_linux_amd64.tar.gz
+tar -xzf pb.tar.gz
+sudo install pbrainctl_linux_amd64/pbrainctl /usr/local/bin/
+pbrainctl version
+```
+
+**Any platform — build from source:**
 
 ```bash
 git clone https://github.com/neverprepared/mcp-phantom-brain

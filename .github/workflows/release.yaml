@@ -1,0 +1,94 @@
+name: release
+
+# Runs on every v* tag (release-please pushes them after merging
+# its release PR) and on workflow_dispatch (manual retro-runs for
+# existing tags). Two jobs:
+#
+#   darwin — goreleaser on macos-14: builds + archives darwin-arm64,
+#            creates the GitHub release, pushes the formula to
+#            neverprepared/homebrew-tap.
+#
+#   linux  — ubuntu-latest: builds + archives linux-amd64, attaches
+#            to the release the darwin job created. needs: darwin so
+#            the release exists when this job uploads.
+#
+# We can't do everything in one goreleaser invocation because the
+# sqlite-vec cgo build requires the target's native toolchain — no
+# cross-compile from macOS to linux.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to attach binaries to (e.g. v1.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  darwin:
+    name: darwin/arm64 + tap update
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0  # goreleaser changelog generation needs full history
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Fine-grained PAT with contents:write on
+          # neverprepared/homebrew-tap. Set this as a repo secret:
+          #   gh secret set HOMEBREW_TAP_TOKEN --repo neverprepared/mcp-phantom-brain
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+  linux:
+    name: linux/amd64
+    runs-on: ubuntu-latest
+    needs: darwin
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: make build
+
+      - name: Package
+        id: pkg
+        run: |
+          # Match the darwin/goreleaser naming convention exactly
+          # so release pages look uniform: pbrainctl_<os>_<arch>.tar.gz
+          NAME="pbrainctl_linux_amd64"
+          mkdir -p "dist/$NAME"
+          cp pbrainctl LICENSE README.md "dist/$NAME/"
+          tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
+          shasum -a 256 "dist/$NAME.tar.gz" | awk '{print $1"  "$2}' \
+              > "dist/$NAME.tar.gz.sha256"
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            dist/pbrainctl_linux_amd64.tar.gz
+            dist/pbrainctl_linux_amd64.tar.gz.sha256
+          fail_on_unmatched_files: true
