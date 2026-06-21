@@ -49,19 +49,26 @@ func (c *Client) ensureIndex(ctx context.Context, logical string, mapping map[st
 
 	existsReq := osapi.IndicesExistsReq{Indices: []string{name}}
 	resp, err := c.api.Indices.Exists(ctx, existsReq)
-	if err != nil {
-		return fmt.Errorf("exists probe: %w", err)
+	// opensearch-go v4 surfaces non-2xx as a typed error. The raw
+	// response (or the parsed error message) carries the status: 200
+	// → exists; 404 → fall through to create.
+	status := 0
+	if resp != nil {
+		status = resp.StatusCode
 	}
-	// opensearch-go returns 200 for exists, 404 for not. Errors with
-	// a non-2xx are returned as nil err + non-nil resp on this client,
-	// so we check the status explicitly.
-	switch {
-	case resp != nil && resp.StatusCode == http.StatusOK:
+	if status == 0 {
+		status = statusFromErr(err)
+	}
+	switch status {
+	case http.StatusOK:
 		return nil
-	case resp != nil && resp.StatusCode == http.StatusNotFound:
-		// fallthrough to create
-	case resp != nil:
-		return fmt.Errorf("exists probe: unexpected status %d", resp.StatusCode)
+	case http.StatusNotFound:
+		// fall through to create
+	default:
+		if err != nil {
+			return fmt.Errorf("exists probe: %w", err)
+		}
+		return fmt.Errorf("exists probe: unexpected status %d", status)
 	}
 
 	body, err := json.Marshal(mapping)
@@ -93,6 +100,29 @@ func (c *Client) ensureIndex(ctx context.Context, logical string, mapping map[st
 
 func isAlreadyExists(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "resource_already_exists_exception")
+}
+
+// statusFromErr parses the HTTP status code out of an opensearch-go
+// typed error message, which formats as "status: [NNN ...]". Returns
+// 0 when the message doesn't contain a status.
+func statusFromErr(err error) int {
+	if err == nil {
+		return 0
+	}
+	msg := err.Error()
+	idx := strings.Index(msg, "status: [")
+	if idx == -1 {
+		return 0
+	}
+	tail := msg[idx+len("status: ["):]
+	var n int
+	for _, ch := range tail {
+		if ch < '0' || ch > '9' {
+			break
+		}
+		n = n*10 + int(ch-'0')
+	}
+	return n
 }
 
 // commonSettings enables k-NN at the index level (required for the

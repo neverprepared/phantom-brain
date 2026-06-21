@@ -7,7 +7,7 @@ import (
 
 func TestDocID(t *testing.T) {
 	got := DocID("alpha", "memory", "abc123")
-	want := "alpha/memory/abc123"
+	want := "alpha:memory:abc123"
 	if got != want {
 		t.Fatalf("DocID = %q, want %q", got, want)
 	}

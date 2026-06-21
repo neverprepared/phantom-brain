@@ -128,12 +128,14 @@ type AttachmentDoc struct {
 // key). Used for all three indices — within a given index, the key
 // part is a SHA256 (summaries/attachments) or an entity slug.
 //
-//	<profile>/<vault>/<key>
+//	<profile>:<vault>:<key>
 //
-// Doc IDs that look like paths are safe in OS; the only constraint
-// is they're <= 512 bytes and don't contain '\n' or '\r'.
+// Slashes are deliberately avoided: opensearch-go interpolates the
+// doc ID into URL paths without encoding, so a slash would silently
+// produce a 404 ("no handler found for uri"). Colons are URL-safe
+// within /_doc/{id}.
 func DocID(profile, vault, key string) string {
-	return profile + "/" + vault + "/" + key
+	return profile + ":" + vault + ":" + key
 }
 
 // EntitySlug canonicalises an entity name into a stable slug suitable
