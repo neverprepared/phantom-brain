@@ -1,4 +1,4 @@
-//go:build !(darwin && arm64) && !(linux && amd64)
+//go:build !(darwin && arm64) && !(linux && amd64) && !(linux && arm64)
 
 // This file populates the package's embed slot with nil bytes on
 // platforms we haven't vendored a sqlite-vec binary for yet. Init()
