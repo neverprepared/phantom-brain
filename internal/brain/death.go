@@ -100,8 +100,11 @@ func Death(opts DeathOpts) (*DeathResult, error) {
 		return nil, fmt.Errorf("brain: mark dead (payload at %s): %w", payloadPath, err)
 	}
 
-	logger.Warn(
-		"phantom-brain: death payload retained locally; ship queue is no-op until Phase 2 daemon",
+	// Phase 2.5 wired the shipqueue — death payloads now actually ship
+	// when UploadShipQueue runs (typically at the next agent startup's
+	// recovery drain). Log at INFO; only the failure path is a WARN.
+	logger.Info(
+		"phantom-brain: death payload written to local ship queue",
 		slog.String("brain_id", m.BrainID),
 		slog.String("payload", payloadPath),
 		slog.Int64("size_bytes", size),
