@@ -372,6 +372,13 @@ func listPublishedGens(dataDir DataDir, profile, vaultName string) ([]uint64, er
 	return out, nil
 }
 
+// PruneSnapshots is the exported entry point operator tooling reaches
+// for. Same behaviour as the internal pruneSnapshots; kept as a
+// wrapper so the package-internal call sites don't have to change.
+func PruneSnapshots(dataDir DataDir, profile, vaultName string, retentionGens int) error {
+	return pruneSnapshots(dataDir, profile, vaultName, retentionGens)
+}
+
 // pruneSnapshots removes published snapshots older than retentionGens
 // EXCEPT those whose staged/.claims/ dir is non-empty (dual-source pin:
 // a brain claimed that gen and might still be mid-birth).

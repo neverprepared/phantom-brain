@@ -1,8 +1,11 @@
-node_modules
-dist
 *.log
 .env
 ${OBSIDIAN_VAULT_PATH}/
+
+# Legacy TS build artifacts (now under legacy-ts/)
+legacy-ts/node_modules
+legacy-ts/dist
+legacy-ts/.env
 
 # Go build artifacts (Phase 0+)
 /pbrainctl

@@ -4,164 +4,168 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server that gives Cl
 
 Content enters through a **Raw → Gate → Wiki** pipeline. Sources are validated for reliability and classified by subject-matter topic before being written to the knowledge base. The host LLM drives the pipeline; the server enforces structure and provides the reference material.
 
+> **Implementation note.** The current codebase is the Go rewrite (v5.0 spec, Phases 0–2.5). A single `pbrainctl` binary subsumes the MCP server, the HTTP synthesis daemon, and the operator CLI. The original TypeScript implementation now lives under [`legacy-ts/`](./legacy-ts/) and is frozen pending deletion.
+
 ## How it works
 
-1. **Ingest** — `brain_perceive` (web content), `brain_learn` (curated docs), or `brain_attach` (binary files: PDF, Word, images) writes raw content to `Raw/` and enqueues it for processing. Both `brain_learn` and `brain_perceive` accept a single item or a batch of up to 100 via `items[]`.
-2. **Gate** — `brain_synthesize` claims the next queue item and runs the Gate: a `claude` CLI call that scores the source for reliability (`high | medium | low | contested`), flags the failure category if unreliable, and classifies the subject-matter topic (`agents | memory | governance | tools | ...`).
-3. **Synthesize** — the raw content is distilled into a concise prose summary via LLM, written to `Wiki/summaries/`, named entities are extracted from the raw content and fanned out to `Wiki/entities/`, and the `Raw → Wiki` mapping is recorded in `provenance.json`.
+1. **Ingest** — `brain_perceive` (web content), `brain_learn` (curated docs), or `brain_attach` (binary files: PDF, Word, images) writes raw content to `Raw/` and enqueues it for processing.
+2. **Gate** — the synthesizer claims the next queue item and runs the Gate: a `claude` CLI call that scores the source for reliability (`high | medium | low | contested`) and classifies the subject-matter topic (`agents | memory | governance | tools | …`).
+3. **Synthesize** — raw content is distilled into a prose summary via LLM, written to `Wiki/summaries/`, named entities are extracted and fanned out to `Wiki/entities/`, and the mapping is recorded in `provenance.json`.
 4. **Recall** — `brain_recall` searches summaries and entity pages via hybrid FTS5 + vector RRF, with optional topic pre-filtering.
 
-## Tools
+In agent-contract mode (v5.0), the lifecycle adds **mortal brains**: each MCP process births from a daemon-published snapshot, accumulates work locally, and ships a trimmed death payload back to the daemon on shutdown. The daemon merges + synthesises into the collective vault and publishes the next snapshot. See the v5.0 spec for the full lifecycle.
+
+## Binary
+
+```
+pbrainctl mcp              # stdio JSON-RPC MCP server (per agent process)
+pbrainctl serve            # HTTP synthesis daemon (multi-vault, per-vault reaper + synth)
+pbrainctl migrate-legacy   # one-time port of an old vault into the v5.0 layout
+
+pbrainctl vault            # list | status | reload (SIGHUPs the daemon)
+pbrainctl snapshot         # status | rebuild | prune | claims  [profile/vault]
+pbrainctl queue            # depth | contributors  [profile/vault]
+pbrainctl maintenance      # enter | exit          [profile/vault]
+pbrainctl list             # list local brain dirs
+pbrainctl show <brain_id>  # dump a brain's manifest
+pbrainctl orphans          # dry-run recovery sweep
+pbrainctl force-merge      # one ReapOnce  [profile/vault]
+pbrainctl force-checkpoint # one SynthesizeOne  [profile/vault]
+pbrainctl version
+```
+
+## MCP tools
 
 | Tool | Purpose |
 |---|---|
 | `brain_perceive` | Ingest a gathered web source (URL + content). Single item or batch via `items[]` (up to 100) |
-| `brain_learn` | Ingest a curated document (human-trusted content). Single item or batch via `items[]` (up to 100) |
+| `brain_learn` | Ingest a curated document. Single item or batch via `items[]` (up to 100) |
 | `brain_attach` | Ingest a binary file (PDF, Word, image). Stores raw binary in `Raw/attachments/`, extracts text, queues for synthesis |
-| `brain_synthesize` | Process 1–20 queued items: run Gate, distill summary via LLM, write summary + entity pages |
 | `brain_recall` | Hybrid FTS5 + vector search; optional `topic` filter |
-| `brain_reflect` | Maintenance pass: orphan detection, stale gate re-scoring, broken provenance cleanup, duplicate URL flagging, done/ pruning, log rotation, dead shard reaping |
 | `brain_trace` | Query the synthesis audit trail (`_log.md`) by text, reliability, or date |
-| `task_start` | Create a working memory task, auto-seeded from vault context |
-| `task_update` | Append findings, steps, artifacts, and open questions to an active task |
-| `task_complete` | Promote medium/high findings to the curated queue, then clear the task |
-| `task_get` | Read current task state or list active tasks |
-| `brain_status` | (Go agent mode) Return the running brain's manifest, heartbeat age, and ship-queue depth as JSON |
-| `brain_checkpoint` | (Go agent mode) Run the checkpoint flow; honors the v4.4 mtime-cutoff predicate unless `force=true` |
-| `brain_death` | (Go agent mode) Transition this brain to dead and pack the trimmed death payload into the local ship queue |
+| `task_start` / `task_update` / `task_complete` / `task_get` | Working-memory task lifecycle, auto-seeded from vault context |
+| `brain_status` *(agent mode)* | Manifest + heartbeat age + ship-queue depth as JSON |
+| `brain_checkpoint` *(agent mode)* | Run the checkpoint flow; honors the v4.4 mtime-cutoff predicate unless `force=true` |
+| `brain_death` *(agent mode)* | Transition this brain to dead and pack the death payload into the local ship queue |
 
 ## The Gate
 
 The Gate evaluates each gathered source before it enters the wiki. It never throws — any failure degrades to a `medium` fallback.
 
-**Verdict fields:**
 - `reliability` — `high | medium | low | contested`
 - `category` — failure type when reliability is low/contested: `source | formal | informal | philosophical`
-- `topic` — subject-matter bucket: `agents | memory | governance | tools | training | infrastructure | knowledge | multiagent | general`
+- `topic` — `agents | memory | governance | tools | training | infrastructure | knowledge | multiagent | general`
 - `reason` — one-sentence explanation
 
-Curated sources (`brain_learn`) skip the LLM — human curation is the quality signal.
+Curated sources (`brain_learn`) skip the LLM — human curation is the quality signal. The `topic` field is stored in summary frontmatter and used by `brain_recall` for scoped retrieval.
 
-The `topic` field is stored in summary frontmatter and used by `brain_recall` for scoped retrieval.
+## Layouts
 
-## Vault structure
+### Agent vault (per process, v5.0)
 
 ```
-<vault>/
-  Raw/
-    curated/         ← brain_learn writes here
-    gathered/        ← brain_perceive writes here
-    attachments/     ← brain_attach stores raw binaries here (immutable, never deleted)
-  Wiki/
-    summaries/       ← one page per synthesized source
-    entities/        ← one page per extracted entity, appended across sources
-    _log.md          ← append-only synthesis audit trail
-    _index.md        ← entity graduation index (Primary / Emerging / Notes tiers)
-  _index/
-    vectors.db       ← SQLite: FTS5 full-text index + sqlite-vec vector index
-    provenance.json  ← Raw path → Wiki pages + reliability + topic
-    queue/           ← pending/ and done/ QueueItem JSON files
-    wm-<pid>.sqlite  ← per-process working memory (tasks, findings, artifacts)
+$XDG_DATA_HOME/phantom-brain/{profile}/{vault}/brains/<brain_id>/
+├── manifest.json          # identity, parentage, lifecycle status
+├── vault/
+│   ├── Wiki/{summaries,entities}/
+│   ├── Raw/{curated,gathered,attachments}/
+│   └── _log.md            # append-only synthesis audit trail
+├── _index/                # vectors.db (FTS5 + sqlite-vec) + provenance.json
+└── markers/alive          # flock-held heartbeat marker
 ```
 
-### Obsidian drilldown
+### Daemon collective (per `(profile, vault)`, on the daemon host)
 
-Summary and entity pages produced by `brain_attach` ingests include `[[wiki links]]` back to the original binary in `Raw/attachments/`. Clicking the link in Obsidian opens the PDF, image, or document inline.
-
-### Batch ingest
-
-`brain_learn` and `brain_perceive` accept either a single item (existing behaviour) or a batch of up to 100 via the `items` array:
-
-```json
-{
-  "items": [
-    { "content": "...", "title": "Doc A", "filename": "doc-a.md" },
-    { "content": "...", "title": "Doc B", "filename": "doc-b.md" }
-  ]
-}
 ```
-
-Provenance is read once per call; file writes are serialized to avoid slug collisions. Returns `{ status: "batch_complete", queued: N, duplicates: N, results: [...] }`.
-
-## Search
-
-`brain_recall` uses **hybrid RRF** (Reciprocal Rank Fusion) combining BM25 full-text and cosine vector similarity when Ollama is available. Falls back to FTS5-only otherwise.
-
-The optional `topic` parameter pre-filters results to a subject-matter bucket before ranking, giving scoped recall without changing the query.
-
-## Multi-agent support
-
-Multiple MCP instances can safely share the same vault:
-
-- Queue claiming uses atomic `rename()` — two agents cannot claim the same item
-- All provenance writes (`upsertProvenanceEntry`, `deleteProvenanceEntry`) read inside a file lock
-- `_index.md` updates read provenance inside the lock — no stale overwrites
-- Entity pages use `upsertEntityPage()` — existence check and create/append in one lock
-- `vectors.db` runs WAL mode with a 5s busy timeout
-- Working memory is per-PID sharded — task spaces are naturally isolated
-
-## Go binary (Phases 0–2 — in progress)
-
-A Go rewrite is underway on the `feat/go-rewrite` branch. The single `pbrainctl` binary subsumes both modes:
-
-- **`pbrainctl mcp`** — stdio MCP server. Two startup modes selected automatically by env:
-  - **legacy** (`BRAIN_VAULT_PATH` set) — drop-in replacement for the TypeScript server; same vault layout, same tools minus the Phase 2 synthesizer.
-  - **agent contract** (`CL_BRAIN_API` set) — full v5.0 lifecycle: brain births under `$XDG_DATA_HOME/phantom-brain/{profile}/{vault}/brains/<brain_id>/`, heartbeats over the `markers/alive` flock, runs a recovery sweep on startup, and packs a death payload into `_pending/` on graceful exit. Adds `brain_status` / `brain_checkpoint` / `brain_death` MCP tools.
-- **`pbrainctl serve`** — HTTP daemon. Multi-vault registry (one bearer token per vault), per-vault reaper + synthesizer goroutines, snapshot publisher with monotonic gen counter and dual-source pin retention, port of the Phase 2 LLM gate + entity heuristic. Ships the v4.4 §8 API: snapshot/{current,gen,gen/tarball}, birth/claim, merge/{init,upload,complete/{id},{brain_id}}, maintenance/{enter,exit}, health. Storage backend defaults to local-disk; MinIO is gated behind `[storage] backend = "minio"` (implementation is Phase 5).
-
-Build with `make build`; tests with `make test`. Container image: `docker build -t pbrainctl:dev -f docker/Dockerfile .`.
-
-The agent-side cutover (wiring `internal/brain`'s `FetchSnapshotFromDaemon` and `UploadShipQueue` to actually call the daemon) is Phase 2.5; until then agent-mode brains birth greenfield and retain death payloads locally.
+$PHANTOM_BRAIN_DATA_DIR/{profile}/{vault}/collective/
+├── vault/                 # canonical Wiki + Raw + queue
+├── _index/                # vectors.db + provenance.json + .gen-counter
+├── _published/            # snapshot-<gen>.tar.zst tarballs + sidecars
+├── brains/                # _uploads, _staging, _pending, _merged
+└── ledger/merges.sqlite   # per-vault merge audit log
+```
 
 ## Setup
 
-**Prerequisites:** Node.js ≥ 18. Optionally [Ollama](https://ollama.ai) with `nomic-embed-text` for vector search.
+**Prerequisites:** Go 1.26+ for build; the `claude` CLI on `$PATH` for the gate / summarizer; optionally [Ollama](https://ollama.ai) with `nomic-embed-text` for vector search.
 
 ```bash
-git clone https://github.com/mindmorass/mcp-phantom-brain
+git clone https://github.com/neverprepared/mcp-phantom-brain
 cd mcp-phantom-brain
-npm install
-cp .env.example .env  # edit BRAIN_VAULT_PATH
-npm run build
+make build           # produces ./pbrainctl
 ```
 
-**Claude Code / Claude Desktop** — add to your MCP config:
+### MCP server (agent)
+
+Two startup modes, selected automatically by environment.
+
+**Legacy mode** (drop-in replacement for the TS server, reads the same on-disk vault):
 
 ```json
 {
   "phantom-brain": {
-    "command": "node",
-    "args": ["/path/to/mcp-phantom-brain/dist/index.js"],
+    "command": "/path/to/mcp-phantom-brain/pbrainctl",
+    "args": ["mcp"],
+    "env": { "BRAIN_VAULT_PATH": "/path/to/your/vault" }
+  }
+}
+```
+
+**Agent-contract mode** (v5.0 mortal brains + daemon ship):
+
+```json
+{
+  "phantom-brain": {
+    "command": "/path/to/mcp-phantom-brain/pbrainctl",
+    "args": ["mcp"],
     "env": {
-      "BRAIN_VAULT_PATH": "/path/to/your/vault"
+      "CL_BRAIN_API": "https://your-daemon",
+      "CL_BRAIN_API_TOKEN": "pb_personal_memory_…",
+      "CL_WORKSPACE_PROFILE": "personal",
+      "CL_BRAIN_VAULT": "memory"
     }
   }
 }
 ```
 
-> **Note:** Do not use nested shell fallback syntax (`${VAR:-${OTHER}}`) in the MCP env block — Claude Code partially expands it, leaving a trailing `}`. Use plain `${VAR}` references only.
+> **Gotcha:** do not use nested shell fallback syntax (`${VAR:-${OTHER}}`) in the MCP env block — Claude Code partially expands it, leaving a trailing `}`. Use plain `${VAR}` references only.
+
+### Daemon
+
+```bash
+pbrainctl serve
+```
+
+Reads `$PHANTOM_BRAIN_CONFIG_DIR` (default `~/.config/phantom-brain-server`) for `server.toml` + per-vault `config.toml` + `auth.toml`. State lives under `$PHANTOM_BRAIN_DATA_DIR` (default `/var/lib/phantom-brain`). Acquires an exclusive flock so a second daemon refuses to start.
+
+Container build: `docker build -t pbrainctl -f docker/Dockerfile .` (currently macOS-arm64 only until the Linux `sqlite-vec` binary is vendored).
 
 ## Configuration
 
-| Var | Default | Purpose |
-|---|---|---|
-| `BRAIN_VAULT_PATH` | `~/...memory` | Vault root directory |
-| `GATE_ENABLED` | `true` | Set to `false` to bypass the LLM gate (all gathered sources default to medium) |
-| `GATE_MODEL` | `claude-haiku-4-5-20251001` | Model used for gate evaluation via the `claude` CLI |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Embeddings endpoint |
-| `EMBEDDING_MODEL` | `nomic-embed-text` | Ollama model name |
-| `EMBEDDING_DIMS` | `768` | Vector dimensions |
-| `MCP_BRAIN_LOG_LEVEL` | `info` | Log verbosity (`debug|info|warn|error`) |
+### Agent (per-process env)
+
+| Var | Purpose |
+|---|---|
+| `BRAIN_VAULT_PATH` *(legacy mode)* | Absolute path to the on-disk vault |
+| `CL_BRAIN_API` *(agent mode)* | Daemon base URL |
+| `CL_BRAIN_API_TOKEN` *(agent mode)* | Bearer token; daemon resolves to (profile, vault) |
+| `CL_WORKSPACE_PROFILE` / `CL_BRAIN_VAULT` *(agent mode)* | Belt-and-suspenders match against the token |
+| `CL_BRAIN_ID` *(agent mode)* | Optional — rebind to an existing brain dir |
+| `OLLAMA_BASE_URL`, `EMBEDDING_MODEL`, `EMBEDDING_DIMS` | Vector search |
+
+### Daemon (server.toml)
+
+`server.port`, `server.host`, `defaults.{retention_gens,reaper_poll_interval_secs,…}`, `storage.backend` (`local` default; `minio` is a Phase 5 stub). Full v4.4 §4 schema in [`internal/server/config.go`](./internal/server/config.go).
 
 ## Development
 
 ```bash
-npm run dev       # run with tsx (no build required)
-npm run typecheck # type-check without emitting
-npm run build     # compile to dist/
+make build      # produces ./pbrainctl
+make test       # full suite (vet + unit + integration)
+go test -tags=sqlite_fts5 -race ./internal/brain/... ./internal/server/...
 ```
 
-There are no tests. `npm run typecheck` is the primary verification step.
+CI is in `.github/workflows/go.yml` (currently macos-14 only until the Linux dylib lands). Deferred items: Linux `sqlite-vec` vendoring, MinIO backend, automated `brain_checkpoint` cadence, prompt-file extraction, rate limiting.
 
 ## License
 

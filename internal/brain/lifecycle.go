@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/neverprepared/mcp-phantom-brain/internal/config"
@@ -33,6 +34,9 @@ type Lifecycle struct {
 	brainDir  string
 	manifest  *Manifest
 	heartbeat *Heartbeat
+	writes    atomic.Int64  // bumped by RecordWrite; consumed by the checkpoint ticker + reset on every successful checkpoint
+	ckptStop  context.CancelFunc
+	ckptDone  chan struct{}
 	closed    bool
 }
 
@@ -50,6 +54,18 @@ type StartOpts struct {
 	Logger        *slog.Logger
 	HeartbeatCtx  context.Context
 	SkipHeartbeat bool
+
+	// SkipCheckpointer turns off the background checkpoint ticker.
+	// Production callers leave it false; tests that don't want a
+	// background goroutine ticking through fixture lifetimes set it.
+	SkipCheckpointer bool
+
+	// CheckpointTickInterval is how often the background checkpointer
+	// re-evaluates ShouldCheckpoint. Zero falls back to 60s — far
+	// smaller than CheckpointMinIntervalSecs so the cadence check
+	// is reactive without burning cycles. Bounded below at 1s in
+	// case a test passes something silly.
+	CheckpointTickInterval time.Duration
 }
 
 // Start births (or rebinds) a brain and returns the running Lifecycle.
@@ -98,7 +114,76 @@ func Start(opts StartOpts) (*Lifecycle, error) {
 		}
 		lc.heartbeat = hb
 	}
+	if !opts.SkipCheckpointer {
+		tick := opts.CheckpointTickInterval
+		if tick <= 0 {
+			tick = 60 * time.Second
+		}
+		if tick < time.Second {
+			tick = time.Second
+		}
+		ckptParent := opts.HeartbeatCtx
+		if ckptParent == nil {
+			ckptParent = context.Background()
+		}
+		ckptCtx, cancel := context.WithCancel(ckptParent)
+		lc.ckptStop = cancel
+		lc.ckptDone = make(chan struct{})
+		go lc.runCheckpointer(ckptCtx, tick)
+	}
 	return lc, nil
+}
+
+// RecordWrite is the hook ingest handlers (brain_perceive,
+// brain_learn, brain_attach) call after a successful write so the
+// checkpoint cadence's writes-threshold has real input. Cheap
+// (single atomic add); safe to call from any goroutine.
+func (l *Lifecycle) RecordWrite() {
+	l.writes.Add(1)
+}
+
+// WriteCount returns the current write counter. Exposed for tests
+// and the manual brain_checkpoint MCP path that wants the same
+// value the automatic ticker would have seen.
+func (l *Lifecycle) WriteCount() int64 { return l.writes.Load() }
+
+// runCheckpointer is the background goroutine that re-evaluates
+// ShouldCheckpoint on every tick and fires Lifecycle.Checkpoint
+// when the predicate clears. Resets the write counter on every
+// successful (non-skipped) checkpoint so the next cadence cycle
+// counts fresh activity.
+//
+// Exits on ctx.Done. Errors are logged but do not terminate the
+// loop — a transient disk error shouldn't kill the cadence forever.
+func (l *Lifecycle) runCheckpointer(ctx context.Context, interval time.Duration) {
+	defer close(l.ckptDone)
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	l.logger.Info("phantom-brain: checkpoint ticker started",
+		slog.String("interval", interval.String()),
+		slog.Int("writes_threshold", l.agent.CheckpointWrites),
+	)
+	for {
+		select {
+		case <-ctx.Done():
+			l.logger.Info("phantom-brain: checkpoint ticker exiting")
+			return
+		case <-t.C:
+			n := int(l.writes.Load())
+			res, err := l.Checkpoint(n, false)
+			if err != nil {
+				l.logger.Warn("phantom-brain: auto-checkpoint failed",
+					slog.String("err", err.Error()))
+				continue
+			}
+			if res != nil && !res.Skipped {
+				// Reset the counter atomically: subtract the value we
+				// just used so concurrent RecordWrite calls during
+				// Checkpoint() aren't lost.
+				l.writes.Add(-int64(n))
+			}
+		}
+	}
 }
 
 // BrainDir returns the on-disk root of the running brain. Callers
@@ -175,6 +260,17 @@ func (l *Lifecycle) Shutdown(ctx context.Context) (*DeathResult, error) {
 		if err := l.heartbeat.Stop(); err != nil {
 			l.logger.Warn("phantom-brain: heartbeat stop returned error", slog.String("err", err.Error()))
 		}
+	}
+	// Stop the checkpoint ticker before Death() so a tick mid-pack
+	// doesn't try to take the mutex we already hold.
+	if l.ckptStop != nil {
+		l.ckptStop()
+		// Drop the mutex briefly so the goroutine can finish its
+		// in-flight Checkpoint() call — otherwise it deadlocks
+		// waiting on the mutex we hold here.
+		l.mu.Unlock()
+		<-l.ckptDone
+		l.mu.Lock()
 	}
 	res, err := Death(DeathOpts{
 		Agent:    l.agent,

@@ -52,6 +52,18 @@ See https://github.com/neverprepared/mcp-phantom-brain for the v5 spec.`,
 	root.AddCommand(serveCmd())
 	root.AddCommand(migrateLegacyCmd())
 
+	// Operator subcommands (Phase 3). Grouped by domain so the help
+	// text stays scannable.
+	root.AddCommand(vaultCmd())
+	root.AddCommand(snapshotCmd())
+	root.AddCommand(queueCmd())
+	root.AddCommand(maintenanceCmd())
+	root.AddCommand(brainListCmd())
+	root.AddCommand(brainShowCmd())
+	root.AddCommand(brainOrphansCmd())
+	root.AddCommand(forceMergeCmd())
+	root.AddCommand(forceCheckpointCmd())
+
 	if err := root.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "pbrainctl: %v\n", err)
 		os.Exit(1)
