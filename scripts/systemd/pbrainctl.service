@@ -1,0 +1,41 @@
+# Drop into /etc/systemd/system/pbrainctl.service (or run as a user
+# unit under ~/.config/systemd/user/). Adjust User= + paths to match
+# the operator account that owns the data + config dirs.
+#
+# Enable + start:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pbrainctl
+#
+# Reload vault registry (after editing per-vault config) without a
+# full restart:
+#   sudo systemctl kill -s HUP pbrainctl
+#
+# Logs:
+#   journalctl -u pbrainctl -f
+[Unit]
+Description=phantom-brain v5.0 daemon (pbrainctl serve)
+Documentation=https://github.com/neverprepared/mcp-phantom-brain
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pbrain
+Group=pbrain
+Environment=PHANTOM_BRAIN_CONFIG_DIR=/etc/phantom-brain-server
+Environment=PHANTOM_BRAIN_DATA_DIR=/var/lib/phantom-brain
+ExecStart=/usr/local/bin/pbrainctl serve
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+
+# Hardening — adjust if your setup needs more permissions.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/phantom-brain
+ReadOnlyPaths=/etc/phantom-brain-server
+
+[Install]
+WantedBy=multi-user.target
