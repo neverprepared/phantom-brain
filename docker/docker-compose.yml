@@ -72,13 +72,17 @@ services:
       dockerfile: docker/Dockerfile
     container_name: pbrain-daemon
     restart: unless-stopped
-    # Host networking so the daemon resolves localhost:9000 the
-    # same way agents on the host do. On Mac/Windows Docker Desktop
-    # this works via the gateway; on Linux it's true host net.
-    # Alternative for stricter isolation: switch to default bridge
-    # + set MINIO_PUBLIC_URL=http://<host-ip>:9000 in .env so
-    # presigned URLs use that hostname instead of localhost.
-    network_mode: host
+    # Bridge networking (default) + explicit port. host networking
+    # is broken on Docker Desktop (Mac/Win run containers in a VM,
+    # so "host" means the VM's network, not your laptop) — port
+    # forwarding works everywhere. The daemon reaches MinIO via the
+    # endpoint configured in server.toml; for setups where MinIO has
+    # public DNS (the typical case), no extra host-mapping needed.
+    # For localhost-only MinIO, add:
+    #   extra_hosts: ["host.docker.internal:host-gateway"]
+    # and use host.docker.internal:9000 as minio_endpoint.
+    ports:
+      - "9998:9998"
     depends_on:
       mc-init:
         condition: service_completed_successfully
