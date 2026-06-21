@@ -1,0 +1,91 @@
+# Single-host stack: MinIO + the phantom-brain daemon, both
+# running in containers, brought up with `docker compose up`.
+#
+# Sized for a personal / single-operator deploy. Defaults:
+#   - bind-mounts ./data/{minio,pbrainctl} for state durability
+#   - bucket auto-created via an mc-init one-shot container
+#   - pbrainctl uses host networking so presigned-URL hostnames
+#     (configured as localhost in server.toml) are routable both
+#     from inside the container and from agents on the host
+#
+# Quick start:
+#   cd docker
+#   cp .env.example .env                 # set MINIO_ROOT_USER + secrets + bearer token
+#   cp -r config-example config          # edit config/server.toml + auth.toml if needed
+#   docker compose up -d --build
+#   docker compose logs -f pbrainctl
+#
+# Tear down:
+#   docker compose down                  # stops containers, keeps data
+#   docker compose down -v && rm -rf data  # full reset
+
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: pbrain-minio
+    restart: unless-stopped
+    ports:
+      - "9000:9000"      # S3 API
+      - "9001:9001"      # web console
+    environment:
+      MINIO_ROOT_USER:     ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+      # Bake the public URL into presigned signatures so agents
+      # on the host get URLs they can actually reach.
+      MINIO_SERVER_URL:    ${MINIO_PUBLIC_URL:-http://localhost:9000}
+    volumes:
+      - ./data/minio:/data
+    command: server --console-address ":9001" /data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot bucket-creation container. Exits 0 once the bucket
+  # exists; depended on by pbrainctl so the daemon never starts
+  # against a missing bucket.
+  mc-init:
+    image: minio/mc:latest
+    container_name: pbrain-mc-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER:     ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      BUCKET:              ${PB_BUCKET:-phantom-brain}
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 \"$$MINIO_ROOT_USER\" \"$$MINIO_ROOT_PASSWORD\"; do
+          echo 'waiting for minio…' && sleep 1;
+      done;
+      mc mb --ignore-existing local/$$BUCKET;
+      mc ilm rule add --expire-days 1 --filter '*/_uploads/*' local/$$BUCKET 2>/dev/null || true;
+      echo 'bucket $$BUCKET ready';
+      "
+    restart: "no"
+
+  pbrainctl:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: pbrain-daemon
+    restart: unless-stopped
+    # Host networking so the daemon resolves localhost:9000 the
+    # same way agents on the host do. On Mac/Windows Docker Desktop
+    # this works via the gateway; on Linux it's true host net.
+    # Alternative for stricter isolation: switch to default bridge
+    # + set MINIO_PUBLIC_URL=http://<host-ip>:9000 in .env so
+    # presigned URLs use that hostname instead of localhost.
+    network_mode: host
+    depends_on:
+      mc-init:
+        condition: service_completed_successfully
+    environment:
+      PHANTOM_BRAIN_DATA_DIR:   /data
+      PHANTOM_BRAIN_CONFIG_DIR: /config
+    volumes:
+      - ./config:/config:ro
+      - ./data/pbrainctl:/data
+    command: ["pbrainctl", "serve"]

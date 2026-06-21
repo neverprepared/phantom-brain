@@ -1,0 +1,10 @@
+# Replace the bearer_token below with a real one. Generate with:
+#   openssl rand -hex 32   (prefix with pb_ for readability)
+#
+# This is the token agents (pbrainctl mcp) send as
+# Authorization: Bearer ... in CL_BRAIN_API_TOKEN. The daemon
+# uses it to resolve every authenticated request to this
+# (profile, vault) pair.
+
+bearer_token = "pb_REPLACE_ME_with_openssl_rand_hex_32"
+description  = "phantom-brain personal/memory — docker compose dev setup"

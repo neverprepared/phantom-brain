@@ -9,3 +9,8 @@ legacy-ts/.env
 
 # Go build artifacts (Phase 0+)
 /pbrainctl
+
+# Docker compose runtime state — operator-local, never in git
+docker/.env
+docker/config/
+docker/data/

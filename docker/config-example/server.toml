@@ -1,0 +1,22 @@
+# Template — copy the parent dir to ./config and edit values
+# that don't match your .env (most don't need changing).
+
+[server]
+port = 9998
+host = "0.0.0.0"
+log_level = "info"
+
+[storage]
+backend = "minio"
+# Daemon talks to MinIO via the service name in the compose
+# network. Presigned URLs use MINIO_PUBLIC_URL (which is
+# baked into MinIO's signatures via MINIO_SERVER_URL).
+minio_endpoint   = "localhost:9000"
+minio_bucket     = "phantom-brain"
+minio_access_key = "minioadmin"
+minio_secret_key = "replace_me_with_a_strong_password"
+minio_use_ssl    = false
+
+[defaults]
+retention_gens = 30
+reaper_poll_interval_secs = 5
