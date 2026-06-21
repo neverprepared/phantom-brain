@@ -122,11 +122,14 @@ func TestShipQueue_DepthMatchesPayloads(t *testing.T) {
 	}
 }
 
-func TestShipQueue_UploadReturnsDaemonUnavailable(t *testing.T) {
+func TestShipQueue_UploadEmptyQueueIsNoOp(t *testing.T) {
 	agent := agentForTest(t)
-	err := UploadShipQueue(agent, slog.New(slog.DiscardHandler))
-	if !errors.Is(err, ErrDaemonUnavailable) {
-		t.Fatalf("expected ErrDaemonUnavailable, got %v", err)
+	res, err := UploadShipQueue(context.Background(), agent, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("UploadShipQueue: %v", err)
+	}
+	if res == nil || len(res.Shipped)+len(res.Skipped)+len(res.Failed) != 0 {
+		t.Errorf("expected empty result, got %+v", res)
 	}
 }
 
