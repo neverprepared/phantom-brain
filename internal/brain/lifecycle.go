@@ -71,6 +71,7 @@ func Start(opts StartOpts) (*Lifecycle, error) {
 		Agent:    opts.Agent,
 		Platform: opts.Platform,
 		Logger:   opts.Logger,
+		Context:  opts.HeartbeatCtx,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("brain: start: %w", err)

@@ -206,9 +206,12 @@ func TestBirth_Greenfield_AllocatesUUIDAndWritesManifest(t *testing.T) {
 			t.Errorf("expected directory %s, err=%v", sub, err)
 		}
 	}
-	// The stub warning must be visible to operators.
-	if !strings.Contains(buf.String(), "snapshot fetch stubbed") {
-		t.Errorf("expected snapshot-stub warning in logs, got: %s", buf.String())
+	// Phase 2.5: snapshot fetch attempts the daemon and degrades to
+	// greenfield on failure (which happens here because CL_BRAIN_API
+	// points at example.invalid). The fallback message is what
+	// operators see when their daemon is unreachable.
+	if !strings.Contains(buf.String(), "snapshot fetch failed") {
+		t.Errorf("expected snapshot-failure warning in logs, got: %s", buf.String())
 	}
 }
 

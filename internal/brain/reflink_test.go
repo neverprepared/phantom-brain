@@ -2,6 +2,7 @@ package brain
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log/slog"
 	"os"
@@ -142,10 +143,14 @@ func TestSnapcache_EmptyByDefault(t *testing.T) {
 	}
 }
 
-func TestSnapcache_FetchReturnsDaemonUnavailable(t *testing.T) {
+func TestSnapcache_FetchReturnsErrorWhenDaemonUnreachable(t *testing.T) {
+	// agentForTest sets CL_BRAIN_API to https://example.invalid which
+	// reliably fails to resolve / connect. Phase 2.5: this surface
+	// returns a wrapped HTTP error rather than the Phase 1
+	// ErrDaemonUnavailable sentinel.
 	agent := agentForTest(t)
-	_, err := FetchSnapshotFromDaemon(agent, slog.New(slog.DiscardHandler))
-	if !errors.Is(err, ErrDaemonUnavailable) {
-		t.Fatalf("expected ErrDaemonUnavailable, got %v", err)
+	_, err := FetchSnapshotFromDaemon(context.Background(), agent, slog.New(slog.DiscardHandler))
+	if err == nil {
+		t.Fatal("expected error when daemon unreachable")
 	}
 }
