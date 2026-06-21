@@ -428,5 +428,8 @@ export function syncVectorIndex(): void {
       logger.warn('Vector index sync failed', { error: String(err) });
       releaseSyncLock();
     }
-  })();
+  })().catch((err) => {
+    logger.warn('syncVectorIndex: unexpected outer error', { error: String(err) });
+    releaseSyncLock();
+  });
 }

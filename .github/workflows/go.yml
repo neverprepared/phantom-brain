@@ -1,0 +1,35 @@
+name: Go
+
+on:
+  push:
+    branches: [main, feat/go-rewrite]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Build & Test
+    # macos-14 is GitHub's Apple Silicon (arm64) runner — matches the
+    # only sqlite-vec loadable currently vendored in internal/vec/dylibs/.
+    # Linux/amd64 vendoring + matrix expansion is tracked for Phase 5.
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet
+        run: go vet -tags=sqlite_fts5 ./...
+
+      - name: Build
+        run: make build
+
+      - name: Test
+        run: make test
+
+      - name: Race test (brain + server)
+        run: go test -tags=sqlite_fts5 -race -count=1 -timeout=180s ./internal/brain/... ./internal/server/...

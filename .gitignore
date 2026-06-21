@@ -3,3 +3,6 @@ dist
 *.log
 .env
 ${OBSIDIAN_VAULT_PATH}/
+
+# Go build artifacts (Phase 0+)
+/pbrainctl

@@ -1,0 +1,6 @@
+# Canonicalize fixtures depend on EXACT bytes — including CRLF, lone CR,
+# trailing whitespace, and missing trailing newlines. Git's autocrlf and
+# whitespace handling would silently mutate these and make the tests
+# pass on degenerate inputs.
+*.input.md     -text
+*.expected.md  -text

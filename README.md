@@ -26,6 +26,9 @@ Content enters through a **Raw → Gate → Wiki** pipeline. Sources are validat
 | `task_update` | Append findings, steps, artifacts, and open questions to an active task |
 | `task_complete` | Promote medium/high findings to the curated queue, then clear the task |
 | `task_get` | Read current task state or list active tasks |
+| `brain_status` | (Go agent mode) Return the running brain's manifest, heartbeat age, and ship-queue depth as JSON |
+| `brain_checkpoint` | (Go agent mode) Run the checkpoint flow; honors the v4.4 mtime-cutoff predicate unless `force=true` |
+| `brain_death` | (Go agent mode) Transition this brain to dead and pack the trimmed death payload into the local ship queue |
 
 ## The Gate
 
@@ -96,6 +99,19 @@ Multiple MCP instances can safely share the same vault:
 - Entity pages use `upsertEntityPage()` — existence check and create/append in one lock
 - `vectors.db` runs WAL mode with a 5s busy timeout
 - Working memory is per-PID sharded — task spaces are naturally isolated
+
+## Go binary (Phases 0–2 — in progress)
+
+A Go rewrite is underway on the `feat/go-rewrite` branch. The single `pbrainctl` binary subsumes both modes:
+
+- **`pbrainctl mcp`** — stdio MCP server. Two startup modes selected automatically by env:
+  - **legacy** (`BRAIN_VAULT_PATH` set) — drop-in replacement for the TypeScript server; same vault layout, same tools minus the Phase 2 synthesizer.
+  - **agent contract** (`CL_BRAIN_API` set) — full v5.0 lifecycle: brain births under `$XDG_DATA_HOME/phantom-brain/{profile}/{vault}/brains/<brain_id>/`, heartbeats over the `markers/alive` flock, runs a recovery sweep on startup, and packs a death payload into `_pending/` on graceful exit. Adds `brain_status` / `brain_checkpoint` / `brain_death` MCP tools.
+- **`pbrainctl serve`** — HTTP daemon. Multi-vault registry (one bearer token per vault), per-vault reaper + synthesizer goroutines, snapshot publisher with monotonic gen counter and dual-source pin retention, port of the Phase 2 LLM gate + entity heuristic. Ships the v4.4 §8 API: snapshot/{current,gen,gen/tarball}, birth/claim, merge/{init,upload,complete/{id},{brain_id}}, maintenance/{enter,exit}, health. Storage backend defaults to local-disk; MinIO is gated behind `[storage] backend = "minio"` (implementation is Phase 5).
+
+Build with `make build`; tests with `make test`. Container image: `docker build -t pbrainctl:dev -f docker/Dockerfile .`.
+
+The agent-side cutover (wiring `internal/brain`'s `FetchSnapshotFromDaemon` and `UploadShipQueue` to actually call the daemon) is Phase 2.5; until then agent-mode brains birth greenfield and retain death payloads locally.
 
 ## Setup
 

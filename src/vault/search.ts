@@ -70,6 +70,8 @@ export function indexWikiEntry(relPath: string, title: string, kind: string, tag
   upsertFts(id, title, tags, body);
   void embedText(buildEmbedText(title, tags, body)).then((embedding) => {
     if (embedding) upsertVector(id, embedding);
+  }).catch((err) => {
+    logger.warn('indexWikiEntry: embedding failed', { relPath, error: String(err) });
   });
 }
 
