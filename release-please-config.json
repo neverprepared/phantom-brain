@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "simple",
+  "include-component-in-tag": false,
+  "packages": {
+    ".": {
+      "release-type": "simple",
+      "package-name": "mcp-phantom-brain",
+      "changelog-path": "CHANGELOG.md",
+      "draft": false,
+      "prerelease": false
+    }
+  }
+}

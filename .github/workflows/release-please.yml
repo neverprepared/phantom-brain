@@ -8,43 +8,18 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  packages: write
 
+# Language-agnostic — uses release-type "simple" (no package.json
+# required). After the TS retirement to legacy-ts/ the previous
+# node-typed config broke on every push. The publish job that ran
+# `npm publish` was also dropped: legacy-ts/ is frozen and not
+# meant to be re-published; the Go binary will get its own release
+# pipeline in a follow-up when there's a real distribution story.
 jobs:
   release-please:
     runs-on: ubuntu-latest
-    outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
     steps:
       - uses: googleapis/release-please-action@v4
-        id: release
         with:
-          release-type: node
-
-  publish:
-    runs-on: ubuntu-latest
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          registry-url: https://registry.npmjs.org/
-
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-
-      - name: Rebuild native addons
-        run: npm rebuild better-sqlite3
-
-      - name: Build
-        run: npm run build
-
-      - name: Publish to npm
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
