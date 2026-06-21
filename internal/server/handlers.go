@@ -60,11 +60,21 @@ func (d *Daemon) handleMergeInit(w http.ResponseWriter, r *http.Request) {
 		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, err.Error(), nil)
 		return
 	}
-	// Tell the local backend who this upload belongs to so the upload
-	// route can validate it. Pure no-op for backends that don't need
-	// the pre-registration (MinIO).
-	if lb, ok := d.storage.(*LocalBackend); ok {
-		lb.RegisterUpload(handle.UploadID, req.BrainID, binding.Key.Profile, binding.Key.Vault, handle.Expires)
+	// Backend-specific handshake: local needs the (profile, vault)
+	// stashed before AcceptUpload can validate; MinIO finishes the
+	// presign once we know which prefix to sign under. Both end up
+	// with a populated URL on the handle.
+	switch b := d.storage.(type) {
+	case *LocalBackend:
+		b.RegisterUpload(handle.UploadID, req.BrainID, binding.Key.Profile, binding.Key.Vault, handle.Expires)
+	case *MinIOBackend:
+		presigned, objKey, perr := b.PresignedPutForUpload(r.Context(), binding.Key.Profile, binding.Key.Vault, handle.UploadID, ttl)
+		if perr != nil {
+			WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, perr.Error(), nil)
+			return
+		}
+		handle.URL = presigned
+		b.RegisterUpload(handle.UploadID, req.BrainID, binding.Key.Profile, binding.Key.Vault, objKey, handle.Expires)
 	}
 	writeJSON(w, http.StatusOK, mergeInitResponse{
 		UploadID: handle.UploadID,

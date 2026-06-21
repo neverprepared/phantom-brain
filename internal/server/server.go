@@ -110,9 +110,20 @@ func Start(opts StartOpts) (*Daemon, error) {
 	var backend StorageBackend
 	switch cfg.Storage.Backend {
 	case "minio":
-		_ = lk.Unlock()
-		parentCancel()
-		return nil, fmt.Errorf("server: minio backend not implemented (Phase 5); set [storage] backend = \"local\" or omit")
+		mb, merr := NewMinIOBackend(MinIOOptions{
+			Endpoint:  cfg.Storage.MinIOEndpoint,
+			Bucket:    cfg.Storage.MinIOBucket,
+			AccessKey: cfg.Storage.MinIOAccessKey,
+			SecretKey: cfg.Storage.MinIOSecretKey,
+			UseSSL:    cfg.Storage.MinIOUseSSL,
+			DataDir:   opts.DataDir,
+		})
+		if merr != nil {
+			_ = lk.Unlock()
+			parentCancel()
+			return nil, merr
+		}
+		backend = mb
 	default:
 		lb, lerr := NewLocalBackend(opts.DataDir, baseURL)
 		if lerr != nil {

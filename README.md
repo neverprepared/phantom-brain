@@ -155,7 +155,23 @@ Container build: `docker build -t pbrainctl -f docker/Dockerfile .` (currently m
 
 ### Daemon (server.toml)
 
-`server.port`, `server.host`, `defaults.{retention_gens,reaper_poll_interval_secs,…}`, `storage.backend` (`local` default; `minio` is a Phase 5 stub). Full v4.4 §4 schema in [`internal/server/config.go`](./internal/server/config.go).
+`server.port`, `server.host`, `defaults.{retention_gens,reaper_poll_interval_secs,…}`, `storage.backend` (`local` default; `minio` enabled — see below). Full v4.4 §4 schema in [`internal/server/config.go`](./internal/server/config.go).
+
+#### MinIO / S3 backend
+
+When `[storage] backend = "minio"`, brain uploads go directly to S3 via presigned PUT URLs (daemon never sees the bytes). On `/merge/complete` the daemon downloads the object into local `brains/_pending/<brain_id>.tar` so the reaper picks it up unchanged.
+
+```toml
+[storage]
+backend = "minio"
+minio_endpoint   = "minio.example.com:9000"
+minio_bucket     = "phantom-brain"
+minio_access_key = "AKIA..."
+minio_secret_key = "secret..."
+minio_use_ssl    = true
+```
+
+Bucket layout: `<profile>/<vault>/_uploads/<upload_id>.tar`. Daemon deletes the upload key after a successful merge; configure a bucket lifecycle rule to expire orphaned `_uploads/*` after the upload TTL (default 1 hour) as a backstop.
 
 ## Development
 
