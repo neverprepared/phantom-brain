@@ -90,6 +90,14 @@ func Start(opts StartOpts) (*Daemon, error) {
 	if !gotLock {
 		return nil, fmt.Errorf("server: another pbrainctl serve is holding %s", opts.DataDir.GlobalFlockPath())
 	}
+	// Write the daemon's PID into the flock file so `pbrainctl vault
+	// reload` (and ops scripts) can find us. flock(2) is content-
+	// independent — writing inside the held file is safe.
+	if err := os.WriteFile(opts.DataDir.GlobalFlockPath(),
+		[]byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		opts.Logger.Warn("phantom-brain: write daemon pid sidecar failed (continuing)",
+			slog.String("err", err.Error()))
+	}
 
 	parentCtx, parentCancel := context.WithCancel(context.Background())
 
