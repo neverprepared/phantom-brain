@@ -20,6 +20,34 @@
 #   docker compose down -v && rm -rf data  # full reset
 
 services:
+  # OpenSearch: canonical store for synthesized content (summaries,
+  # entities, attachments + extracted text). Phase 6 makes this the
+  # source of truth; agents pull SQLite snapshot exports for local
+  # caching. Single-node, dev mode (security plugin disabled) — fine
+  # for personal/single-operator deploy on a trusted network.
+  opensearch:
+    image: opensearchproject/opensearch:2.18.0
+    container_name: pbrain-opensearch
+    restart: unless-stopped
+    ports:
+      - "9200:9200"
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      bootstrap.memory_lock: "true"
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile:  { soft: 65536, hard: 65536 }
+    volumes:
+      - ./data/opensearch:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -q -e '\"status\":\"green\"' -e '\"status\":\"yellow\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
   minio:
     image: minio/minio:latest
     container_name: pbrain-minio
@@ -86,6 +114,8 @@ services:
     depends_on:
       mc-init:
         condition: service_completed_successfully
+      opensearch:
+        condition: service_healthy
     environment:
       PHANTOM_BRAIN_DATA_DIR:   /data
       PHANTOM_BRAIN_CONFIG_DIR: /config
