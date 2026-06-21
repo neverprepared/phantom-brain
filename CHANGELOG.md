@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/neverprepared/mcp-phantom-brain/compare/v1.2.0...v1.2.1) (2026-06-21)
+
+
+### Bug Fixes
+
+* quiet stale ship-queue + checkpoint-ticker log noise ([#13](https://github.com/neverprepared/mcp-phantom-brain/issues/13)) ([2b2753c](https://github.com/neverprepared/mcp-phantom-brain/commit/2b2753cc308e20867eb55fef0c902f0fe329fe43))
+
 ## [1.2.0](https://github.com/neverprepared/mcp-phantom-brain/compare/v1.1.0...v1.2.0) (2026-06-21)
 
 
