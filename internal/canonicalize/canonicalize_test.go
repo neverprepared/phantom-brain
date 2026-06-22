@@ -87,6 +87,65 @@ func TestIdempotent(t *testing.T) {
 	}
 }
 
+func TestSumBody_FrontmatterIndependent(t *testing.T) {
+	// Two docs with identical bodies but timestamps a second apart
+	// in frontmatter — Sum diverges (different SHAs); SumBody is
+	// identical (the dedup guarantee).
+	a := []byte("---\ntitle: Hello\ngathered_at: 2026-06-22T04:51:38Z\n---\n\nworld\n")
+	b := []byte("---\ntitle: Hello\ngathered_at: 2026-06-22T04:51:39Z\n---\n\nworld\n")
+
+	sumA, err := Sum(a)
+	if err != nil {
+		t.Fatalf("Sum(a): %v", err)
+	}
+	sumB, err := Sum(b)
+	if err != nil {
+		t.Fatalf("Sum(b): %v", err)
+	}
+	if sumA == sumB {
+		t.Fatalf("Sum should differ when frontmatter differs; both = %s", sumA)
+	}
+
+	bodyA, err := SumBody(a)
+	if err != nil {
+		t.Fatalf("SumBody(a): %v", err)
+	}
+	bodyB, err := SumBody(b)
+	if err != nil {
+		t.Fatalf("SumBody(b): %v", err)
+	}
+	if bodyA != bodyB {
+		t.Errorf("SumBody should match when bodies match; a=%s b=%s", bodyA, bodyB)
+	}
+}
+
+func TestSumBody_NoFrontmatter(t *testing.T) {
+	// Without frontmatter Sum and SumBody hash equivalent content;
+	// they may differ in encoding details (Sum prefixes the canonical
+	// form with the empty frontmatter block when present). The
+	// guarantee is just that SumBody is stable for the body.
+	raw := []byte("hello world\n")
+	a, err := SumBody(raw)
+	if err != nil {
+		t.Fatalf("SumBody: %v", err)
+	}
+	b, err := SumBody(raw)
+	if err != nil {
+		t.Fatalf("SumBody (2): %v", err)
+	}
+	if a != b {
+		t.Errorf("SumBody not idempotent: %s vs %s", a, b)
+	}
+}
+
+func TestSumBody_DifferentBodiesDiffer(t *testing.T) {
+	a, _ := SumBody([]byte("---\ntitle: T\n---\nbody one\n"))
+	b, _ := SumBody([]byte("---\ntitle: T\n---\nbody two\n"))
+	if a == b {
+		t.Errorf("SumBody collapsed distinct bodies: %s", a)
+	}
+}
+
 func TestSumStable(t *testing.T) {
 	// Two inputs that differ only in normalized-away features must
 	// produce the same SHA. This is the dedup guarantee in practice.

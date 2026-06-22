@@ -340,7 +340,10 @@ func (r *ingestRunner) processMarkdown(ctx context.Context, it ingestItem, raw [
 	if err != nil {
 		return fmt.Errorf("render: %w", err)
 	}
-	sha, err := canonicalize.Sum(rendered)
+	// SumBody (not Sum) so re-running bulk-ingest against an unchanged
+	// vault dedups even though the agent re-renders the frontmatter
+	// with a fresh time.Now() stamp on each pass.
+	sha, err := canonicalize.SumBody(rendered)
 	if err != nil {
 		return fmt.Errorf("canonicalize: %w", err)
 	}

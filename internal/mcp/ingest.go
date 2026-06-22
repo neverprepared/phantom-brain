@@ -69,7 +69,10 @@ func (s *Server) ingestMarkdown(ctx context.Context, p ingestParams) (*ingestRes
 		return nil, fmt.Sprintf("render document: %v", err), false
 	}
 
-	sha, err := canonicalize.Sum(rendered)
+	// SumBody hashes only the canonical body — frontmatter (with its
+	// time.Now() ingestion stamps) is excluded so re-perceiving
+	// identical content across a wall-clock second still dedups.
+	sha, err := canonicalize.SumBody(rendered)
 	if err != nil {
 		return nil, fmt.Sprintf("canonicalize: %v", err), false
 	}

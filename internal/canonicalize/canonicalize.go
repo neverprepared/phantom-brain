@@ -85,6 +85,28 @@ func Sum(raw []byte) (string, error) {
 	return hex.EncodeToString(h[:]), nil
 }
 
+// SumBody returns the hex-encoded SHA256 of just the canonical BODY,
+// excluding any frontmatter. Use this when you want a content-stable
+// fingerprint: two documents with identical bodies but different
+// frontmatter (e.g. ingestion timestamps) produce the same SumBody,
+// where Sum would diverge.
+//
+// Phase 6: ingest paths key dedup off SumBody so re-perceiving the
+// same content across a wall-clock second boundary (which would
+// produce different `gathered_at` / `learned_at` / `attached_at`
+// stamps at RFC3339 precision) still dedups correctly.
+//
+// Edge cases: a document with no frontmatter hashes identically
+// under Sum and SumBody. An empty body hashes the empty string.
+func SumBody(raw []byte) (string, error) {
+	normalized := normalizeLineEndings(raw)
+	_, bodyBytes := splitFrontmatter(normalized)
+	body := strings.TrimLeft(string(bodyBytes), "\n")
+	canon := canonicalizeBody(body)
+	h := sha256.Sum256([]byte(canon))
+	return hex.EncodeToString(h[:]), nil
+}
+
 func normalizeLineEndings(raw []byte) []byte {
 	out := bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n"))
 	out = bytes.ReplaceAll(out, []byte("\r"), []byte("\n"))
