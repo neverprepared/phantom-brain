@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -34,14 +33,11 @@ func birthForTest(t *testing.T) (*config.Agent, string, *bytes.Buffer) {
 	return agent, dir, buf
 }
 
-func TestDeath_PackagesPayloadToPendingDir(t *testing.T) {
+// Phase 6: Death no longer packs a tarball — writes ship to the
+// daemon as they happen. The remaining contract is "alive → dead
+// with a log marker".
+func TestDeath_FlipsStatusAndLogs(t *testing.T) {
 	agent, dir, _ := birthForTest(t)
-
-	// Seed a Raw file so the tar has interesting contents.
-	rawFile := filepath.Join(dir, "vault", "Raw", "curated", "hello.md")
-	if err := os.WriteFile(rawFile, []byte("# hello\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
 	buf := &bytes.Buffer{}
 	res, err := Death(DeathOpts{
@@ -52,21 +48,9 @@ func TestDeath_PackagesPayloadToPendingDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Death: %v", err)
 	}
-	if res.PayloadSize <= 0 {
-		t.Errorf("payload empty: %d bytes", res.PayloadSize)
+	if res.PayloadSize != 0 || res.PayloadPath != "" {
+		t.Errorf("Phase 6 Death should produce no payload; got %+v", res)
 	}
-	if !strings.HasPrefix(res.PayloadPath, agent.ShipPendingDir()) {
-		t.Errorf("payload not under ship-pending: %s", res.PayloadPath)
-	}
-	st, err := os.Stat(res.PayloadPath)
-	if err != nil {
-		t.Fatalf("stat payload: %v", err)
-	}
-	if st.Size() != res.PayloadSize {
-		t.Errorf("size mismatch: stat=%d, returned=%d", st.Size(), res.PayloadSize)
-	}
-
-	// Manifest must report dead now.
 	m, err := ReadManifest(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -74,18 +58,8 @@ func TestDeath_PackagesPayloadToPendingDir(t *testing.T) {
 	if m.Status != StatusDead {
 		t.Errorf("status=%q, want dead", m.Status)
 	}
-
-	// Death now logs the payload landing at INFO, not as a stub warning.
-	if !strings.Contains(buf.String(), "written to local ship queue") {
-		t.Errorf("expected ship-queue write log, got: %s", buf.String())
-	}
-
-	// Tar should contain at least the manifest and the seeded raw file.
-	if !tarContains(t, res.PayloadPath, ManifestFilename) {
-		t.Errorf("tar missing manifest.json")
-	}
-	if !tarContains(t, res.PayloadPath, "vault/Raw/curated/hello.md") {
-		t.Errorf("tar missing seeded raw file")
+	if !strings.Contains(buf.String(), "brain died") {
+		t.Errorf("expected death log marker, got: %s", buf.String())
 	}
 }
 

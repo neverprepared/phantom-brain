@@ -1,7 +1,6 @@
 package brain
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -82,56 +81,8 @@ func TestReflinkFile_ErrIsSentinelSentinel(t *testing.T) {
 
 // --- shipqueue --------------------------------------------------------
 
-func TestShipQueue_EmptyWhenNothingDied(t *testing.T) {
-	agent := agentForTest(t)
-	items, err := ListShipQueue(agent)
-	if err != nil {
-		t.Fatalf("ListShipQueue: %v", err)
-	}
-	if len(items) != 0 {
-		t.Errorf("expected empty queue, got %d items", len(items))
-	}
-}
-
-func TestShipQueue_DepthMatchesPayloads(t *testing.T) {
-	agent := agentForTest(t)
-	// Synthesize two payloads in the ship-pending tree.
-	for i, bid := range []string{"b1", "b2"} {
-		dir := filepath.Join(agent.ShipPendingDir(), bid)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		body := bytes.Repeat([]byte{byte(i + 1)}, 256)
-		if err := os.WriteFile(filepath.Join(dir, "death-100.tar"), body, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	items, err := ListShipQueue(agent)
-	if err != nil {
-		t.Fatalf("ListShipQueue: %v", err)
-	}
-	if len(items) != 2 {
-		t.Fatalf("expected 2 items, got %d", len(items))
-	}
-	depth, err := ShipQueueDepthBytes(agent)
-	if err != nil {
-		t.Fatalf("ShipQueueDepthBytes: %v", err)
-	}
-	if depth != 512 {
-		t.Errorf("depth = %d, want 512", depth)
-	}
-}
-
-func TestShipQueue_UploadEmptyQueueIsNoOp(t *testing.T) {
-	agent := agentForTest(t)
-	res, err := UploadShipQueue(context.Background(), agent, slog.New(slog.DiscardHandler))
-	if err != nil {
-		t.Fatalf("UploadShipQueue: %v", err)
-	}
-	if res == nil || len(res.Shipped)+len(res.Skipped)+len(res.Failed) != 0 {
-		t.Errorf("expected empty result, got %+v", res)
-	}
-}
+// ShipQueue tests removed in Phase 6 — agents no longer queue death
+// payloads; writes ship synchronously via daemon POST during life.
 
 // --- snapcache --------------------------------------------------------
 

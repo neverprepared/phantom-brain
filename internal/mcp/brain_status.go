@@ -29,12 +29,10 @@ func brainStatusTool() mcp.Tool {
 // Documented inline so the schema is discoverable from the source —
 // MCP clients don't currently get a typed output schema.
 type brainStatusResponse struct {
-	BrainID            string         `json:"brain_id"`
-	BrainDir           string         `json:"brain_dir"`
-	Manifest           brain.Manifest `json:"manifest"`
-	HeartbeatAgeSecs   int64          `json:"heartbeat_age_secs"` // -1 if unparseable
-	ShipQueueCount     int            `json:"ship_queue_count"`
-	ShipQueueBytes     int64          `json:"ship_queue_bytes"`
+	BrainID          string         `json:"brain_id"`
+	BrainDir         string         `json:"brain_dir"`
+	Manifest         brain.Manifest `json:"manifest"`
+	HeartbeatAgeSecs int64          `json:"heartbeat_age_secs"` // -1 if unparseable
 }
 
 func (s *Server) handleBrainStatus(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -51,21 +49,11 @@ func (s *Server) handleBrainStatus(ctx context.Context, req mcp.CallToolRequest)
 		}
 	}
 
-	// Ship-queue depth is best-effort — a failing read should not
-	// keep brain_status from returning the rest of the snapshot.
-	items, _ := brain.ListShipQueue(s.deps.Lifecycle.Agent())
-	var bytes int64
-	for _, it := range items {
-		bytes += it.SizeBytes
-	}
-
 	resp := brainStatusResponse{
 		BrainID:          m.BrainID,
 		BrainDir:         lc.BrainDir(),
 		Manifest:         m,
 		HeartbeatAgeSecs: ageSecs,
-		ShipQueueCount:   len(items),
-		ShipQueueBytes:   bytes,
 	}
 	body, err := json.MarshalIndent(resp, "", "  ")
 	if err != nil {

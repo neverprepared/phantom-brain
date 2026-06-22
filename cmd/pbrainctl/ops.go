@@ -584,43 +584,8 @@ func brainOrphansCmd() *cobra.Command {
 	return c
 }
 
-// --- force-merge / force-checkpoint ----------------------------------
-
-func forceMergeCmd() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "force-merge [profile/vault]",
-		Short: "Run one reaper pass immediately (drains brains/_pending)",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			key, err := vaultArgFromArgs(args)
-			if err != nil {
-				return err
-			}
-			r, err := loadRegistryForOps(resolveConfigDir(cmd))
-			if err != nil {
-				return err
-			}
-			b, ok := r.LookupByVault(key)
-			if !ok {
-				return fmt.Errorf("vault %s not registered", key)
-			}
-			logger := newStderrLogger()
-			res, err := pbserver.ReapOnce(resolveDataDir(cmd), b, logger, &noopMutex{})
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(),
-				"reaped: merged=%d quarantined=%d errors=%d\n",
-				len(res.Merged), len(res.Quarantine), len(res.Errors))
-			for _, e := range res.Errors {
-				fmt.Fprintf(cmd.OutOrStdout(), "  ERROR: %s\n", e)
-			}
-			return nil
-		},
-	}
-	opsCommonFlags(c)
-	return c
-}
+// force-merge retired in Phase 6 — the reaper is gone; agent writes
+// land in OS as they happen, so there's nothing to drain.
 
 func forceCheckpointCmd() *cobra.Command {
 	c := &cobra.Command{
