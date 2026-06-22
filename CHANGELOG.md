@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.2](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.0.1...v2.0.2) (2026-06-22)
+
+
+### Bug Fixes
+
+* **osearch:** export tarball uses _index/ subdir layout ([#27](https://github.com/neverprepared/mcp-phantom-brain/issues/27)) ([8fbed31](https://github.com/neverprepared/mcp-phantom-brain/commit/8fbed31185f87aa0bcea7e9ed6360c60425a7995))
+
 ## [2.0.1](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.0.0...v2.0.1) (2026-06-22)
 
 
