@@ -47,27 +47,36 @@ func buildEntityPrompt(title, body string) string {
 	if len(body) > bodyLimit {
 		body = body[:bodyLimit] + "\n[...truncated]"
 	}
-	return `You are a named-entity extractor for an agent's long-term memory store.
+	return `You are an entity-tagging assistant for an agent's long-term memory store.
 
-Read the document and return the REAL named entities it mentions.
+Identify only the PRINCIPAL entities the document is meaningfully about — typically 1 to 5, occasionally more for survey or comparison documents, sometimes zero.
 
-INCLUDE
-- Proper nouns: people, organizations, places, products, projects
-- Named technologies, libraries, frameworks (e.g. "LangGraph", "Kubernetes", "OpenSearch")
-- Coined technical concepts with established names (e.g. "ReAct", "Plan-Execute-Verify", "Human-in-the-Loop") — only when treated as named patterns, not descriptive phrases
+The test for inclusion:
+  Would a human, asked "what is this document about?", reasonably name this entity?
+  If they would only say "it briefly mentions X" rather than "it's about X", DO NOT include X.
 
-EXCLUDE
+A principal entity for this purpose is:
+- A proper noun: person, organization, place, product, project, named technology
+- A coined concept treated as a named pattern (e.g. "ReAct", "MCP", "Plan-Execute-Verify") — only when it's a primary subject of the doc
+
+DO NOT include:
+- Names mentioned only in passing (e.g. integration lists, vendor name-drops, "trusted by Fortune 500")
+- Compliance / categorical labels (e.g. "SOC 2", "ISO 27001") unless that label is itself the doc's subject
 - Section headings ("Overview", "Core Concept", "Conclusion", "Anatomy of X")
-- Descriptive phrases ("Clear Goal Definition", "Useful Tool Access", "Error Handling and Recovery")
+- Descriptive phrases ("Clear Goal Definition", "Useful Tool Access")
 - Generic common nouns ("agents", "loops", "patterns")
-- Numbered or bulleted list items
-- Question phrases
+- Bullet/numbered list items unless they themselves are named entities the doc centers on
+- Sibling models or vendors enumerated only to provide context for the actual subject
 
-OUTPUT FORMAT: a single JSON array of strings, nothing else. No prose, no markdown, no explanation.
+OUTPUT FORMAT: a single JSON array of strings, nothing else. No prose, no markdown.
 
-Example output: ["LangGraph", "ReAct", "Anthropic", "Plan-Execute-Verify"]
+Examples
+  - A doc about Cursor's coding agent: ["Cursor"]   (not 14 entries listing every vendor mentioned)
+  - A survey comparing LangGraph, AutoGPT, and MetaGPT: ["LangGraph", "AutoGPT", "MetaGPT"]
+  - A blog post coining "loop engineering": ["Loop Engineering", "ReAct"]   (ReAct only if centrally compared)
+  - A marketing page with no real subject: []
 
-If no real entities are present, output: []
+If no principal entities anchor the doc, output: []
 
 DOCUMENT TITLE: ` + title + `
 
