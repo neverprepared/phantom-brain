@@ -215,7 +215,7 @@ func TestPhase6_RoundTrip_AgentDaemonOS(t *testing.T) {
 	if err := osearch.ExtractTarZst(info.TarballPath, extract); err != nil {
 		t.Fatalf("extract tarball: %v", err)
 	}
-	idx, err := index.Open(extract, osearch.EmbeddingDim)
+	idx, err := index.Open(filepath.Join(extract, "_index"), osearch.EmbeddingDim)
 	if err != nil {
 		t.Fatalf("index.Open: %v", err)
 	}

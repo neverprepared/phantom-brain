@@ -57,7 +57,13 @@ func (f *fakeExporter) Export(_ context.Context, opts osearch.ExportOptions) (os
 	}
 	defer os.RemoveAll(stage)
 
-	idx, err := index.Open(stage, osearch.EmbeddingDim)
+	// Mirror the real Export layout — vectors.db lives at _index/
+	// inside the tarball.
+	indexStage := filepath.Join(stage, "_index")
+	if err := os.MkdirAll(indexStage, 0o755); err != nil {
+		return osearch.ExportManifest{}, err
+	}
+	idx, err := index.Open(indexStage, osearch.EmbeddingDim)
 	if err != nil {
 		return osearch.ExportManifest{}, err
 	}
@@ -165,7 +171,7 @@ func TestBuildSnapshotFromOS_ProducesReadableTarball(t *testing.T) {
 	if err := extractTarZstTest(t, info.TarballPath, extract); err != nil {
 		t.Fatalf("extract: %v", err)
 	}
-	idx, err := index.Open(extract, osearch.EmbeddingDim)
+	idx, err := index.Open(filepath.Join(extract, "_index"), osearch.EmbeddingDim)
 	if err != nil {
 		t.Fatalf("index.Open exported tarball: %v", err)
 	}

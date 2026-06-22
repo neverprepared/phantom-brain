@@ -103,12 +103,12 @@ func TestLive_Export_RoundTripsThroughIndex(t *testing.T) {
 	if err := extractTarZst(tarPath, extractDir); err != nil {
 		t.Fatalf("extract: %v", err)
 	}
-	dbPath := filepath.Join(extractDir, "vectors.db")
+	dbPath := filepath.Join(extractDir, "_index", "vectors.db")
 	if _, err := os.Stat(dbPath); err != nil {
-		t.Fatalf("expected vectors.db in tarball: %v", err)
+		t.Fatalf("expected _index/vectors.db in tarball: %v", err)
 	}
 
-	idx, err := index.Open(extractDir, EmbeddingDim)
+	idx, err := index.Open(filepath.Join(extractDir, "_index"), EmbeddingDim)
 	if err != nil {
 		t.Fatalf("index.Open exported db: %v", err)
 	}

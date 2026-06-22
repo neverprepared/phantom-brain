@@ -88,7 +88,17 @@ func (c *Client) Export(ctx context.Context, opts ExportOptions) (ExportManifest
 	}
 	defer os.RemoveAll(stage)
 
-	idx, err := index.Open(stage, EmbeddingDim)
+	// vectors.db must land inside _index/ inside the tarball — that's
+	// the path internal/index.Open looks at when the agent's birth
+	// extracts the snapshot under brain_dir/. Writing it at the stage
+	// root produced a tarball that extracted to brain_dir/vectors.db,
+	// which the index opener never reads, leaving the local cache
+	// empty (Phase 6 regression vs v1 BuildSnapshot's reflinked _index/).
+	indexStage := filepath.Join(stage, "_index")
+	if err := os.MkdirAll(indexStage, 0o755); err != nil {
+		return ExportManifest{}, fmt.Errorf("mkdir _index: %w", err)
+	}
+	idx, err := index.Open(indexStage, EmbeddingDim)
 	if err != nil {
 		return ExportManifest{}, fmt.Errorf("index.Open: %w", err)
 	}
