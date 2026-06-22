@@ -26,12 +26,14 @@ func osReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
 type fakeOS struct {
 	mu          sync.Mutex
 	summaries   map[string]osearch.SummaryDoc
+	entities    map[string]osearch.EntityDoc
 	attachments map[string]osearch.AttachmentDoc
 }
 
 func newFakeOS() *fakeOS {
 	return &fakeOS{
 		summaries:   map[string]osearch.SummaryDoc{},
+		entities:    map[string]osearch.EntityDoc{},
 		attachments: map[string]osearch.AttachmentDoc{},
 	}
 }
@@ -41,6 +43,30 @@ func (f *fakeOS) UpsertSummary(_ context.Context, doc osearch.SummaryDoc, _ bool
 	defer f.mu.Unlock()
 	f.summaries[osearch.DocID(doc.Profile, doc.Vault, doc.SHA)] = doc
 	return nil
+}
+func (f *fakeOS) GetSummary(_ context.Context, profile, vault, sha string) (*osearch.SummaryDoc, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	doc, ok := f.summaries[osearch.DocID(profile, vault, sha)]
+	if !ok {
+		return nil, nil
+	}
+	return &doc, nil
+}
+func (f *fakeOS) UpsertEntity(_ context.Context, doc osearch.EntityDoc, _ bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.entities[osearch.DocID(doc.Profile, doc.Vault, doc.Slug)] = doc
+	return nil
+}
+func (f *fakeOS) GetEntity(_ context.Context, profile, vault, slug string) (*osearch.EntityDoc, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	doc, ok := f.entities[osearch.DocID(profile, vault, slug)]
+	if !ok {
+		return nil, nil
+	}
+	return &doc, nil
 }
 func (f *fakeOS) UpsertAttachment(_ context.Context, doc osearch.AttachmentDoc, _ bool) error {
 	f.mu.Lock()

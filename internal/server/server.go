@@ -185,6 +185,16 @@ func Start(opts StartOpts) (*Daemon, error) {
 			slog.Int("addresses", len(cfg.OpenSearch.Addresses)),
 			slog.String("index_prefix", cfg.OpenSearch.IndexPrefix),
 		)
+
+		// Day 5: spawn the synth worker now that OS is reachable.
+		// Until then the noop queue absorbs Enqueue calls so the
+		// write handlers don't block on a missing worker.
+		w := NewSynthWorker(SynthWorkerOpts{
+			OSClient: d.osClient,
+			Logger:   opts.Logger,
+		})
+		w.Start(parentCtx)
+		d.synth = w
 	}
 
 	n, err := d.registry.Load(LoadOpts{ConfigDir: opts.ConfigDir, Defaults: cfg.Defaults})

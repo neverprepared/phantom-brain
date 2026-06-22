@@ -55,11 +55,16 @@ func appendLogLine(path string, line []byte) error {
 // VaultBinding; the (profile, vault) on the binding scopes every
 // write — clients cannot cross vault boundaries.
 
-// osWriter is the slice of *osearch.Client that handlers need.
-// Defined as an interface here so tests can substitute an in-memory
-// fake; the production wiring sets it to a real *osearch.Client.
+// osWriter is the slice of *osearch.Client that handlers + synth
+// worker need. Defined as an interface here so tests can substitute
+// an in-memory fake; the production wiring sets it to a real
+// *osearch.Client. New methods land here as Day 5+ wire more
+// codepaths.
 type osWriter interface {
 	UpsertSummary(ctx context.Context, doc osearch.SummaryDoc, waitForRefresh bool) error
+	GetSummary(ctx context.Context, profile, vault, sha string) (*osearch.SummaryDoc, error)
+	UpsertEntity(ctx context.Context, doc osearch.EntityDoc, waitForRefresh bool) error
+	GetEntity(ctx context.Context, profile, vault, slug string) (*osearch.EntityDoc, error)
 	UpsertAttachment(ctx context.Context, doc osearch.AttachmentDoc, waitForRefresh bool) error
 	GetAttachment(ctx context.Context, profile, vault, sha string) (*osearch.AttachmentDoc, error)
 }
