@@ -7,10 +7,10 @@ import (
 )
 
 // genericHeadingsSet is the deny-list of generic section titles that
-// don't constitute named entities. Ported from src/vault/entities.ts
-// (≈50 entries). Stored as a set for O(1) lookup; lowercased on read
-// since the regex captures may vary in case.
+// don't constitute named entities. Stored as a set for O(1) lookup;
+// lowercased on read since the regex captures may vary in case.
 var genericHeadingsSet = map[string]bool{
+	// Ported from src/vault/entities.ts (≈50 entries).
 	"overview": true, "summary": true, "introduction": true, "background": true,
 	"contents": true, "table of contents": true, "abstract": true,
 	"conclusion": true, "conclusions": true, "discussion": true,
@@ -27,7 +27,22 @@ var genericHeadingsSet = map[string]bool{
 	"acknowledgments": true, "license": true, "authors": true,
 	"history": true, "changelog": true, "faq": true, "faqs": true,
 	"glossary": true, "definitions": true,
+
+	// Phase 6: added after a corpus survey surfaced these as the top
+	// noise sources. Email-scrape pipelines + curated-doc templates
+	// repeat them in every doc — they're scaffolding, not entities.
+	"extracted data": true, "findings": true, "key concepts": true,
+	"key takeaways": true, "key points": true, "mentions": true,
+	"source reliability": true, "metadata": true, "tags": true,
+	"category": true, "vendor": true, "date": true, "type": true,
+	"subject": true, "from": true, "to": true, "cc": true, "bcc": true,
+	"key attachments": true, "attachments": true,
 }
+
+// numericPrefixRe rejects headings that look like outline items —
+// "1. Premise", "3. Anatomy", "12. Open questions". These are
+// section pointers, not named entities.
+var numericPrefixRe = regexp.MustCompile(`^\d+\.\s`)
 
 // questionStarters reject headings that read as questions ("What is X?",
 // "How to Y?"). Same as TS heuristic.
@@ -103,6 +118,9 @@ func candidateFromHeading(raw string) string {
 		return ""
 	}
 	if wordCount(t) >= 5 {
+		return ""
+	}
+	if numericPrefixRe.MatchString(t) {
 		return ""
 	}
 	return t

@@ -81,6 +81,39 @@ Here is **Alice Smith** doing things, and **bob** is lowercase.
 	}
 }
 
+func TestExtractEntities_RejectsNumericPrefixedHeadings(t *testing.T) {
+	body := `## 1. Premise
+## 3. Anatomy
+## 12. Open Questions
+## Real Entity
+## 9. Implementation Layout`
+	got := ExtractEntities(body)
+	want := []string{"Real Entity"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestExtractEntities_RejectsCorpusBoilerplate(t *testing.T) {
+	// Phrases observed as the top noise in the operator's email-scraped
+	// corpus. They appear as ## headings in every doc — scaffolding,
+	// not entities.
+	body := `## Extracted Data
+## Findings
+## Key Concepts
+## Mentions
+## Key Attachments
+## Source Reliability
+## Vendor
+## Category
+## A Real Name`
+	got := ExtractEntities(body)
+	want := []string{"A Real Name"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 func TestExtractEntities_DedupAndOrder(t *testing.T) {
 	body := `## Alpha
 
