@@ -133,6 +133,14 @@ func (s *Server) handleAttach(ctx context.Context, req mcp.CallToolRequest) (*mc
 		return mcp.NewToolResultError(fmt.Sprintf("canonicalize stub: %v", err)), nil
 	}
 
+	// Dedup by blob — bytes are content-addressed; the stub SHA
+	// depends on attached_at (RFC3339, second precision), so two
+	// back-to-back attaches that straddle a second boundary would
+	// generate different stub SHAs and bypass the index-based check.
+	// A stat on the blob path is cheap and exact.
+	if _, err := os.Stat(blobAbs); err == nil {
+		return mcp.NewToolResultText(fmt.Sprintf("Duplicate (blob already stored). Blob SHA: %s. Stub: %s.", blobSHA, stubSHA)), nil
+	}
 	if has, err := s.deps.Index.Has(stubSHA); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("index has: %v", err)), nil
 	} else if has {
