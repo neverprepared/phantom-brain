@@ -25,12 +25,20 @@ type Client struct {
 	http    *http.Client
 }
 
-// ClientOpts narrows what NewClient needs. HTTPClient is optional —
-// pass nil to get the default (30s timeout, default transport).
+// ClientOpts narrows what NewClient needs. HTTPClient and Timeout
+// are both optional. If HTTPClient is set it wins (caller controls
+// timeouts/transport entirely); otherwise NewClient builds an
+// http.Client with the supplied Timeout, falling back to 30s when
+// Timeout is zero — fine for typical perceive/learn POSTs.
+//
+// Callers that POST large attachments (multi-MB base64 payloads to
+// /api/brain/attach) should bump Timeout to several minutes; the
+// 30s default frequently expires on constrained uplinks.
 type ClientOpts struct {
 	BaseURL    string
 	Token      string
 	HTTPClient *http.Client
+	Timeout    time.Duration
 }
 
 // NewClient validates the inputs and returns a ready Client. Returns
@@ -45,7 +53,11 @@ func NewClient(opts ClientOpts) (*Client, error) {
 	}
 	hc := opts.HTTPClient
 	if hc == nil {
-		hc = &http.Client{Timeout: 30 * time.Second}
+		t := opts.Timeout
+		if t <= 0 {
+			t = 30 * time.Second
+		}
+		hc = &http.Client{Timeout: t}
 	}
 	return &Client{
 		baseURL: strings.TrimRight(opts.BaseURL, "/"),

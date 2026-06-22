@@ -46,11 +46,12 @@ import (
 // 1.3 GB Obsidian vault overnight rather than over a week.
 func ingestBulkCmd() *cobra.Command {
 	var (
-		api         string
-		token       string
-		concurrency int
-		dryRun      bool
+		api          string
+		token        string
+		concurrency  int
+		dryRun       bool
 		maxFileBytes int64
+		timeoutSecs  int
 	)
 	c := &cobra.Command{
 		Use:   "ingest-bulk <vault-dir>",
@@ -98,7 +99,14 @@ against an unchanged tree is a no-op (daemon dedups by SHA).`,
 			if api == "" || token == "" {
 				return errors.New("ingest-bulk: --api/--token (or CL_BRAIN_API/CL_BRAIN_API_TOKEN env) required")
 			}
-			client, err := brain.NewClient(brain.ClientOpts{BaseURL: api, Token: token})
+			if timeoutSecs <= 0 {
+				timeoutSecs = 600 // 10 min — attach POSTs of multi-MB
+				// base64 payloads over WAN routinely cross 30s.
+			}
+			client, err := brain.NewClient(brain.ClientOpts{
+				BaseURL: api, Token: token,
+				Timeout: time.Duration(timeoutSecs) * time.Second,
+			})
 			if err != nil {
 				return fmt.Errorf("build daemon client: %w", err)
 			}
@@ -125,6 +133,7 @@ against an unchanged tree is a no-op (daemon dedups by SHA).`,
 	c.Flags().IntVar(&concurrency, "concurrency", 4, "concurrent POSTs in flight")
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "scan + report without POSTing")
 	c.Flags().Int64Var(&maxFileBytes, "max-file-bytes", 100*1024*1024, "skip files larger than this (defaults to 100 MB)")
+	c.Flags().IntVar(&timeoutSecs, "timeout-secs", 600, "per-request HTTP timeout (default 10 min; bump on slow uplinks)")
 	return c
 }
 
