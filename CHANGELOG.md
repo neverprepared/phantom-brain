@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.1](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.3.0...v2.3.1) (2026-06-22)
+
+
+### Bug Fixes
+
+* **ingest-bulk:** default Kind+MemoryType per source; parse yaml-typed dates ([#38](https://github.com/neverprepared/mcp-phantom-brain/issues/38)) ([2d073ea](https://github.com/neverprepared/mcp-phantom-brain/commit/2d073ea9028d1a6bda829757cd24f6a5c5be53d9))
+
 ## [2.3.0](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.2.1...v2.3.0) (2026-06-22)
 
 
