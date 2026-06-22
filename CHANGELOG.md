@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.0](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.0.2...v2.1.0) (2026-06-22)
+
+
+### Features
+
+* **canonicalize:** standardise stored filenames ([#29](https://github.com/neverprepared/mcp-phantom-brain/issues/29)) ([bfc9270](https://github.com/neverprepared/mcp-phantom-brain/commit/bfc9270484dc46af42c65ae93d1d5e11436c3b8f))
+
 ## [2.0.2](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.0.1...v2.0.2) (2026-06-22)
 
 
