@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.0](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.2.1...v2.3.0) (2026-06-22)
+
+
+### Features
+
+* **memory:** structured memory classification (kind, memory_type, source, references, captured_at) ([#36](https://github.com/neverprepared/mcp-phantom-brain/issues/36)) ([e93cad2](https://github.com/neverprepared/mcp-phantom-brain/commit/e93cad28e2caf497f7a14f7f55d50f88075de0a0))
+
 ## [2.2.1](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.2.0...v2.2.1) (2026-06-22)
 
 
