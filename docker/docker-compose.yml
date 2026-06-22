@@ -52,6 +52,23 @@ services:
       timeout: 5s
       retries: 12
 
+  # OpenSearch Dashboards: the UI for poking at pb_summaries /
+  # pb_entities / pb_attachments docs. Not required by the daemon —
+  # comment out the service if you don't need it (saves ~400 MB
+  # image + ~512 MB RAM idle).
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.18.0
+    container_name: pbrain-opensearch-dashboards
+    restart: unless-stopped
+    ports:
+      - "5601:5601"
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+
   minio:
     image: minio/minio:latest
     container_name: pbrain-minio
