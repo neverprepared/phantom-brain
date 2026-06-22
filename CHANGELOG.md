@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.0.0](https://github.com/neverprepared/mcp-phantom-brain/compare/v1.2.1...v2.0.0) (2026-06-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* Phase 6 — OpenSearch backend + per-agent SQLite caches (v2.0.0) ([#20](https://github.com/neverprepared/mcp-phantom-brain/issues/20))
+
+### Features
+
+* **docker:** add opensearch-dashboards to compose stack ([#22](https://github.com/neverprepared/mcp-phantom-brain/issues/22)) ([7ac2d9b](https://github.com/neverprepared/mcp-phantom-brain/commit/7ac2d9b1ab260e73c97c34cd1e97c29fc114d82f))
+* **docker:** compose stack — MinIO + phantom-brain daemon together ([#15](https://github.com/neverprepared/mcp-phantom-brain/issues/15)) ([0683d9c](https://github.com/neverprepared/mcp-phantom-brain/commit/0683d9cb1f896510f3173aa8c12c0949d41ec815))
+* Phase 6 — OpenSearch backend + per-agent SQLite caches (v2.0.0) ([#20](https://github.com/neverprepared/mcp-phantom-brain/issues/20)) ([80d292f](https://github.com/neverprepared/mcp-phantom-brain/commit/80d292f7172fddeea97a580ca0e671ffcae0baed))
+
+
+### Bug Fixes
+
+* **docker:** drop redundant `command:` from compose pbrainctl service ([#18](https://github.com/neverprepared/mcp-phantom-brain/issues/18)) ([245a89f](https://github.com/neverprepared/mcp-phantom-brain/commit/245a89f030a0caf4d49cf509790c65cb488e502d))
+* **docker:** port-forward 9998 instead of network_mode: host ([#19](https://github.com/neverprepared/mcp-phantom-brain/issues/19)) ([2fd75c5](https://github.com/neverprepared/mcp-phantom-brain/commit/2fd75c594f0edcb36b4a5d746016ec6da77094ac))
+* **docker:** ubuntu base + vendor linux/arm64 sqlite-vec ([#17](https://github.com/neverprepared/mcp-phantom-brain/issues/17)) ([be04172](https://github.com/neverprepared/mcp-phantom-brain/commit/be041723b88996e1cda4ff7df941a1438cf6dc95))
+* **mcp:** dedup attach by blob SHA, not stub SHA ([#21](https://github.com/neverprepared/mcp-phantom-brain/issues/21)) ([839904b](https://github.com/neverprepared/mcp-phantom-brain/commit/839904b34ea0426db65d3469c04a9f1b887f951d))
+
 ## [1.2.1](https://github.com/neverprepared/mcp-phantom-brain/compare/v1.2.0...v1.2.1) (2026-06-21)
 
 
