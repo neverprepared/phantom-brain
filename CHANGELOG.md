@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.1](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.2.0...v2.2.1) (2026-06-22)
+
+
+### Bug Fixes
+
+* **entities:** filter corpus boilerplate + numeric-prefix headings ([#34](https://github.com/neverprepared/mcp-phantom-brain/issues/34)) ([74fd135](https://github.com/neverprepared/mcp-phantom-brain/commit/74fd135629cde187f2e520adff3aa4d2841f1b30))
+
 ## [2.2.0](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.1.0...v2.2.0) (2026-06-22)
 
 
