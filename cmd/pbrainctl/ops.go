@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -103,7 +102,9 @@ func vaultStatusCmd() *cobra.Command {
 			}
 			for _, b := range r.Vaults() {
 				gen, _ := pbserver.ReadGenCounter(d, b.Key.Profile, b.Key.Vault)
-				pending, _ := pbserver.ListPending(d, b.Key.Profile, b.Key.Vault)
+				// queue_pending is always 0 in Phase 6 — the file queue is
+				// gone; the daemon's SynthWorker drains an in-memory chan.
+				pending := []string(nil)
 				ledgerRows := -1
 				if l, err := pbserver.OpenLedger(d, b.Key.Profile, b.Key.Vault); err == nil {
 					if list, err := l.List(100_000); err == nil {
@@ -344,7 +345,9 @@ func queueDepthCmd() *cobra.Command {
 				return err
 			}
 			for _, b := range r.Vaults() {
-				pending, _ := pbserver.ListPending(d, b.Key.Profile, b.Key.Vault)
+				// queue_pending is always 0 in Phase 6 — the file queue is
+				// gone; the daemon's SynthWorker drains an in-memory chan.
+				pending := []string(nil)
 				claimed := countQueueDir(d, b.Key, "claimed")
 				dead := countQueueDir(d, b.Key, "dead")
 				done := countQueueDir(d, b.Key, "done")
@@ -584,91 +587,12 @@ func brainOrphansCmd() *cobra.Command {
 	return c
 }
 
-// --- force-merge / force-checkpoint ----------------------------------
+// force-merge retired in Phase 6 — the reaper is gone; agent writes
+// land in OS as they happen, so there's nothing to drain.
 
-func forceMergeCmd() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "force-merge [profile/vault]",
-		Short: "Run one reaper pass immediately (drains brains/_pending)",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			key, err := vaultArgFromArgs(args)
-			if err != nil {
-				return err
-			}
-			r, err := loadRegistryForOps(resolveConfigDir(cmd))
-			if err != nil {
-				return err
-			}
-			b, ok := r.LookupByVault(key)
-			if !ok {
-				return fmt.Errorf("vault %s not registered", key)
-			}
-			logger := newStderrLogger()
-			res, err := pbserver.ReapOnce(resolveDataDir(cmd), b, logger, &noopMutex{})
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(),
-				"reaped: merged=%d quarantined=%d errors=%d\n",
-				len(res.Merged), len(res.Quarantine), len(res.Errors))
-			for _, e := range res.Errors {
-				fmt.Fprintf(cmd.OutOrStdout(), "  ERROR: %s\n", e)
-			}
-			return nil
-		},
-	}
-	opsCommonFlags(c)
-	return c
-}
-
-func forceCheckpointCmd() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "force-checkpoint [profile/vault]",
-		Short: "Run one synthesizer pass immediately (claims one queue item)",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			key, err := vaultArgFromArgs(args)
-			if err != nil {
-				return err
-			}
-			r, err := loadRegistryForOps(resolveConfigDir(cmd))
-			if err != nil {
-				return err
-			}
-			b, ok := r.LookupByVault(key)
-			if !ok {
-				return fmt.Errorf("vault %s not registered", key)
-			}
-			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
-			defer cancel()
-			res, err := pbserver.SynthesizeOne(ctx, resolveDataDir(cmd), b, newStderrLogger(), &noopMutex{})
-			if err != nil {
-				return err
-			}
-			if res == nil {
-				fmt.Fprintln(cmd.OutOrStdout(), "queue empty")
-				return nil
-			}
-			fmt.Fprintf(cmd.OutOrStdout(),
-				"synthesised %s\treliability=%s\ttopic=%s\tentities=%d\n",
-				res.SummaryPath, res.Reliability, res.Topic, len(res.EntityPaths))
-			return nil
-		},
-	}
-	opsCommonFlags(c)
-	return c
-}
-
-// noopMutex satisfies the {Lock(); Unlock()} interface that
-// ReapOnce / SynthesizeOne accept. Operator commands run while the
-// daemon is up should ideally hold the per-vault mutex; in practice
-// the operator uses these when the daemon is paused (maintenance
-// mode) or down (recovery). Documented in the subcommand help.
-type noopMutex struct{}
-
-func (noopMutex) Lock()   {}
-func (noopMutex) Unlock() {}
+// force-checkpoint retired in Phase 6 — the daemon's async
+// SynthWorker drains synth jobs from the in-memory queue; there's
+// nothing for an operator subcommand to claim out-of-band.
 
 // newStderrLogger gives operator commands the same log shape the
 // daemon uses (stderr text handler) so daemon-style log lines don't

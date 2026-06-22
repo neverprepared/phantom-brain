@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/spf13/cobra"
@@ -51,6 +50,7 @@ See https://github.com/neverprepared/mcp-phantom-brain for the v5 spec.`,
 	root.AddCommand(mcpCmd())
 	root.AddCommand(serveCmd())
 	root.AddCommand(migrateLegacyCmd())
+	root.AddCommand(ingestBulkCmd())
 
 	// Operator subcommands (Phase 3). Grouped by domain so the help
 	// text stays scannable.
@@ -61,8 +61,8 @@ See https://github.com/neverprepared/mcp-phantom-brain for the v5 spec.`,
 	root.AddCommand(brainListCmd())
 	root.AddCommand(brainShowCmd())
 	root.AddCommand(brainOrphansCmd())
-	root.AddCommand(forceMergeCmd())
-	root.AddCommand(forceCheckpointCmd())
+	// force-merge retired in Phase 6 — no reaper pass to fire.
+	// force-checkpoint retired in Phase 6 — daemon's SynthWorker drains async.
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "pbrainctl: %v\n", err)
@@ -198,23 +198,6 @@ func runMCPAgentMode() error {
 		logger.Warn("phantom-brain: recovery sweep failed (continuing)", slog.String("err", err.Error()))
 	}
 
-	// Drain any death payloads left in _pending/ from previous
-	// agent processes — Phase 2.5 best-effort retry. Bounded ctx so
-	// a slow daemon doesn't block startup; failures stay on disk
-	// for the next attempt.
-	drainCtx, drainCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	if res, err := brain.UploadShipQueue(drainCtx, agent, logger); err != nil {
-		logger.Warn("phantom-brain: startup ship-queue drain errored (continuing)",
-			slog.String("err", err.Error()))
-	} else if res != nil && (len(res.Shipped)+len(res.Skipped)+len(res.Failed)) > 0 {
-		logger.Info("phantom-brain: startup ship-queue drain",
-			slog.Int("shipped", len(res.Shipped)),
-			slog.Int("skipped", len(res.Skipped)),
-			slog.Int("failed", len(res.Failed)),
-		)
-	}
-	drainCancel()
-
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -264,6 +247,7 @@ func runMCPAgentMode() error {
 		Embedder:  oll,
 		VaultDir:  lc.VaultDir(),
 		Lifecycle: lc,
+		Client:    lc.Client(), // Phase 6: POST writes through here
 	}).Register(srv)
 
 	// Serve in a goroutine so signals can interrupt cleanly.

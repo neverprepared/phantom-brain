@@ -49,6 +49,12 @@ type ServerDeps struct {
 	// helpful "not available in legacy mode" error rather than
 	// segfaulting.
 	Lifecycle *brain.Lifecycle
+
+	// Client is the daemon HTTP client. Phase 6: when non-nil,
+	// brain_perceive / brain_learn / brain_attach POST to the
+	// daemon instead of writing locally. Wired in cmd/pbrainctl
+	// from Lifecycle.Client() at startup; tests may inject directly.
+	Client *brain.Client
 }
 
 // Server is the MCP tool registry. Construct once per process, hand

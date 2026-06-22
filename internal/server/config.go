@@ -53,8 +53,27 @@ type ServerConfig struct {
 		MinIOUseSSL    bool   `toml:"minio_use_ssl"`
 	} `toml:"storage"`
 
+	// OpenSearch wires Phase 6's canonical content store. When the
+	// section is absent the write endpoints (perceive/learn/attach/
+	// trace) return 503 — daemon still serves snapshot/health/etc.
+	OpenSearch OpenSearchConfig `toml:"opensearch"`
+
 	Defaults VaultDefaults `toml:"defaults"`
 }
+
+// OpenSearchConfig mirrors the [opensearch] block in server.toml.
+type OpenSearchConfig struct {
+	Addresses          []string `toml:"addresses"`
+	Username           string   `toml:"username"`
+	Password           string   `toml:"password"`
+	InsecureSkipVerify bool     `toml:"insecure_skip_verify"`
+	IndexPrefix        string   `toml:"index_prefix"`
+	RequestTimeoutSecs int      `toml:"request_timeout_secs"`
+}
+
+// Enabled reports whether the operator wired any OS addresses.
+// Absent block / empty addresses → write endpoints disabled.
+func (c OpenSearchConfig) Enabled() bool { return len(c.Addresses) > 0 }
 
 // VaultDefaults are the per-vault knobs. Same shape lives in
 // profiles/{p}/vaults/{v}/config.toml; nonzero fields there override

@@ -16,6 +16,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gofrs/flock"
+
+	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
 )
 
 // Daemon is the in-process state for a running pbrainctl serve
@@ -35,6 +37,17 @@ type Daemon struct {
 	router   chi.Router
 	srv      *http.Server
 	flock    *flock.Flock
+
+	// Phase 6 wiring. osClient is nil when [opensearch] is absent
+	// from server.toml; write handlers return 503 in that case.
+	// Stored as an interface so tests can inject an in-memory fake.
+	// synth defaults to a no-op queue; Day 5 swaps in the real worker.
+	// attach is non-nil when storage backend = minio (or test fake).
+	osClient   osWriter
+	osExport   osExporter // same underlying *osearch.Client when wired
+	synth      SynthQueue
+	attach     AttachmentStore
+	debouncer  *SnapshotDebouncer
 
 	parentCtx context.Context
 	parentCancel context.CancelFunc
@@ -145,6 +158,67 @@ func Start(opts StartOpts) (*Daemon, error) {
 		flock:        lk,
 		parentCtx:    parentCtx,
 		parentCancel: parentCancel,
+		synth:        noopSynthQueue{}, // Day 5 swaps in the real worker
+	}
+
+	// Phase 6: optional OS client. Daemon still starts without it —
+	// snapshot / health / merge routes work; only write endpoints fail.
+	if cfg.OpenSearch.Enabled() {
+		oc, oerr := osearch.Open(parentCtx, osearch.Config{
+			Addresses:          cfg.OpenSearch.Addresses,
+			Username:           cfg.OpenSearch.Username,
+			Password:           cfg.OpenSearch.Password,
+			InsecureSkipVerify: cfg.OpenSearch.InsecureSkipVerify,
+			IndexPrefix:        cfg.OpenSearch.IndexPrefix,
+			RequestTimeout:     time.Duration(cfg.OpenSearch.RequestTimeoutSecs) * time.Second,
+		})
+		if oerr != nil {
+			_ = lk.Unlock()
+			parentCancel()
+			return nil, fmt.Errorf("server: opensearch open: %w", oerr)
+		}
+		if eerr := oc.EnsureIndices(parentCtx); eerr != nil {
+			_ = lk.Unlock()
+			parentCancel()
+			return nil, fmt.Errorf("server: opensearch ensure indices: %w", eerr)
+		}
+		d.osClient = oc
+		d.osExport = oc
+		opts.Logger.Info("phantom-brain: opensearch wired",
+			slog.Int("addresses", len(cfg.OpenSearch.Addresses)),
+			slog.String("index_prefix", cfg.OpenSearch.IndexPrefix),
+		)
+
+		// Day 6: debounced snapshot rebuild. Each successful synth
+		// completion triggers Trigger; the debouncer collapses
+		// bursts into one rebuild per vault per delay window.
+		debounce := time.Duration(d.Config.Defaults.SnapshotRebuildDebounceSecs) * time.Second
+		d.debouncer = NewSnapshotDebouncer(
+			func(ctx context.Context, profile, vaultName string) error {
+				b, ok := d.registry.LookupByVault(VaultKey{Profile: profile, Vault: vaultName})
+				if !ok {
+					return fmt.Errorf("snapshot rebuild: unknown vault %s/%s", profile, vaultName)
+				}
+				_, err := BuildSnapshotFromOS(ctx, d.DataDir, d.osExport, profile, vaultName, b.Defaults.RetentionGens)
+				return err
+			},
+			debounce,
+			opts.Logger,
+		)
+		d.debouncer.Start(parentCtx)
+
+		// Day 5: spawn the synth worker now that OS is reachable.
+		// Wire OnComplete → debouncer so each enriched doc kicks the
+		// rebuild timer.
+		w := NewSynthWorker(SynthWorkerOpts{
+			OSClient: d.osClient,
+			Logger:   opts.Logger,
+		})
+		w.OnComplete = func(profile, vaultName, _ string) {
+			d.debouncer.Trigger(profile, vaultName)
+		}
+		w.Start(parentCtx)
+		d.synth = w
 	}
 
 	n, err := d.registry.Load(LoadOpts{ConfigDir: opts.ConfigDir, Defaults: cfg.Defaults})
@@ -212,6 +286,14 @@ func (d *Daemon) buildRouter() chi.Router {
 			r.Get("/merge/{brainID}", d.handleMergeStatus)
 			r.Get("/maintenance", d.handleMaintenanceGet)
 			r.Post("/maintenance/{action}", d.handleMaintenance)
+
+			// Phase 6 write endpoints. Return 503 when opensearch is
+			// not configured; otherwise upsert + enqueue synth.
+			r.Post("/perceive", d.handlePerceive)
+			r.Post("/learn", d.handleLearn)
+			r.Post("/attach", d.handleAttach)
+			r.Post("/trace", d.handleTrace)
+			r.Get("/attach/{sha}", d.handleAttachGet)
 		})
 
 		// Upload route is local-backend only and uses its own

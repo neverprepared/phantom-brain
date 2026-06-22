@@ -11,11 +11,27 @@ backend = "minio"
 # Daemon talks to MinIO via the service name in the compose
 # network. Presigned URLs use MINIO_PUBLIC_URL (which is
 # baked into MinIO's signatures via MINIO_SERVER_URL).
-minio_endpoint   = "localhost:9000"
+minio_endpoint   = "minio:9000"
 minio_bucket     = "phantom-brain"
 minio_access_key = "minioadmin"
 minio_secret_key = "replace_me_with_a_strong_password"
 minio_use_ssl    = false
+
+# Phase 6: OpenSearch is the canonical store for synthesised
+# content. Without this block the daemon still serves /health and
+# /snapshot/*, but POST /api/brain/{perceive,learn,attach,trace}
+# all return 503.
+[opensearch]
+addresses            = ["http://opensearch:9200"]
+# Leave username/password empty to use the docker-compose dev-mode
+# OS container (security plugin disabled). Real clusters set both.
+username             = ""
+password             = ""
+insecure_skip_verify = false
+# Sandbox prefix lets multiple deploys share a cluster. Leave
+# empty for the canonical pb_summaries / pb_entities / pb_attachments.
+index_prefix         = ""
+request_timeout_secs = 10
 
 [defaults]
 retention_gens = 30

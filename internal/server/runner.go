@@ -6,24 +6,15 @@ import (
 	"sync"
 )
 
-// vaultRunner is the per-(profile, vault) coordination unit. Holds:
+// vaultRunner is the per-(profile, vault) coordination unit. Phase 6
+// shrank its role: with the file-queue reaper + synthesizer gone, it
+// holds the binding + a cancellable context so SIGHUP can drop a
+// vault cleanly. No goroutines run from here anymore — the
+// daemon-level SynthWorker handles synthesis for every vault.
 //
-//   - The shared mutex that orders reaper merges against synthesizer
-//     claims. The reaper takes it while landing files into Raw/ +
-//     queue/; the synthesizer takes it briefly when claiming the next
-//     queue item. Without this lock a synth claim could fire between
-//     the reaper's Raw/ write and queue/ append, which would silently
-//     drop the new work until the next claim cycle.
-//
-//   - A cancellable context so SIGHUP can drop a vault cleanly.
-//
-//   - WaitGroup for graceful drain — Stop() blocks until both goroutines
-//     return, so the daemon can call Stop on every runner before
-//     releasing the global flock at shutdown.
-//
-// Phase 2 day 1 stubs out the reaper + synthesizer goroutines; days
-// 3-4 fill them in. The skeleton is here so the multi-vault registry
-// + lifespan code can wire things end-to-end without later refactor.
+// The shared mutex is preserved so Day 8's deletion doesn't have to
+// chase down every test fixture that takes &r.mu; once the test
+// surface settles in Day 9/10 it can come out.
 type vaultRunner struct {
 	Key      VaultKey
 	Binding  VaultBinding
@@ -37,25 +28,19 @@ type vaultRunner struct {
 	logger *slog.Logger
 }
 
-// newVaultRunner spawns the reaper + synthesizer goroutines for one
-// vault. Returns a runner whose Stop method drains both before the
-// daemon shuts down or before SIGHUP removes the vault.
+// newVaultRunner constructs a runner for one vault. No goroutines
+// are spawned — the daemon's SynthWorker covers what the per-vault
+// reaper + synthesizer used to do.
 func newVaultRunner(parentCtx context.Context, binding VaultBinding, dataDir DataDir, logger *slog.Logger) *vaultRunner {
-	ctx, cancel := context.WithCancel(parentCtx)
-	r := &vaultRunner{
+	_, cancel := context.WithCancel(parentCtx)
+	return &vaultRunner{
 		Key:     binding.Key,
 		Binding: binding,
 		DataDir: dataDir,
 		cancel:  cancel,
 		logger:  logger.With(slog.String("vault", binding.Key.String())),
 	}
-	r.wg.Add(2)
-	go r.runReaperLoop(ctx)
-	go r.synthesizerLoop(ctx)
-	return r
 }
-
-// synthesizerLoop body lives in synthesizer.go.
 
 // Stop cancels the runner's context and waits for both goroutines to
 // return. Idempotent — a second call is a no-op. Called by the
