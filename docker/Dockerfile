@@ -63,10 +63,25 @@ RUN go build -tags=sqlite_fts5 -ldflags="-w -s" \
 # pbrainctl bash` and poke around).
 FROM ubuntu:24.04
 
+# The runtime image bundles the `claude` CLI so the SynthWorker can
+# actually run gate + distill instead of falling back to raw-body.
+# We install Node via NodeSource (apt's `nodejs` is too old for the
+# @anthropic-ai/claude-code package) plus the CLI itself globally.
+# Adds ~250 MB to the image — acceptable for the operator UX win.
+#
+# Auth: pass CLAUDE_CODE_OAUTH_TOKEN to the daemon via docker compose.
+# Generate the token locally with `claude setup-token`. Falls back to
+# raw-body if the env var is absent (gate.go's ClaudeCLIAvailable
+# probe runs `which claude` at startup and gates further calls).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd -r pbrain && useradd -r -g pbrain -d /data -s /sbin/nologin pbrain
+        ca-certificates curl gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g @anthropic-ai/claude-code \
+    && apt-get purge -y --auto-remove gnupg \
+    && rm -rf /var/lib/apt/lists/* /root/.npm \
+    && groupadd -r pbrain && useradd -r -g pbrain -d /data -s /sbin/nologin pbrain \
+    && claude --version
 
 COPY --from=builder /out/pbrainctl /usr/local/bin/pbrainctl
 
@@ -79,6 +94,9 @@ VOLUME ["/config", "/data"]
 # Drop privileges by default. The data + config dirs need to be
 # writable by uid 999 (the pbrain user); compose bind-mounts inherit
 # from the host so adjust host-side permissions if needed.
+# The claude CLI writes state to $HOME/.claude — pbrain's home is
+# /data, which is bind-mounted, so cache + sessions survive
+# container restarts.
 USER pbrain
 
 ENTRYPOINT ["/usr/local/bin/pbrainctl"]

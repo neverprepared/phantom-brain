@@ -140,6 +140,13 @@ services:
     environment:
       PHANTOM_BRAIN_DATA_DIR:   /data
       PHANTOM_BRAIN_CONFIG_DIR: /config
+      # The daemon's SynthWorker shells out to `claude` (bundled in
+      # the image) for gate + distill. Pass a Claude Code OAuth
+      # token generated locally via `claude setup-token`. Without
+      # this var the CLI is on PATH but unauthenticated, and the
+      # synth pipeline falls back to copying raw_body as the
+      # summary (no gate verdict, no topic classification).
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
     volumes:
       - ./config:/config:ro
       - ./data/pbrainctl:/data
