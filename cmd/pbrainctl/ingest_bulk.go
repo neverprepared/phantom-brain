@@ -67,15 +67,6 @@ against an unchanged tree is a no-op (daemon dedups by SHA).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			vaultDir := args[0]
-			if api == "" {
-				api = strings.TrimSpace(os.Getenv("CL_BRAIN_API"))
-			}
-			if token == "" {
-				token = strings.TrimSpace(os.Getenv("CL_BRAIN_API_TOKEN"))
-			}
-			if api == "" || token == "" {
-				return errors.New("ingest-bulk: --api/--token (or CL_BRAIN_API/CL_BRAIN_API_TOKEN env) required")
-			}
 			if concurrency <= 0 {
 				concurrency = 4
 			}
@@ -83,20 +74,9 @@ against an unchanged tree is a no-op (daemon dedups by SHA).`,
 				maxFileBytes = 100 * 1024 * 1024 // 100 MB; daemon attach max
 			}
 
-			client, err := brain.NewClient(brain.ClientOpts{BaseURL: api, Token: token})
-			if err != nil {
-				return fmt.Errorf("build daemon client: %w", err)
-			}
-
-			emb := ollama.New(ollama.OptionsFromEnv())
-			if emb.Dims() != osearch.EmbeddingDim {
-				return fmt.Errorf("embedder dim %d != osearch.EmbeddingDim %d — daemon will reject vectors",
-					emb.Dims(), osearch.EmbeddingDim)
-			}
-
-			ctx, cancel := signalCancel(cmd.Context())
-			defer cancel()
-
+			// Plan is a pure filesystem walk — works without creds or
+			// network. Run it first so --dry-run can short-circuit
+			// before we touch Ollama or build the daemon client.
 			plan, err := scanVaultForIngest(vaultDir, maxFileBytes)
 			if err != nil {
 				return err
@@ -108,6 +88,28 @@ against an unchanged tree is a no-op (daemon dedups by SHA).`,
 			if dryRun {
 				return nil
 			}
+
+			if api == "" {
+				api = strings.TrimSpace(os.Getenv("CL_BRAIN_API"))
+			}
+			if token == "" {
+				token = strings.TrimSpace(os.Getenv("CL_BRAIN_API_TOKEN"))
+			}
+			if api == "" || token == "" {
+				return errors.New("ingest-bulk: --api/--token (or CL_BRAIN_API/CL_BRAIN_API_TOKEN env) required")
+			}
+			client, err := brain.NewClient(brain.ClientOpts{BaseURL: api, Token: token})
+			if err != nil {
+				return fmt.Errorf("build daemon client: %w", err)
+			}
+			emb := ollama.New(ollama.OptionsFromEnv())
+			if emb.Dims() != osearch.EmbeddingDim {
+				return fmt.Errorf("embedder dim %d != osearch.EmbeddingDim %d — daemon will reject vectors",
+					emb.Dims(), osearch.EmbeddingDim)
+			}
+
+			ctx, cancel := signalCancel(cmd.Context())
+			defer cancel()
 
 			runner := newIngestRunner(client, emb, concurrency, cmd.ErrOrStderr())
 			start := time.Now()
