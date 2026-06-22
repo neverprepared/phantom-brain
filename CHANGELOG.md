@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.2](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.3.1...v2.3.2) (2026-06-22)
+
+
+### Bug Fixes
+
+* **recall:** BM25 query tokenization + LLM-driven entity extraction ([#40](https://github.com/neverprepared/mcp-phantom-brain/issues/40)) ([ee3b502](https://github.com/neverprepared/mcp-phantom-brain/commit/ee3b502ce6867cd6a47c61d1e3c4af7afbea2f39))
+
 ## [2.3.1](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.3.0...v2.3.1) (2026-06-22)
 
 
