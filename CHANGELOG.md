@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.0.1](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.0.0...v2.0.1) (2026-06-22)
+
+
+### Bug Fixes
+
+* **brain,cli:** make daemon-client timeout configurable ([#25](https://github.com/neverprepared/mcp-phantom-brain/issues/25)) ([cf5a2ea](https://github.com/neverprepared/mcp-phantom-brain/commit/cf5a2ea5e8e8c71fc6d87ac763deb632632f2cc2))
+* **canonicalize:** dedup hash excludes frontmatter (SumBody) ([#26](https://github.com/neverprepared/mcp-phantom-brain/issues/26)) ([478b984](https://github.com/neverprepared/mcp-phantom-brain/commit/478b984a9f2cdcdf7997b725d906cd9b7b0ca90e))
+* **server:** wire MinIOBackend as the AttachmentStore ([#23](https://github.com/neverprepared/mcp-phantom-brain/issues/23)) ([a425b0f](https://github.com/neverprepared/mcp-phantom-brain/commit/a425b0f83207c13019d147d032bf3463669c4bdf))
+
 ## [2.0.0](https://github.com/neverprepared/mcp-phantom-brain/compare/v1.2.1...v2.0.0) (2026-06-22)
 
 
