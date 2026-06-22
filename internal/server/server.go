@@ -16,6 +16,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gofrs/flock"
+
+	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
 )
 
 // Daemon is the in-process state for a running pbrainctl serve
@@ -35,6 +37,15 @@ type Daemon struct {
 	router   chi.Router
 	srv      *http.Server
 	flock    *flock.Flock
+
+	// Phase 6 wiring. osClient is nil when [opensearch] is absent
+	// from server.toml; write handlers return 503 in that case.
+	// Stored as an interface so tests can inject an in-memory fake.
+	// synth defaults to a no-op queue; Day 5 swaps in the real worker.
+	// attach is non-nil when storage backend = minio (or test fake).
+	osClient osWriter
+	synth    SynthQueue
+	attach   AttachmentStore
 
 	parentCtx context.Context
 	parentCancel context.CancelFunc
@@ -145,6 +156,35 @@ func Start(opts StartOpts) (*Daemon, error) {
 		flock:        lk,
 		parentCtx:    parentCtx,
 		parentCancel: parentCancel,
+		synth:        noopSynthQueue{}, // Day 5 swaps in the real worker
+	}
+
+	// Phase 6: optional OS client. Daemon still starts without it —
+	// snapshot / health / merge routes work; only write endpoints fail.
+	if cfg.OpenSearch.Enabled() {
+		oc, oerr := osearch.Open(parentCtx, osearch.Config{
+			Addresses:          cfg.OpenSearch.Addresses,
+			Username:           cfg.OpenSearch.Username,
+			Password:           cfg.OpenSearch.Password,
+			InsecureSkipVerify: cfg.OpenSearch.InsecureSkipVerify,
+			IndexPrefix:        cfg.OpenSearch.IndexPrefix,
+			RequestTimeout:     time.Duration(cfg.OpenSearch.RequestTimeoutSecs) * time.Second,
+		})
+		if oerr != nil {
+			_ = lk.Unlock()
+			parentCancel()
+			return nil, fmt.Errorf("server: opensearch open: %w", oerr)
+		}
+		if eerr := oc.EnsureIndices(parentCtx); eerr != nil {
+			_ = lk.Unlock()
+			parentCancel()
+			return nil, fmt.Errorf("server: opensearch ensure indices: %w", eerr)
+		}
+		d.osClient = oc
+		opts.Logger.Info("phantom-brain: opensearch wired",
+			slog.Int("addresses", len(cfg.OpenSearch.Addresses)),
+			slog.String("index_prefix", cfg.OpenSearch.IndexPrefix),
+		)
 	}
 
 	n, err := d.registry.Load(LoadOpts{ConfigDir: opts.ConfigDir, Defaults: cfg.Defaults})
@@ -212,6 +252,14 @@ func (d *Daemon) buildRouter() chi.Router {
 			r.Get("/merge/{brainID}", d.handleMergeStatus)
 			r.Get("/maintenance", d.handleMaintenanceGet)
 			r.Post("/maintenance/{action}", d.handleMaintenance)
+
+			// Phase 6 write endpoints. Return 503 when opensearch is
+			// not configured; otherwise upsert + enqueue synth.
+			r.Post("/perceive", d.handlePerceive)
+			r.Post("/learn", d.handleLearn)
+			r.Post("/attach", d.handleAttach)
+			r.Post("/trace", d.handleTrace)
+			r.Get("/attach/{sha}", d.handleAttachGet)
 		})
 
 		// Upload route is local-backend only and uses its own
