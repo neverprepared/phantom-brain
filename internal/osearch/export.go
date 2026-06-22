@@ -252,12 +252,13 @@ func closeAndCheckpoint(idx *index.Index) error {
 	return idx.Close()
 }
 
-// writeTarZst tars stage's tree and zstd-compresses to outPath, using
+// WriteTarZst tars stage's tree and zstd-compresses to outPath using
 // a temp file + rename for atomicity. Returns (sha256_hex, size_bytes).
-//
-// Standalone (duplicates internal/server's helper) so internal/osearch
-// has no dependency on internal/server — Day 6 will collapse the two
-// into a shared internal/tarball package if churn justifies it.
+// Exported so callers that build their own sqlite-vec databases (e.g.
+// pbrainctl ingest-bulk staging, test fixtures) can produce snapshot-
+// compatible tarballs without re-implementing the format.
+func WriteTarZst(stage, outPath string) (string, int64, error) { return writeTarZst(stage, outPath) }
+
 func writeTarZst(stage, outPath string) (string, int64, error) {
 	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
 		return "", 0, err

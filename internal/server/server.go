@@ -43,9 +43,11 @@ type Daemon struct {
 	// Stored as an interface so tests can inject an in-memory fake.
 	// synth defaults to a no-op queue; Day 5 swaps in the real worker.
 	// attach is non-nil when storage backend = minio (or test fake).
-	osClient osWriter
-	synth    SynthQueue
-	attach   AttachmentStore
+	osClient   osWriter
+	osExport   osExporter // same underlying *osearch.Client when wired
+	synth      SynthQueue
+	attach     AttachmentStore
+	debouncer  *SnapshotDebouncer
 
 	parentCtx context.Context
 	parentCancel context.CancelFunc
@@ -181,18 +183,40 @@ func Start(opts StartOpts) (*Daemon, error) {
 			return nil, fmt.Errorf("server: opensearch ensure indices: %w", eerr)
 		}
 		d.osClient = oc
+		d.osExport = oc
 		opts.Logger.Info("phantom-brain: opensearch wired",
 			slog.Int("addresses", len(cfg.OpenSearch.Addresses)),
 			slog.String("index_prefix", cfg.OpenSearch.IndexPrefix),
 		)
 
+		// Day 6: debounced snapshot rebuild. Each successful synth
+		// completion triggers Trigger; the debouncer collapses
+		// bursts into one rebuild per vault per delay window.
+		debounce := time.Duration(d.Config.Defaults.SnapshotRebuildDebounceSecs) * time.Second
+		d.debouncer = NewSnapshotDebouncer(
+			func(ctx context.Context, profile, vaultName string) error {
+				b, ok := d.registry.LookupByVault(VaultKey{Profile: profile, Vault: vaultName})
+				if !ok {
+					return fmt.Errorf("snapshot rebuild: unknown vault %s/%s", profile, vaultName)
+				}
+				_, err := BuildSnapshotFromOS(ctx, d.DataDir, d.osExport, profile, vaultName, b.Defaults.RetentionGens)
+				return err
+			},
+			debounce,
+			opts.Logger,
+		)
+		d.debouncer.Start(parentCtx)
+
 		// Day 5: spawn the synth worker now that OS is reachable.
-		// Until then the noop queue absorbs Enqueue calls so the
-		// write handlers don't block on a missing worker.
+		// Wire OnComplete → debouncer so each enriched doc kicks the
+		// rebuild timer.
 		w := NewSynthWorker(SynthWorkerOpts{
 			OSClient: d.osClient,
 			Logger:   opts.Logger,
 		})
+		w.OnComplete = func(profile, vaultName, _ string) {
+			d.debouncer.Trigger(profile, vaultName)
+		}
 		w.Start(parentCtx)
 		d.synth = w
 	}
