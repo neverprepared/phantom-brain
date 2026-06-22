@@ -340,6 +340,26 @@ func (c *Client) AttachGet(ctx context.Context, sha string) (*AttachGetResponse,
 	return &out, nil
 }
 
+// CaptureGetResponse mirrors internal/server's handleCaptureGet
+// envelope: presigned URL to the raw bytes captured at synth time.
+// 404 surfaces as *APIError with Code=NOT_FOUND when no capture
+// exists for the summary.
+type CaptureGetResponse struct {
+	SHA       string `json:"sha"`
+	SourceURL string `json:"source_url"`
+	SizeBytes int64  `json:"size_bytes"`
+	URL       string `json:"url"`
+	ExpiresIn int    `json:"expires_in"`
+}
+
+func (c *Client) CaptureGet(ctx context.Context, sha string) (*CaptureGetResponse, error) {
+	var out CaptureGetResponse
+	if err := c.do(ctx, http.MethodGet, "/api/brain/capture/"+sha, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *Client) Health(ctx context.Context) error {
 	return c.do(ctx, http.MethodGet, "/api/brain/health", nil, nil)
 }

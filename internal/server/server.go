@@ -216,10 +216,13 @@ func Start(opts StartOpts) (*Daemon, error) {
 
 		// Day 5: spawn the synth worker now that OS is reachable.
 		// Wire OnComplete → debouncer so each enriched doc kicks the
-		// rebuild timer.
+		// rebuild timer. Attach + Capture are wired through so the
+		// worker can pull raw-source captures into MinIO before gate.
 		w := NewSynthWorker(SynthWorkerOpts{
 			OSClient: d.osClient,
 			Logger:   opts.Logger,
+			Attach:   d.attach,
+			Capture:  cfg.Capture,
 		})
 		w.OnComplete = func(profile, vaultName, _ string) {
 			d.debouncer.Trigger(profile, vaultName)
@@ -301,6 +304,7 @@ func (d *Daemon) buildRouter() chi.Router {
 			r.Post("/attach", d.handleAttach)
 			r.Post("/trace", d.handleTrace)
 			r.Get("/attach/{sha}", d.handleAttachGet)
+			r.Get("/capture/{sha}", d.handleCaptureGet)
 		})
 
 		// Upload route is local-backend only and uses its own

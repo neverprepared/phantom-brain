@@ -45,6 +45,13 @@ type SynthWorker struct {
 	// behaves predictably across the run — toggling the CLI in/out
 	// of $PATH at runtime would otherwise produce mixed-mode output.
 	cliAvailable bool
+
+	// Capture wires the raw-source archival path. When attach is
+	// non-nil and Capture.Enabled, processJob fetches the doc's
+	// source URL and stores response bytes in MinIO before running
+	// gate + distill. Failures are logged and non-fatal.
+	attach  AttachmentStore
+	capture CaptureConfig
 }
 
 type synthJob struct {
@@ -66,6 +73,11 @@ type SynthWorkerOpts struct {
 	// pipeline deterministic and fast (no real claude subprocess);
 	// production leaves this false and probes the CLI at startup.
 	DisableCLI bool
+	// Attach + Capture wire raw-source archival. Pass the same
+	// AttachmentStore the daemon uses for /attach; if nil, the
+	// capture pass is skipped entirely.
+	Attach  AttachmentStore
+	Capture CaptureConfig
 }
 
 // NewSynthWorker constructs a worker; call Start to spawn the
@@ -88,6 +100,8 @@ func NewSynthWorker(opts SynthWorkerOpts) *SynthWorker {
 		bufSize:      opts.BufferSize,
 		stopped:      make(chan struct{}),
 		cliAvailable: cli,
+		attach:       opts.Attach,
+		capture:      opts.Capture,
 	}
 }
 
@@ -172,6 +186,26 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 	content := doc.RawBody
 	if content == "" {
 		content = doc.Body // shouldn't happen for handler-fed docs but defensible
+	}
+
+	// Raw-source capture (v2.4+): when capture is wired and the doc
+	// has a URL, fetch the page bytes and stash them in MinIO. Best-
+	// effort — fetch failures (URL unreachable, oversize, non-2xx)
+	// are logged and DON'T block gate/distill/index writes.
+	if w.attach != nil && w.capture.Enabled && doc.SourceURL != "" && doc.CaptureMinIOKey == "" {
+		ua := w.capture.UserAgent
+		timeout := time.Duration(w.capture.TimeoutSecs) * time.Second
+		res, cerr := CaptureURL(ctx, w.attach, job.Profile, job.Vault, job.SHA,
+			doc.SourceURL, w.capture.MaxBytes, ua, timeout)
+		if cerr != nil {
+			w.logger.Warn("phantom-brain: capture failed (non-fatal)",
+				slog.String("sha", job.SHA),
+				slog.String("url", doc.SourceURL),
+				slog.String("err", cerr.Error()))
+		} else {
+			doc.CaptureMinIOKey = res.Key
+			doc.CaptureSizeBytes = res.SizeBytes
+		}
 	}
 
 	// Coherence first — free and rejects obviously-broken input

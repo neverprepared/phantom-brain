@@ -122,6 +122,13 @@ type SummaryDoc struct {
 	Attachments []string `json:"attachments,omitempty"` // SHAs of related attachments
 	References  []string `json:"references,omitempty"`  // SHAs of related SummaryDocs (graph hook)
 
+	// Raw-source capture: MinIO key of the captured page bytes, if
+	// the daemon was configured with [capture].enabled and the fetch
+	// succeeded. Empty when capture is off, the URL was unreachable,
+	// or the doc wasn't from a URL source (brain_learn, task_summary).
+	CaptureMinIOKey  string `json:"capture_minio_key,omitempty"`
+	CaptureSizeBytes int64  `json:"capture_size_bytes,omitempty"`
+
 	// Synth status — agents may see raw-only docs that the daemon's
 	// synth queue hasn't processed yet. Empty/false = not yet synthed.
 	Synthesised bool `json:"synthesised"`

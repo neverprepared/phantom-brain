@@ -58,7 +58,25 @@ type ServerConfig struct {
 	// trace) return 503 — daemon still serves snapshot/health/etc.
 	OpenSearch OpenSearchConfig `toml:"opensearch"`
 
+	// Capture controls raw-source archival for brain_perceive calls.
+	// When enabled, the daemon's SynthWorker fetches the URL it was
+	// given and stores the response bytes in MinIO so the operator
+	// can recover the original page content later (web pages change
+	// or disappear). See internal/server/capture.go.
+	Capture CaptureConfig `toml:"capture"`
+
 	Defaults VaultDefaults `toml:"defaults"`
+}
+
+// CaptureConfig mirrors the [capture] block in server.toml. All
+// fields optional; missing/zero values fall through to sensible
+// defaults so an operator can `[capture]\nenabled = true` and get
+// everything else automatic.
+type CaptureConfig struct {
+	Enabled     bool   `toml:"enabled"`
+	MaxBytes    int64  `toml:"max_bytes"`     // default 10 MB
+	TimeoutSecs int    `toml:"timeout_secs"`  // default 30
+	UserAgent   string `toml:"user_agent"`    // default phantom-brain/2
 }
 
 // OpenSearchConfig mirrors the [opensearch] block in server.toml.

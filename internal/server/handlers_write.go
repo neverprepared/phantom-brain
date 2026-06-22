@@ -482,6 +482,53 @@ func (d *Daemon) handleAttachGet(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleCaptureGet returns a presigned MinIO URL for the raw-source
+// capture associated with a summary doc. Empty/404 when capture is
+// off, the URL was unreachable at synth time, or the doc isn't
+// from a URL source (brain_learn, task_summary).
+func (d *Daemon) handleCaptureGet(w http.ResponseWriter, r *http.Request) {
+	if d.osClient == nil || d.attach == nil {
+		WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
+			"capture get disabled (opensearch or attachment store missing)", nil)
+		return
+	}
+	binding, _ := BindingFromContext(r.Context())
+	sha := chi.URLParam(r, "sha")
+	if err := validateSHA(sha); err != nil {
+		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error(), nil)
+		return
+	}
+	doc, err := d.osClient.GetSummary(r.Context(), binding.Key.Profile, binding.Key.Vault, sha)
+	if err != nil {
+		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
+			"opensearch get failed: "+err.Error(), nil)
+		return
+	}
+	if doc == nil {
+		WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound, "summary not found", nil)
+		return
+	}
+	if doc.CaptureMinIOKey == "" {
+		WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound,
+			"no capture stored for this doc (capture disabled, URL absent, or fetch failed)", nil)
+		return
+	}
+	url, err := d.attach.PresignGet(r.Context(), doc.CaptureMinIOKey, 10*time.Minute)
+	if err != nil {
+		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
+			"presign failed: "+err.Error(), nil)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"sha":         doc.SHA,
+		"source_url":  doc.SourceURL,
+		"size_bytes":  doc.CaptureSizeBytes,
+		"url":         url,
+		"expires_in":  600,
+	})
+}
+
 // --- helpers ------------------------------------------------------
 
 func writeWriteResponse(w http.ResponseWriter, status int, sha string, enqueued bool) {

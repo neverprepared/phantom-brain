@@ -111,6 +111,7 @@ Every long-term doc carries these fields beyond title/body/topic/reliability:
 | `source[]` | keyword (multi) | Provenance: URLs, `task:<id>`, `agent:<id>`, `from_email:<addr>`, file paths. Used for the "where did this come from" facet. |
 | `references[]` | keyword (multi) | SHAs of related summaries. Graph hook — populated by `task_complete`, future `brain_link`, or LLM during distill. |
 | `captured_at` | date | When the underlying content was authored. Distinct from `created_at` (when OS got it). |
+| `capture_minio_key` | keyword | MinIO key of the raw page bytes captured at synth time (when `[capture]` enabled). Empty when capture is off, URL absent, or fetch failed. Retrieve via `GET /api/brain/capture/{sha}` → presigned MinIO URL. |
 
 Adding a new `kind` value: edit the constant block in `internal/osearch/docs.go`, ship the new daemon. No reindex; OS field is `keyword` (any string fits), the enum is application-validated.
 

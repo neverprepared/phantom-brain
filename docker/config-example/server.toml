@@ -33,6 +33,19 @@ insecure_skip_verify = false
 index_prefix         = ""
 request_timeout_secs = 10
 
+# Phase 6: raw-source capture for brain_perceive. When enabled, the
+# daemon's SynthWorker fetches each perceived URL on synth and
+# stores the response bytes in MinIO at
+# <profile>/<vault>/attachments/captures-<doc_sha><ext>. Retrieve
+# via GET /api/brain/capture/{sha}. Without this, brain_perceive
+# only preserves what the agent extracted; the original page is
+# unrecoverable if the source URL changes or disappears.
+[capture]
+enabled        = true
+max_bytes      = 10485760   # 10 MB; non-2xx or larger response is a non-fatal error
+timeout_secs   = 30
+# user_agent  = "phantom-brain/2"  # uncomment to override default
+
 [defaults]
 retention_gens = 30
 reaper_poll_interval_secs = 5
