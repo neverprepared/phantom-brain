@@ -333,6 +333,23 @@ func (r *ingestRunner) processMarkdown(ctx context.Context, it ingestItem, raw [
 	sourceURL := strings.TrimSpace(doc.FrontmatterString("source_url"))
 	tags := doc.FrontmatterStrings("tags")
 
+	// v2.4: build memory-classification fields from the legacy
+	// frontmatter shape (Obsidian email-scrape format). Maps:
+	//   type/vendor/category → tags[]
+	//   from_email/obsidian_note → source[]
+	//   date → captured_at (parsed as YYYY-MM-DD)
+	// If the doc looks like an email import (has from_email or
+	// vendor or obsidian_note), kind = email_import; otherwise
+	// the per-subdir default (web_scrape / note) applies.
+	mf, looksLikeEmailImport := buildLegacyMemoryFields(doc, it.relPath)
+	if looksLikeEmailImport && it.kind == kindLearn {
+		mf.fields.Kind = string(osearch.KindEmailImport)
+		mf.fields.MemoryType = string(osearch.MemoryEpisodic)
+	}
+	tags = append(tags, mf.extraTags...)
+	// dedup tags
+	tags = uniqueStrings(tags)
+
 	// Canonicalise the rendered markdown for the SHA — matches the
 	// runtime ingest path so re-perceiving an unchanged file dedups
 	// against an already-indexed doc.
@@ -358,11 +375,13 @@ func (r *ingestRunner) processMarkdown(ctx context.Context, it ingestItem, raw [
 		_, err = r.client.Learn(ctx, brain.LearnRequest{
 			SHA: sha, Title: title, Body: body,
 			SourcePath: it.relPath, Tags: tags, Embedding: embs[0],
+			MemoryFields: mf.fields,
 		})
 	} else {
 		_, err = r.client.Perceive(ctx, brain.PerceiveRequest{
 			SHA: sha, Title: title, Body: body, URL: sourceURL,
 			SourcePath: it.relPath, Tags: tags, Embedding: embs[0],
+			MemoryFields: mf.fields,
 		})
 	}
 	if err != nil {
@@ -381,6 +400,9 @@ func (r *ingestRunner) processAttach(ctx context.Context, it ingestItem, raw []b
 	if err != nil {
 		return fmt.Errorf("embed: %w", err)
 	}
+	// v2.4: bulk-loaded attachments are classified the same way an
+	// MCP brain_attach call would (attachment_stub / semantic) but
+	// flagged with the migration source so they're filterable later.
 	_, err = r.client.Attach(ctx, brain.AttachRequest{
 		SHA:              sha,
 		OriginalFilename: name,
@@ -388,6 +410,11 @@ func (r *ingestRunner) processAttach(ctx context.Context, it ingestItem, raw []b
 		BytesB64:         base64.StdEncoding.EncodeToString(raw),
 		MIMEType:         guessAttachmentMIME(filepath.Ext(name)),
 		Embedding:        embs[0],
+		MemoryFields: brain.MemoryFields{
+			Kind:       string(osearch.KindAttachmentStub),
+			MemoryType: string(osearch.MemorySemantic),
+			Source:     []string{"ingest-bulk:" + it.relPath},
+		},
 	})
 	if err != nil {
 		return err
@@ -399,6 +426,80 @@ func (r *ingestRunner) processAttach(ctx context.Context, it ingestItem, raw []b
 func (r *ingestRunner) report(w writer, elapsed time.Duration) {
 	fmt.Fprintf(w, "ingest-bulk done in %s: ok=%d errors=%d\n",
 		elapsed.Round(time.Second), r.ok.Load(), r.errCount.Load())
+}
+
+// legacyMemoryFields wraps the brain.MemoryFields constructed from
+// an Obsidian-style .md plus any extra tag values lifted out of
+// type/vendor/category. extraTags is appended onto the doc's
+// existing tags[] then deduped.
+type legacyMemoryFields struct {
+	fields    brain.MemoryFields
+	extraTags []string
+}
+
+// buildLegacyMemoryFields extracts v2.4 memory classification from a
+// legacy Obsidian curated-markdown frontmatter. The "email_import"
+// signal fires when any of from_email / vendor / obsidian_note is
+// present — characteristic markers of the email-scrape pipeline.
+// Returns the constructed MemoryFields + whether this looks like an
+// email-import doc (so the caller can set Kind accordingly).
+func buildLegacyMemoryFields(doc *vault.Document, relPath string) (legacyMemoryFields, bool) {
+	out := legacyMemoryFields{}
+
+	// Lift type/vendor/category into tags[] — they're flat labels in
+	// the new schema, not dedicated columns.
+	for _, key := range []string{"type", "vendor", "category"} {
+		v := strings.TrimSpace(doc.FrontmatterString(key))
+		if v != "" {
+			out.extraTags = append(out.extraTags, key+":"+v)
+		}
+	}
+
+	// Source provenance from email metadata + obsidian breadcrumb.
+	if fromEmail := strings.TrimSpace(doc.FrontmatterString("from_email")); fromEmail != "" {
+		out.fields.Source = append(out.fields.Source, "from_email:"+fromEmail)
+	}
+	if obsNote := strings.TrimSpace(doc.FrontmatterString("obsidian_note")); obsNote != "" {
+		out.fields.Source = append(out.fields.Source, "obsidian_note:"+obsNote)
+	}
+	if subj := strings.TrimSpace(doc.FrontmatterString("subject")); subj != "" {
+		out.fields.Source = append(out.fields.Source, "subject:"+subj)
+	}
+
+	// Parse the date field as captured_at if present + parseable.
+	if dateStr := strings.TrimSpace(doc.FrontmatterString("date")); dateStr != "" {
+		// Try a couple of common formats.
+		for _, layout := range []string{"2006-01-02", "2006-01-02T15:04:05Z", time.RFC3339} {
+			if t, err := time.Parse(layout, dateStr); err == nil {
+				out.fields.CapturedAt = t
+				break
+			}
+		}
+	}
+
+	looksLikeEmailImport := strings.TrimSpace(doc.FrontmatterString("from_email")) != "" ||
+		strings.TrimSpace(doc.FrontmatterString("vendor")) != "" ||
+		strings.TrimSpace(doc.FrontmatterString("obsidian_note")) != ""
+	return out, looksLikeEmailImport
+}
+
+// uniqueStrings returns a copy of s with duplicates removed,
+// preserving first-seen order. Used to dedup tag lists when we
+// append legacy frontmatter values onto the doc's own tags[].
+func uniqueStrings(s []string) []string {
+	if len(s) == 0 {
+		return s
+	}
+	seen := make(map[string]bool, len(s))
+	out := make([]string, 0, len(s))
+	for _, v := range s {
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 // guessAttachmentMIME mirrors internal/mcp/attach.go's guessMIMEType.

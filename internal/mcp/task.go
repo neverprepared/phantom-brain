@@ -269,13 +269,21 @@ func (s *Server) handleTaskComplete(ctx context.Context, req mcp.CallToolRequest
 	body := renderPromotedTaskBody(task, important, artifacts, questions)
 	title := fmt.Sprintf("Task: %s", strings.TrimSpace(task.Goal))
 
+	// v2.4: task summaries are classified as task_summary / episodic.
+	// Source carries the task ID so promoted notes can be traced back
+	// to the originating session work. Future enhancement: References
+	// could carry SHAs of docs touched during the task (would need
+	// the working-memory layer to track that).
 	res, errMsg, ok := s.ingestMarkdown(ctx, ingestParams{
-		Subdir:    "curated",
-		StampKey:  "completed_at",
-		Content:   body,
-		Title:     title,
-		Filename:  fmt.Sprintf("task-%s.md", taskID),
-		SourceURL: "",
+		Subdir:             "curated",
+		StampKey:           "completed_at",
+		Content:            body,
+		Title:              title,
+		Filename:           fmt.Sprintf("task-%s.md", taskID),
+		SourceURL:          "",
+		KindOverride:       "task_summary",
+		MemoryTypeOverride: "episodic",
+		SourceOverride:     []string{"task:" + taskID},
 	})
 	if !ok {
 		return mcp.NewToolResultError(fmt.Sprintf("promote: %s", errMsg)), nil

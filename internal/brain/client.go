@@ -220,6 +220,18 @@ func (c *Client) GetMergeStatus(ctx context.Context, brainID string) (*MergeStat
 // + ops tooling.
 // --- Phase 6 write endpoints --------------------------------------
 
+// MemoryFields are the v2.4 classification fields shared across the
+// three write request shapes. Each caller fills what it knows; the
+// daemon validates Kind against the closed enum and rejects unknowns.
+// MemoryType is optional (empty = "undecided / not applicable").
+type MemoryFields struct {
+	Kind       string    `json:"kind,omitempty"`        // closed enum — see osearch.Kind
+	MemoryType string    `json:"memory_type,omitempty"` // semantic | episodic | procedural | ""
+	Source     []string  `json:"source,omitempty"`      // provenance: URLs, task IDs, agent IDs, file paths
+	References []string  `json:"references,omitempty"`  // SHAs of related summaries (graph hook)
+	CapturedAt time.Time `json:"captured_at,omitempty"` // when the content was authored, not when OS got it
+}
+
 // PerceiveRequest mirrors internal/server.PerceiveRequest. Defined
 // independently so internal/brain doesn't pull a daemon-side import.
 type PerceiveRequest struct {
@@ -230,6 +242,7 @@ type PerceiveRequest struct {
 	SourcePath string    `json:"source_path,omitempty"`
 	Tags       []string  `json:"tags,omitempty"`
 	Embedding  []float32 `json:"embedding,omitempty"`
+	MemoryFields
 }
 
 // LearnRequest mirrors internal/server.LearnRequest.
@@ -240,9 +253,12 @@ type LearnRequest struct {
 	SourcePath string    `json:"source_path,omitempty"`
 	Tags       []string  `json:"tags,omitempty"`
 	Embedding  []float32 `json:"embedding,omitempty"`
+	MemoryFields
 }
 
-// AttachRequest mirrors internal/server.AttachRequest.
+// AttachRequest mirrors internal/server.AttachRequest. The attachment
+// blob's metadata carries its own memory fields so the OS doc the
+// daemon stores can be filtered alongside summaries.
 type AttachRequest struct {
 	SHA              string    `json:"sha"`
 	OriginalFilename string    `json:"original_filename"`
@@ -251,6 +267,7 @@ type AttachRequest struct {
 	BytesB64         string    `json:"bytes_b64"`
 	ExtractedText    string    `json:"extracted_text,omitempty"`
 	Embedding        []float32 `json:"embedding,omitempty"`
+	MemoryFields
 }
 
 // TraceRequest mirrors internal/server.TraceRequest.
