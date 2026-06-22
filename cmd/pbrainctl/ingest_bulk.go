@@ -485,12 +485,14 @@ func buildLegacyMemoryFields(doc *vault.Document, relPath string) (legacyMemoryF
 	if dateRaw, ok := doc.Frontmatter["date"]; ok {
 		switch v := dateRaw.(type) {
 		case time.Time:
-			out.fields.CapturedAt = v
+			vv := v
+			out.fields.CapturedAt = &vv
 		case string:
 			s := strings.TrimSpace(v)
 			for _, layout := range []string{"2006-01-02", "2006-01-02T15:04:05Z", time.RFC3339} {
 				if t, err := time.Parse(layout, s); err == nil {
-					out.fields.CapturedAt = t
+					t := t
+					out.fields.CapturedAt = &t
 					break
 				}
 			}

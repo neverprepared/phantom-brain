@@ -186,7 +186,7 @@ func (s *Server) handleAttach(ctx context.Context, req mcp.CallToolRequest) (*mc
 		mf := brain.MemoryFields{
 			Kind:       string(osearch.KindAttachmentStub),
 			MemoryType: string(osearch.MemorySemantic),
-			CapturedAt: time.Now().UTC(),
+			CapturedAt: timePtr(time.Now().UTC()),
 			Source:     []string{filePath},
 		}
 		if sourceURL != "" {
@@ -239,6 +239,11 @@ func (s *Server) handleAttach(ctx context.Context, req mcp.CallToolRequest) (*mc
 		st.Size(), stubRel, stubSHA, blobSHA,
 	)), nil
 }
+
+// timePtr returns a pointer to t. Used so callers can pass a non-nil
+// *time.Time into the MemoryFields wire structs (nil = "captured_at
+// unknown" and serializes as an omitted field).
+func timePtr(t time.Time) *time.Time { return &t }
 
 // guessMIMEType maps a file extension to a coarse MIME type. Used by
 // the agent-side attach handler to populate metadata for the daemon's
