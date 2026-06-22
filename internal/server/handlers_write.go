@@ -102,17 +102,30 @@ var ErrAttachmentStoreUnavailable = errors.New("attachment store not configured"
 
 // --- request/response shapes --------------------------------------
 
+// MemoryFields are the v2.4 classification fields shared across the
+// three write request shapes. Mirrors brain.MemoryFields on the
+// agent side. The daemon validates Kind against osearch.Kind's
+// closed enum and rejects unknowns at the boundary.
+type MemoryFields struct {
+	Kind       string    `json:"kind,omitempty"`        // closed enum: see osearch.Kind
+	MemoryType string    `json:"memory_type,omitempty"` // semantic | episodic | procedural | ""
+	Source     []string  `json:"source,omitempty"`      // provenance: URLs, task IDs, agent IDs, file paths
+	References []string  `json:"references,omitempty"`  // SHAs of related summaries
+	CapturedAt time.Time `json:"captured_at,omitempty"` // when the content was authored, not when OS got it
+}
+
 // PerceiveRequest mirrors the agent's brain_perceive payload, plus
 // the agent-computed embedding so the daemon stays stateless w.r.t.
 // Ollama. SHA is canonical and used as the doc-ID half.
 type PerceiveRequest struct {
-	SHA       string    `json:"sha"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
-	URL       string    `json:"url,omitempty"`
-	SourcePath string   `json:"source_path,omitempty"`
-	Tags      []string  `json:"tags,omitempty"`
-	Embedding []float32 `json:"embedding,omitempty"`
+	SHA        string    `json:"sha"`
+	Title      string    `json:"title"`
+	Body       string    `json:"body"`
+	URL        string    `json:"url,omitempty"`
+	SourcePath string    `json:"source_path,omitempty"`
+	Tags       []string  `json:"tags,omitempty"`
+	Embedding  []float32 `json:"embedding,omitempty"`
+	MemoryFields
 }
 
 // LearnRequest mirrors brain_learn. The only daemon-side difference
@@ -125,6 +138,7 @@ type LearnRequest struct {
 	SourcePath string    `json:"source_path,omitempty"`
 	Tags       []string  `json:"tags,omitempty"`
 	Embedding  []float32 `json:"embedding,omitempty"`
+	MemoryFields
 }
 
 // AttachRequest carries an attachment inline. The agent computes the
@@ -139,6 +153,32 @@ type AttachRequest struct {
 	BytesB64         string    `json:"bytes_b64"`
 	ExtractedText    string    `json:"extracted_text,omitempty"`
 	Embedding        []float32 `json:"embedding,omitempty"`
+	MemoryFields
+}
+
+// validateMemoryFields runs the closed-enum checks at the boundary.
+// Unknown Kind rejected; empty Kind allowed (caller didn't classify).
+// MemoryType has its own "empty is OK" rule baked into IsValid.
+// Returns "" on success, a user-facing message on failure.
+func validateMemoryFields(m MemoryFields) string {
+	if m.Kind != "" && !osearch.Kind(m.Kind).IsValid() {
+		return "unknown kind: " + m.Kind + " (closed enum — see docs)"
+	}
+	if !osearch.MemoryType(m.MemoryType).IsValid() {
+		return "unknown memory_type: " + m.MemoryType
+	}
+	return ""
+}
+
+// applyMemoryFields copies the request's memory fields onto a
+// SummaryDoc. Called by both perceive and learn handlers so the
+// pattern stays consistent.
+func applyMemoryFields(doc *osearch.SummaryDoc, m MemoryFields) {
+	doc.Kind = osearch.Kind(m.Kind)
+	doc.MemoryType = osearch.MemoryType(m.MemoryType)
+	doc.Source = m.Source
+	doc.References = m.References
+	doc.CapturedAt = m.CapturedAt
 }
 
 // TraceRequest is an append-only audit-log line. No synth, no OS
@@ -184,6 +224,10 @@ func (d *Daemon) handlePerceive(w http.ResponseWriter, r *http.Request) {
 		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, "title and body required", nil)
 		return
 	}
+	if msg := validateMemoryFields(req.MemoryFields); msg != "" {
+		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, msg, nil)
+		return
+	}
 
 	now := time.Now().UTC()
 	doc := osearch.SummaryDoc{
@@ -200,6 +244,7 @@ func (d *Daemon) handlePerceive(w http.ResponseWriter, r *http.Request) {
 		Synthesised: false,
 		Embedding:   req.Embedding,
 	}
+	applyMemoryFields(&doc, req.MemoryFields)
 	if err := d.osClient.UpsertSummary(r.Context(), doc, false); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch upsert failed: "+err.Error(), nil)
@@ -231,6 +276,10 @@ func (d *Daemon) handleLearn(w http.ResponseWriter, r *http.Request) {
 		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, "title and body required", nil)
 		return
 	}
+	if msg := validateMemoryFields(req.MemoryFields); msg != "" {
+		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, msg, nil)
+		return
+	}
 
 	now := time.Now().UTC()
 	// Curated sources skip the LLM gate per Phase 6 plan; verdict is
@@ -251,6 +300,7 @@ func (d *Daemon) handleLearn(w http.ResponseWriter, r *http.Request) {
 		Synthesised: false,
 		Embedding:   req.Embedding,
 	}
+	applyMemoryFields(&doc, req.MemoryFields)
 	if err := d.osClient.UpsertSummary(r.Context(), doc, false); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch upsert failed: "+err.Error(), nil)
@@ -291,6 +341,10 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, "bytes_b64 required", nil)
 		return
 	}
+	if msg := validateMemoryFields(req.MemoryFields); msg != "" {
+		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, msg, nil)
+		return
+	}
 
 	bytes, err := base64.StdEncoding.DecodeString(req.BytesB64)
 	if err != nil {
@@ -315,6 +369,13 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC()
+	// Default Kind to attachment_stub when caller didn't classify —
+	// preserves the agent's explicit choice (e.g. KindEmailImport for
+	// migration ingest) when it's set.
+	kind := osearch.Kind(req.Kind)
+	if kind == "" {
+		kind = osearch.KindAttachmentStub
+	}
 	doc := osearch.AttachmentDoc{
 		Profile:          binding.Key.Profile,
 		Vault:            binding.Key.Vault,
@@ -324,8 +385,13 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 		MIMEType:         req.MIMEType,
 		SizeBytes:        int64(len(bytes)),
 		CreatedAt:        now,
+		CapturedAt:       req.CapturedAt,
 		MinIOKey:         key,
 		ExtractedText:    req.ExtractedText,
+		Kind:             kind,
+		MemoryType:       osearch.MemoryType(req.MemoryType),
+		Source:           req.Source,
+		References:       req.References,
 		Embedding:        req.Embedding,
 	}
 	if err := d.osClient.UpsertAttachment(r.Context(), doc, false); err != nil {

@@ -10,6 +10,7 @@ import (
 	"github.com/neverprepared/mcp-phantom-brain/internal/brain"
 	"github.com/neverprepared/mcp-phantom-brain/internal/canonicalize"
 	"github.com/neverprepared/mcp-phantom-brain/internal/index"
+	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
 	"github.com/neverprepared/mcp-phantom-brain/internal/vault"
 )
 
@@ -29,6 +30,17 @@ type ingestParams struct {
 	Title     string
 	Filename  string
 	SourceURL string
+
+	// v2.4: callers may override the default memory-classification
+	// fields. brain_perceive/learn use the defaults set in
+	// ingestMarkdown by switching on Subdir. task_complete passes
+	// explicit values to mark its promoted note as a task_summary +
+	// episodic memory + source=task_id. Empty values fall through to
+	// the per-subdir defaults.
+	KindOverride       string
+	MemoryTypeOverride string
+	SourceOverride     []string
+	ReferencesOverride []string
 }
 
 // ingestResult mirrors what callers want to render back to the user.
@@ -109,20 +121,58 @@ func (s *Server) ingestMarkdown(ctx context.Context, p ingestParams) (*ingestRes
 	// retained per plan).
 	if client := lifecycleClient(s); client != nil {
 		dest := relativeRawPath(p.Subdir, p.Filename, p.Title)
+		// v2.4: default memory-classification fields per subdir.
+		// brain_perceive (gathered) is a semantic web scrape;
+		// brain_learn (curated) is a semantic note. CapturedAt is
+		// now (we just received it).
+		now := time.Now().UTC()
+		// Per-subdir defaults; caller can override via *Override fields.
+		applyOverrides := func(mf brain.MemoryFields) brain.MemoryFields {
+			if p.KindOverride != "" {
+				mf.Kind = p.KindOverride
+			}
+			if p.MemoryTypeOverride != "" {
+				mf.MemoryType = p.MemoryTypeOverride
+			}
+			if len(p.SourceOverride) > 0 {
+				mf.Source = p.SourceOverride
+			}
+			if len(p.ReferencesOverride) > 0 {
+				mf.References = p.ReferencesOverride
+			}
+			return mf
+		}
 		switch p.Subdir {
 		case "gathered":
+			mf := brain.MemoryFields{
+				Kind:       string(osearch.KindWebScrape),
+				MemoryType: string(osearch.MemorySemantic),
+				CapturedAt: now,
+			}
+			if p.SourceURL != "" {
+				mf.Source = []string{p.SourceURL}
+			}
+			mf = applyOverrides(mf)
 			if _, err := client.Perceive(ctx, brain.PerceiveRequest{
 				SHA: sha, Title: p.Title, Body: p.Content,
 				URL: p.SourceURL, SourcePath: dest, Tags: tags,
-				Embedding: embs[0],
+				Embedding:    embs[0],
+				MemoryFields: mf,
 			}); err != nil {
 				return nil, fmt.Sprintf("daemon perceive: %v", err), false
 			}
 		case "curated":
+			mf := brain.MemoryFields{
+				Kind:       string(osearch.KindNote),
+				MemoryType: string(osearch.MemorySemantic),
+				CapturedAt: now,
+			}
+			mf = applyOverrides(mf)
 			if _, err := client.Learn(ctx, brain.LearnRequest{
 				SHA: sha, Title: p.Title, Body: p.Content,
 				SourcePath: dest, Tags: tags,
-				Embedding: embs[0],
+				Embedding:    embs[0],
+				MemoryFields: mf,
 			}); err != nil {
 				return nil, fmt.Sprintf("daemon learn: %v", err), false
 			}

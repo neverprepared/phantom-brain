@@ -16,6 +16,7 @@ import (
 	"github.com/neverprepared/mcp-phantom-brain/internal/brain"
 	"github.com/neverprepared/mcp-phantom-brain/internal/canonicalize"
 	"github.com/neverprepared/mcp-phantom-brain/internal/index"
+	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
 	"github.com/neverprepared/mcp-phantom-brain/internal/vault"
 )
 
@@ -167,6 +168,18 @@ func (s *Server) handleAttach(ctx context.Context, req mcp.CallToolRequest) (*mc
 	// searchable text.
 	if client := lifecycleClient(s); client != nil {
 		mimeType := guessMIMEType(ext)
+		// v2.4: attachment is stamped as attachment_stub, semantic.
+		// Source carries the original local path so the operator can
+		// trace back where the file came from.
+		mf := brain.MemoryFields{
+			Kind:       string(osearch.KindAttachmentStub),
+			MemoryType: string(osearch.MemorySemantic),
+			CapturedAt: time.Now().UTC(),
+			Source:     []string{filePath},
+		}
+		if sourceURL != "" {
+			mf.Source = append(mf.Source, sourceURL)
+		}
 		if _, err := client.Attach(ctx, brain.AttachRequest{
 			SHA:              blobSHA,
 			OriginalFilename: canonicalize.Filename(filepath.Base(filePath)),
@@ -175,6 +188,7 @@ func (s *Server) handleAttach(ctx context.Context, req mcp.CallToolRequest) (*mc
 			BytesB64:         base64.StdEncoding.EncodeToString(raw),
 			ExtractedText:    description,
 			Embedding:        embs[0],
+			MemoryFields:     mf,
 		}); err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("daemon attach: %v", err)), nil
 		}
