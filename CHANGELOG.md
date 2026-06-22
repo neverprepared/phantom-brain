@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.0](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.1.0...v2.2.0) (2026-06-22)
+
+
+### Features
+
+* **docker:** bundle claude CLI in daemon image ([#32](https://github.com/neverprepared/mcp-phantom-brain/issues/32)) ([64b9858](https://github.com/neverprepared/mcp-phantom-brain/commit/64b98580c51adc63fc0e4d72ff1a9b2beb93d122))
+
 ## [2.1.0](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.0.2...v2.1.0) (2026-06-22)
 
 
