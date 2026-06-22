@@ -74,14 +74,15 @@ FROM ubuntu:24.04
 # raw-body if the env var is absent (gate.go's ClaudeCLIAvailable
 # probe runs `which claude` at startup and gates further calls).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg \
+        ca-certificates curl gnupg poppler-utils \
     && curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && npm install -g @anthropic-ai/claude-code \
     && apt-get purge -y --auto-remove gnupg \
     && rm -rf /var/lib/apt/lists/* /root/.npm \
     && groupadd -r pbrain && useradd -r -g pbrain -d /data -s /sbin/nologin pbrain \
-    && claude --version
+    && claude --version \
+    && pdftotext -v 2>&1 | head -1
 
 COPY --from=builder /out/pbrainctl /usr/local/bin/pbrainctl
 

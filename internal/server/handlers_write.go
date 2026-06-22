@@ -94,6 +94,11 @@ type AttachmentStore interface {
 	// PresignGet returns a short-lived URL the agent can GET to
 	// retrieve the blob. ttl bounds validity.
 	PresignGet(ctx context.Context, key string, ttl time.Duration) (url string, err error)
+	// GetAttachmentBytes returns the raw blob at key. Used by the
+	// SynthWorker to pull PDFs back out of MinIO for pdftotext at
+	// synth time. maxBytes caps the read defensively — pass 0 for
+	// the impl's default ceiling.
+	GetAttachmentBytes(ctx context.Context, key string, maxBytes int64) ([]byte, error)
 }
 
 // ErrAttachmentStoreUnavailable signals that no AttachmentStore is

@@ -41,6 +41,16 @@ func (s *captureStore) PresignGet(_ context.Context, key string, _ time.Duration
 	return "https://example.test/" + key + "?sig=fake", nil
 }
 
+func (s *captureStore) GetAttachmentBytes(_ context.Context, key string, _ int64) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.puts[key]
+	if !ok {
+		return nil, errors.New("no such key: " + key)
+	}
+	return append([]byte(nil), b...), nil
+}
+
 func TestCaptureURL_HappyPath(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

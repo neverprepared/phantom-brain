@@ -105,6 +105,15 @@ func (f *fakeAttach) PutAttachment(_ context.Context, profile, vault, sha, ext s
 func (f *fakeAttach) PresignGet(_ context.Context, key string, _ time.Duration) (string, error) {
 	return "https://example.test/" + key + "?sig=fake", nil
 }
+func (f *fakeAttach) GetAttachmentBytes(_ context.Context, key string, _ int64) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	b, ok := f.blobs[key]
+	if !ok {
+		return nil, errors.New("no such key: " + key)
+	}
+	return append([]byte(nil), b...), nil
+}
 
 type fakeSynth struct {
 	mu    sync.Mutex
