@@ -38,6 +38,12 @@ type Lifecycle struct {
 	ckptStop  context.CancelFunc
 	ckptDone  chan struct{}
 	closed    bool
+
+	// Phase 6: HTTP client to the daemon. Lazily constructed at
+	// Start() when the agent contract supplies API + Token; nil
+	// otherwise (legacy BRAIN_VAULT_PATH mode). MCP handlers branch
+	// on Client() != nil to choose POST-to-daemon vs local-only.
+	client *Client
 }
 
 // StartOpts narrows what callers must supply to instantiate a
@@ -99,6 +105,16 @@ func Start(opts StartOpts) (*Lifecycle, error) {
 		brainDir: dir,
 		manifest: m,
 	}
+	// Phase 6: a Lifecycle started under the agent contract has a
+	// daemon API + bearer; construct the shared HTTP client once
+	// here so MCP handlers don't have to rebuild it per call.
+	if opts.Agent.API != "" && opts.Agent.Token != "" {
+		c, cerr := NewClient(ClientOpts{BaseURL: opts.Agent.API, Token: opts.Agent.Token})
+		if cerr != nil {
+			return nil, fmt.Errorf("brain: start: build daemon client: %w", cerr)
+		}
+		lc.client = c
+	}
 	if !opts.SkipHeartbeat {
 		hbCtx := opts.HeartbeatCtx
 		if hbCtx == nil {
@@ -133,6 +149,11 @@ func Start(opts StartOpts) (*Lifecycle, error) {
 	}
 	return lc, nil
 }
+
+// Client returns the agent's daemon HTTP client, or nil when the
+// Lifecycle was started without API + Token (legacy mode). MCP
+// handlers branch on this to decide local-only vs POST-to-daemon.
+func (l *Lifecycle) Client() *Client { return l.client }
 
 // RecordWrite is the hook ingest handlers (brain_perceive,
 // brain_learn, brain_attach) call after a successful write so the

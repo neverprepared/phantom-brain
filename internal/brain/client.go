@@ -206,6 +206,111 @@ func (c *Client) GetMergeStatus(ctx context.Context, brainID string) (*MergeStat
 // Health hits /api/brain/health. Unauthenticated on the daemon side
 // but we still pass the bearer for consistency. Used by smoke tests
 // + ops tooling.
+// --- Phase 6 write endpoints --------------------------------------
+
+// PerceiveRequest mirrors internal/server.PerceiveRequest. Defined
+// independently so internal/brain doesn't pull a daemon-side import.
+type PerceiveRequest struct {
+	SHA        string    `json:"sha"`
+	Title      string    `json:"title"`
+	Body       string    `json:"body"`
+	URL        string    `json:"url,omitempty"`
+	SourcePath string    `json:"source_path,omitempty"`
+	Tags       []string  `json:"tags,omitempty"`
+	Embedding  []float32 `json:"embedding,omitempty"`
+}
+
+// LearnRequest mirrors internal/server.LearnRequest.
+type LearnRequest struct {
+	SHA        string    `json:"sha"`
+	Title      string    `json:"title"`
+	Body       string    `json:"body"`
+	SourcePath string    `json:"source_path,omitempty"`
+	Tags       []string  `json:"tags,omitempty"`
+	Embedding  []float32 `json:"embedding,omitempty"`
+}
+
+// AttachRequest mirrors internal/server.AttachRequest.
+type AttachRequest struct {
+	SHA              string    `json:"sha"`
+	OriginalFilename string    `json:"original_filename"`
+	Title            string    `json:"title,omitempty"`
+	MIMEType         string    `json:"mime_type,omitempty"`
+	BytesB64         string    `json:"bytes_b64"`
+	ExtractedText    string    `json:"extracted_text,omitempty"`
+	Embedding        []float32 `json:"embedding,omitempty"`
+}
+
+// TraceRequest mirrors internal/server.TraceRequest.
+type TraceRequest struct {
+	Kind    string         `json:"kind"`
+	Message string         `json:"message"`
+	Meta    map[string]any `json:"meta,omitempty"`
+}
+
+// WriteResponse mirrors internal/server.WriteResponse.
+type WriteResponse struct {
+	SHA           string `json:"sha"`
+	IndexedAt     int64  `json:"indexed_at"`
+	SynthEnqueued bool   `json:"synth_enqueued"`
+}
+
+// Perceive POSTs a gathered-content doc to the daemon. Returns the
+// daemon's accept envelope on 202; surfaces typed *APIError on 4xx/5xx.
+func (c *Client) Perceive(ctx context.Context, req PerceiveRequest) (*WriteResponse, error) {
+	var out WriteResponse
+	if err := c.do(ctx, http.MethodPost, "/api/brain/perceive", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Learn POSTs a curated-content doc to the daemon.
+func (c *Client) Learn(ctx context.Context, req LearnRequest) (*WriteResponse, error) {
+	var out WriteResponse
+	if err := c.do(ctx, http.MethodPost, "/api/brain/learn", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Attach POSTs a binary attachment + its extracted text + metadata.
+// The bytes_b64 field carries the raw blob; daemon decodes, validates
+// SHA, stores to MinIO, indexes metadata in OS.
+func (c *Client) Attach(ctx context.Context, req AttachRequest) (*WriteResponse, error) {
+	var out WriteResponse
+	if err := c.do(ctx, http.MethodPost, "/api/brain/attach", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Trace appends an audit-log line to the daemon's vault log. No
+// content indexing; no synth.
+func (c *Client) Trace(ctx context.Context, req TraceRequest) error {
+	return c.do(ctx, http.MethodPost, "/api/brain/trace", req, nil)
+}
+
+// AttachGet retrieves a presigned URL the agent can fetch to pull
+// the binary. Returns *APIError 404 when the SHA isn't in this
+// vault's attachments index.
+type AttachGetResponse struct {
+	SHA       string `json:"sha"`
+	Original  string `json:"original"`
+	MIMEType  string `json:"mime_type"`
+	SizeBytes int64  `json:"size_bytes"`
+	URL       string `json:"url"`
+	ExpiresIn int    `json:"expires_in"`
+}
+
+func (c *Client) AttachGet(ctx context.Context, sha string) (*AttachGetResponse, error) {
+	var out AttachGetResponse
+	if err := c.do(ctx, http.MethodGet, "/api/brain/attach/"+sha, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *Client) Health(ctx context.Context) error {
 	return c.do(ctx, http.MethodGet, "/api/brain/health", nil, nil)
 }

@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/neverprepared/mcp-phantom-brain/internal/brain"
 	"github.com/neverprepared/mcp-phantom-brain/internal/canonicalize"
 	"github.com/neverprepared/mcp-phantom-brain/internal/index"
 	"github.com/neverprepared/mcp-phantom-brain/internal/vault"
@@ -137,15 +139,6 @@ func (s *Server) handleAttach(ctx context.Context, req mcp.CallToolRequest) (*mc
 		return mcp.NewToolResultText(fmt.Sprintf("Duplicate (stub already indexed). SHA: %s. Blob: %s.", stubSHA, blobSHA)), nil
 	}
 
-	// Write the blob (idempotent on identical bytes — vault.WriteAtomicFile
-	// rename semantics mean a concurrent attach of the same file is safe).
-	if err := vault.WriteAtomicFile(blobAbs, raw, 0o644); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("write blob: %v", err)), nil
-	}
-	if err := vault.WriteAtomicFile(stubAbs, rendered, 0o644); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("write stub: %v", err)), nil
-	}
-
 	// Embed (title + description). Empty description doesn't trip the
 	// embedder — title-only is a valid (if weak) input.
 	if s.deps.Embedder.Dims() != s.deps.Index.Dims() {
@@ -158,6 +151,41 @@ func (s *Server) handleAttach(ctx context.Context, req mcp.CallToolRequest) (*mc
 		return mcp.NewToolResultError(fmt.Sprintf("embed: %v", err)), nil
 	}
 
+	// Phase 6: hand the blob + metadata to the daemon. Daemon stores
+	// the bytes in MinIO and indexes metadata + extracted text (if
+	// any) in OS. Day 7 keeps text extraction agent-side as empty —
+	// the daemon's gate pass can later run pdftotext/textutil on the
+	// stored blob. For now the description carries the only
+	// searchable text.
+	if client := lifecycleClient(s); client != nil {
+		mimeType := guessMIMEType(ext)
+		if _, err := client.Attach(ctx, brain.AttachRequest{
+			SHA:              blobSHA,
+			OriginalFilename: filepath.Base(filePath),
+			Title:            title,
+			MIMEType:         mimeType,
+			BytesB64:         base64.StdEncoding.EncodeToString(raw),
+			ExtractedText:    description,
+			Embedding:        embs[0],
+		}); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("daemon attach: %v", err)), nil
+		}
+		if s.deps.Lifecycle != nil {
+			s.deps.Lifecycle.RecordWrite()
+		}
+		return mcp.NewToolResultText(fmt.Sprintf(
+			"Attached %d bytes via daemon. Blob SHA: %s.",
+			st.Size(), blobSHA,
+		)), nil
+	}
+
+	// Legacy fallback: no daemon — old local file + index pipeline.
+	if err := vault.WriteAtomicFile(blobAbs, raw, 0o644); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("write blob: %v", err)), nil
+	}
+	if err := vault.WriteAtomicFile(stubAbs, rendered, 0o644); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("write stub: %v", err)), nil
+	}
 	if err := s.deps.Index.Upsert(ctx, index.Record{
 		SHA:        stubSHA,
 		SourcePath: stubRel,
@@ -168,13 +196,45 @@ func (s *Server) handleAttach(ctx context.Context, req mcp.CallToolRequest) (*mc
 	}); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("index upsert: %v", err)), nil
 	}
-
 	if s.deps.Lifecycle != nil {
 		s.deps.Lifecycle.RecordWrite()
 	}
-
 	return mcp.NewToolResultText(fmt.Sprintf(
 		"Attached %d bytes to %s. Stub: %s. Blob SHA: %s.",
 		st.Size(), stubRel, stubSHA, blobSHA,
 	)), nil
+}
+
+// guessMIMEType maps a file extension to a coarse MIME type. Used by
+// the agent-side attach handler to populate metadata for the daemon's
+// OS doc; not authoritative — daemons that want server-side
+// detection should run libmagic.
+func guessMIMEType(ext string) string {
+	switch strings.ToLower(ext) {
+	case ".pdf":
+		return "application/pdf"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".txt":
+		return "text/plain"
+	case ".md":
+		return "text/markdown"
+	case ".html", ".htm":
+		return "text/html"
+	case ".json":
+		return "application/json"
+	case ".csv":
+		return "text/csv"
+	case ".doc":
+		return "application/msword"
+	case ".docx":
+		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	}
+	return "application/octet-stream"
 }

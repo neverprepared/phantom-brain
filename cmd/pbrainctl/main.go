@@ -264,6 +264,7 @@ func runMCPAgentMode() error {
 		Embedder:  oll,
 		VaultDir:  lc.VaultDir(),
 		Lifecycle: lc,
+		Client:    lc.Client(), // Phase 6: POST writes through here
 	}).Register(srv)
 
 	// Serve in a goroutine so signals can interrupt cleanly.
