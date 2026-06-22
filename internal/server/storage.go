@@ -367,6 +367,31 @@ func (m *MinIOBackend) PutAttachment(ctx context.Context, profile, vault, sha, e
 	return key, nil
 }
 
+// GetAttachmentBytes streams the object at key into memory. Used by
+// the SynthWorker to fetch attachments (PDFs) for daemon-side text
+// extraction. maxBytes caps the read; 0 selects a 256 MiB ceiling.
+// Returning the body in-memory matches the input shape of the PDF
+// extractor (pdftotext reads stdin); the SynthWorker holds one of
+// these at a time.
+func (m *MinIOBackend) GetAttachmentBytes(ctx context.Context, key string, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = 256 << 20
+	}
+	obj, err := m.client.GetObject(ctx, m.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("server: minio get attachment %s: %w", key, err)
+	}
+	defer obj.Close()
+	buf, err := io.ReadAll(io.LimitReader(obj, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("server: read attachment %s: %w", key, err)
+	}
+	if int64(len(buf)) > maxBytes {
+		return nil, fmt.Errorf("server: attachment %s exceeds max %d bytes", key, maxBytes)
+	}
+	return buf, nil
+}
+
 // PresignGet returns a short-lived URL the agent can GET to retrieve
 // the blob. Implements AttachmentStore (Phase 6). ttl bounds validity;
 // the daemon's /api/brain/attach/{sha} handler typically passes

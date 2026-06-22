@@ -229,7 +229,7 @@ type MemoryFields struct {
 	MemoryType string    `json:"memory_type,omitempty"` // semantic | episodic | procedural | ""
 	Source     []string  `json:"source,omitempty"`      // provenance: URLs, task IDs, agent IDs, file paths
 	References []string  `json:"references,omitempty"`  // SHAs of related summaries (graph hook)
-	CapturedAt time.Time `json:"captured_at,omitempty"` // when the content was authored, not when OS got it
+	CapturedAt *time.Time `json:"captured_at,omitempty"` // when the content was authored, not when OS got it; nil = unset
 }
 
 // PerceiveRequest mirrors internal/server.PerceiveRequest. Defined
@@ -266,6 +266,7 @@ type AttachRequest struct {
 	MIMEType         string    `json:"mime_type,omitempty"`
 	BytesB64         string    `json:"bytes_b64"`
 	ExtractedText    string    `json:"extracted_text,omitempty"`
+	Tags             []string  `json:"tags,omitempty"`
 	Embedding        []float32 `json:"embedding,omitempty"`
 	MemoryFields
 }

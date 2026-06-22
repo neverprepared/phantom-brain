@@ -14,8 +14,8 @@ make test
 # Race tests on the concurrency-sensitive packages
 make test-race
 
-# Tidy + vet + build + test in one shot before pushing
-make check
+# vet + test + build in one shot before pushing
+make all
 ```
 
 Plain `go build`/`go test` won't work — `internal/index` panics at init() without the `sqlite_fts5` build tag. Always use `make` or `GOFLAGS=-tags=sqlite_fts5 go test ./...`.

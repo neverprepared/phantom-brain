@@ -11,6 +11,7 @@ require (
 	github.com/mark3labs/mcp-go v0.55.0
 	github.com/mattn/go-sqlite3 v1.14.46
 	github.com/minio/minio-go/v7 v7.2.0
+	github.com/opensearch-project/opensearch-go/v4 v4.6.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sys v0.44.0
 	golang.org/x/text v0.38.0
@@ -26,7 +27,6 @@ require (
 	github.com/klauspost/crc32 v1.3.0 // indirect
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
-	github.com/opensearch-project/opensearch-go/v4 v4.6.0 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect

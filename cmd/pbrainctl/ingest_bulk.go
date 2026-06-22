@@ -312,7 +312,7 @@ func (r *ingestRunner) process(ctx context.Context, vaultDir string, it ingestIt
 	case kindPerceive, kindLearn:
 		return r.processMarkdown(ctx, it, raw)
 	case kindAttach:
-		return r.processAttach(ctx, it, raw)
+		return r.processAttach(ctx, vaultDir, it, raw)
 	}
 	return nil
 }
@@ -403,10 +403,11 @@ func (r *ingestRunner) processMarkdown(ctx context.Context, it ingestItem, raw [
 	return nil
 }
 
-func (r *ingestRunner) processAttach(ctx context.Context, it ingestItem, raw []byte) error {
+func (r *ingestRunner) processAttach(ctx context.Context, vaultDir string, it ingestItem, raw []byte) error {
 	sha := osearch.SHA256Hex(raw)
 	name := canonicalize.Filename(filepath.Base(it.relPath))
-	title := strings.TrimSuffix(name, filepath.Ext(name))
+	fallbackTitle := strings.TrimSuffix(name, filepath.Ext(name))
+	title := resolveAttachmentTitle(vaultDir, it.relPath, fallbackTitle, r.stderr)
 	embInput := title
 	embs, err := r.embedder.Embed(ctx, []string{embInput})
 	if err != nil {
@@ -485,12 +486,14 @@ func buildLegacyMemoryFields(doc *vault.Document, relPath string) (legacyMemoryF
 	if dateRaw, ok := doc.Frontmatter["date"]; ok {
 		switch v := dateRaw.(type) {
 		case time.Time:
-			out.fields.CapturedAt = v
+			vv := v
+			out.fields.CapturedAt = &vv
 		case string:
 			s := strings.TrimSpace(v)
 			for _, layout := range []string{"2006-01-02", "2006-01-02T15:04:05Z", time.RFC3339} {
 				if t, err := time.Parse(layout, s); err == nil {
-					out.fields.CapturedAt = t
+					t := t
+					out.fields.CapturedAt = &t
 					break
 				}
 			}
@@ -501,6 +504,57 @@ func buildLegacyMemoryFields(doc *vault.Document, relPath string) (legacyMemoryF
 		strings.TrimSpace(doc.FrontmatterString("vendor")) != "" ||
 		strings.TrimSpace(doc.FrontmatterString("obsidian_note")) != ""
 	return out, looksLikeEmailImport
+}
+
+// resolveAttachmentTitle looks for a sibling markdown sidecar next to
+// an attachment under Raw/attachments/ and prefers its frontmatter
+// `title` or first H1 over the filename-derived fallback. Two naming
+// variants are checked: <basename>.md (human-written sidecar) and
+// <basename>.<ext>.md (matches what internal/mcp/attach writes). Any
+// parse failure logs to stderr and silently falls back — a busted
+// sidecar must never block migration of the underlying blob.
+func resolveAttachmentTitle(vaultDir, relPath, fallback string, stderr writer) string {
+	abs := filepath.Join(vaultDir, relPath)
+	ext := filepath.Ext(abs)
+	candidates := []string{
+		strings.TrimSuffix(abs, ext) + ".md", // hand_muscles.md beside hand_muscles.jpg
+		abs + ".md",                          // hand_muscles.jpg.md
+	}
+	for _, side := range candidates {
+		st, err := os.Stat(side)
+		if err != nil || !st.Mode().IsRegular() {
+			continue
+		}
+		raw, err := os.ReadFile(side)
+		if err != nil {
+			continue
+		}
+		doc, err := vault.Parse(raw)
+		if err != nil {
+			if stderr != nil {
+				fmt.Fprintf(stderr, "WARN sidecar parse %s: %v\n", side, err)
+			}
+			return fallback
+		}
+		if t := strings.TrimSpace(doc.FrontmatterString("title")); t != "" {
+			return t
+		}
+		for _, line := range strings.Split(doc.Body, "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" {
+				continue
+			}
+			if strings.HasPrefix(trimmed, "# ") && !strings.HasPrefix(trimmed, "## ") {
+				h1 := strings.TrimSpace(strings.TrimPrefix(trimmed, "# "))
+				if h1 != "" {
+					return h1
+				}
+			}
+			break
+		}
+		return fallback
+	}
+	return fallback
 }
 
 // uniqueStrings returns a copy of s with duplicates removed,

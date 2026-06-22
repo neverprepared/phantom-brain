@@ -147,7 +147,7 @@ func (s *Server) ingestMarkdown(ctx context.Context, p ingestParams) (*ingestRes
 			mf := brain.MemoryFields{
 				Kind:       string(osearch.KindWebScrape),
 				MemoryType: string(osearch.MemorySemantic),
-				CapturedAt: now,
+				CapturedAt: &now,
 			}
 			if p.SourceURL != "" {
 				mf.Source = []string{p.SourceURL}
@@ -165,7 +165,7 @@ func (s *Server) ingestMarkdown(ctx context.Context, p ingestParams) (*ingestRes
 			mf := brain.MemoryFields{
 				Kind:       string(osearch.KindNote),
 				MemoryType: string(osearch.MemorySemantic),
-				CapturedAt: now,
+				CapturedAt: &now,
 			}
 			mf = applyOverrides(mf)
 			if _, err := client.Learn(ctx, brain.LearnRequest{

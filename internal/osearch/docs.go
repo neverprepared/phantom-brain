@@ -104,7 +104,7 @@ type SummaryDoc struct {
 	Source     []string  `json:"source,omitempty"`      // multi-valued provenance: URLs, task IDs, agent IDs, file paths
 	CreatedAt  time.Time `json:"created_at"`            // when OS first received this doc
 	UpdatedAt  time.Time `json:"updated_at"`            // when OS last touched it
-	CapturedAt time.Time `json:"captured_at,omitempty"` // when the underlying content was authored / captured
+	CapturedAt *time.Time `json:"captured_at,omitempty"` // when the underlying content was authored / captured; nil = unknown / not set
 
 	// Content
 	Title   string   `json:"title"`
@@ -175,7 +175,7 @@ type AttachmentDoc struct {
 	MIMEType         string    `json:"mime_type,omitempty"`
 	SizeBytes        int64     `json:"size_bytes"`
 	CreatedAt        time.Time `json:"created_at"`
-	CapturedAt       time.Time `json:"captured_at,omitempty"` // when the file was authored (PDF /Title metadata, file mtime, etc.)
+	CapturedAt       *time.Time `json:"captured_at,omitempty"` // when the file was authored (PDF /Title metadata, file mtime, etc.); nil = unknown
 
 	// MinIOKey is the object key under the daemon's bucket. Format:
 	//   <profile>/<vault>/attachments/<sha256><ext>

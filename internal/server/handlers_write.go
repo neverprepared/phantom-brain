@@ -94,6 +94,11 @@ type AttachmentStore interface {
 	// PresignGet returns a short-lived URL the agent can GET to
 	// retrieve the blob. ttl bounds validity.
 	PresignGet(ctx context.Context, key string, ttl time.Duration) (url string, err error)
+	// GetAttachmentBytes returns the raw blob at key. Used by the
+	// SynthWorker to pull PDFs back out of MinIO for pdftotext at
+	// synth time. maxBytes caps the read defensively — pass 0 for
+	// the impl's default ceiling.
+	GetAttachmentBytes(ctx context.Context, key string, maxBytes int64) ([]byte, error)
 }
 
 // ErrAttachmentStoreUnavailable signals that no AttachmentStore is
@@ -111,7 +116,7 @@ type MemoryFields struct {
 	MemoryType string    `json:"memory_type,omitempty"` // semantic | episodic | procedural | ""
 	Source     []string  `json:"source,omitempty"`      // provenance: URLs, task IDs, agent IDs, file paths
 	References []string  `json:"references,omitempty"`  // SHAs of related summaries
-	CapturedAt time.Time `json:"captured_at,omitempty"` // when the content was authored, not when OS got it
+	CapturedAt *time.Time `json:"captured_at,omitempty"` // when the content was authored, not when OS got it; nil = unset
 }
 
 // PerceiveRequest mirrors the agent's brain_perceive payload, plus
@@ -152,6 +157,7 @@ type AttachRequest struct {
 	MIMEType         string    `json:"mime_type,omitempty"`
 	BytesB64         string    `json:"bytes_b64"`
 	ExtractedText    string    `json:"extracted_text,omitempty"`
+	Tags             []string  `json:"tags,omitempty"`
 	Embedding        []float32 `json:"embedding,omitempty"`
 	MemoryFields
 }
@@ -392,6 +398,7 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 		MemoryType:       osearch.MemoryType(req.MemoryType),
 		Source:           req.Source,
 		References:       req.References,
+		Tags:             req.Tags,
 		Embedding:        req.Embedding,
 	}
 	if err := d.osClient.UpsertAttachment(r.Context(), doc, false); err != nil {

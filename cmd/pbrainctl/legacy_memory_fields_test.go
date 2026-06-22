@@ -28,8 +28,8 @@ body text
 	if !looksEmail {
 		t.Error("expected looksLikeEmailImport=true (has from_email + vendor + obsidian_note)")
 	}
-	if got.fields.CapturedAt.IsZero() {
-		t.Error("CapturedAt should have parsed from frontmatter date:2025-07-08")
+	if got.fields.CapturedAt == nil {
+		t.Fatal("CapturedAt should have parsed from frontmatter date:2025-07-08")
 	}
 	if got.fields.CapturedAt.Year() != 2025 || got.fields.CapturedAt.Month() != time.July || got.fields.CapturedAt.Day() != 8 {
 		t.Errorf("CapturedAt = %v, want 2025-07-08", got.fields.CapturedAt)
@@ -95,8 +95,8 @@ body`))
 		t.Fatalf("parse: %v", err)
 	}
 	got, _ := buildLegacyMemoryFields(doc, "Raw/curated/x.md")
-	if got.fields.CapturedAt.IsZero() {
-		t.Errorf("CapturedAt zero on quoted string date; got %v", got.fields.CapturedAt)
+	if got.fields.CapturedAt == nil {
+		t.Fatalf("CapturedAt nil on quoted string date")
 	}
 	if got.fields.CapturedAt.Year() != 2024 {
 		t.Errorf("CapturedAt year = %d, want 2024", got.fields.CapturedAt.Year())
@@ -112,7 +112,7 @@ body`))
 		t.Fatalf("parse: %v", err)
 	}
 	got, _ := buildLegacyMemoryFields(doc, "Raw/curated/x.md")
-	if !got.fields.CapturedAt.IsZero() {
-		t.Errorf("CapturedAt should remain zero when date frontmatter absent; got %v", got.fields.CapturedAt)
+	if got.fields.CapturedAt != nil {
+		t.Errorf("CapturedAt should remain nil when date frontmatter absent; got %v", got.fields.CapturedAt)
 	}
 }

@@ -105,6 +105,15 @@ func (f *fakeAttach) PutAttachment(_ context.Context, profile, vault, sha, ext s
 func (f *fakeAttach) PresignGet(_ context.Context, key string, _ time.Duration) (string, error) {
 	return "https://example.test/" + key + "?sig=fake", nil
 }
+func (f *fakeAttach) GetAttachmentBytes(_ context.Context, key string, _ int64) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	b, ok := f.blobs[key]
+	if !ok {
+		return nil, errors.New("no such key: " + key)
+	}
+	return append([]byte(nil), b...), nil
+}
 
 type fakeSynth struct {
 	mu    sync.Mutex
@@ -301,6 +310,40 @@ func TestHandlerAttach_HappyPath(t *testing.T) {
 	stored, ok := r.attach.blobs[wantKey]
 	if !ok || !bytes.Equal(stored, payload) {
 		t.Errorf("blob not stored or content mismatch (got %d bytes)", len(stored))
+	}
+}
+
+func TestHandlerAttach_TagsAndContentType(t *testing.T) {
+	r := startWriteRig(t)
+	defer r.cleanup()
+
+	payload := []byte("tagged attachment bytes")
+	sha := osearch.SHA256Hex(payload)
+	wantTags := []string{"vendor:UIA", "invoice"}
+	resp := r.post(t, "/api/brain/attach", AttachRequest{
+		SHA:              sha,
+		OriginalFilename: "invoice.pdf",
+		MIMEType:         "application/pdf",
+		BytesB64:         base64.StdEncoding.EncodeToString(payload),
+		Tags:             wantTags,
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
+	}
+
+	doc := r.os.attachments[osearch.DocID("personal", "memory", sha)]
+	if doc.MIMEType != "application/pdf" {
+		t.Errorf("MIMEType = %q, want application/pdf (caller-supplied must round-trip)", doc.MIMEType)
+	}
+	if len(doc.Tags) != len(wantTags) {
+		t.Fatalf("Tags = %v, want %v", doc.Tags, wantTags)
+	}
+	for i, tag := range wantTags {
+		if doc.Tags[i] != tag {
+			t.Errorf("Tags[%d] = %q, want %q", i, doc.Tags[i], tag)
+		}
 	}
 }
 

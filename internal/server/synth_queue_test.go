@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"strings"
+
 	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
 )
 
@@ -247,6 +249,115 @@ func TestSynthWorker_EntityAccumulatesMentionedBy(t *testing.T) {
 	}
 	if !merged {
 		t.Errorf("no entity merged both d1 + d2 into MentionedBy; entities = %+v", fos.entities)
+	}
+}
+
+func TestSynthWorker_PDFAttachmentGetsExtractedText(t *testing.T) {
+	fos := newFakeOS()
+	store := newCaptureStore()
+	sha := "pdfsha"
+	key := "p/v/attachments/" + sha + ".pdf"
+	// Seed store with fake bytes (the extractor below ignores them).
+	store.puts[key] = []byte("%PDF-fake-bytes")
+	now := time.Now().UTC()
+	fos.attachments[osearch.DocID("p", "v", sha)] = osearch.AttachmentDoc{
+		Profile: "p", Vault: "v", SHA: sha,
+		OriginalFilename: "doc.pdf",
+		MIMEType:         "application/pdf",
+		MinIOKey:         key,
+		CreatedAt:        now,
+	}
+
+	called := 0
+	extractor := func(_ context.Context, body []byte) (string, error) {
+		called++
+		return "extracted text from PDF: " + string(body), nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := NewSynthWorker(SynthWorkerOpts{
+		OSClient:     fos,
+		Logger:       slog.New(slog.DiscardHandler),
+		BufferSize:   8,
+		DisableCLI:   true,
+		Attach:       store,
+		PDFExtractor: extractor,
+	})
+	w.Start(ctx)
+	defer w.Stop()
+
+	w.Enqueue("p", "v", sha)
+	waitUntil(t, 5*time.Second, func() bool {
+		d, _ := fos.GetAttachment(context.Background(), "p", "v", sha)
+		return d != nil && d.ExtractedText != ""
+	})
+
+	out, _ := fos.GetAttachment(context.Background(), "p", "v", sha)
+	if !strings.Contains(out.ExtractedText, "extracted text from PDF") {
+		t.Errorf("ExtractedText missing payload: %q", out.ExtractedText)
+	}
+	if called != 1 {
+		t.Errorf("extractor called %d times, want 1", called)
+	}
+
+	// Idempotency: re-enqueue should not re-extract.
+	w.Enqueue("p", "v", sha)
+	time.Sleep(150 * time.Millisecond)
+	if called != 1 {
+		t.Errorf("extractor called %d times after re-enqueue, want 1 (idempotent)", called)
+	}
+}
+
+func TestSynthWorker_NonPDFAttachmentSkipped(t *testing.T) {
+	fos := newFakeOS()
+	store := newCaptureStore()
+	sha := "imgsha"
+	key := "p/v/attachments/" + sha + ".png"
+	store.puts[key] = []byte("fake-png")
+	now := time.Now().UTC()
+	fos.attachments[osearch.DocID("p", "v", sha)] = osearch.AttachmentDoc{
+		Profile: "p", Vault: "v", SHA: sha,
+		OriginalFilename: "img.png",
+		MIMEType:         "image/png",
+		MinIOKey:         key,
+		CreatedAt:        now,
+	}
+
+	called := 0
+	extractor := func(_ context.Context, body []byte) (string, error) {
+		called++
+		return "should not be called", nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := NewSynthWorker(SynthWorkerOpts{
+		OSClient:     fos,
+		Logger:       slog.New(slog.DiscardHandler),
+		BufferSize:   8,
+		DisableCLI:   true,
+		Attach:       store,
+		PDFExtractor: extractor,
+	})
+	w.Start(ctx)
+	defer w.Stop()
+
+	done := make(chan string, 1)
+	w.OnComplete = func(_, _, sha string) { done <- sha }
+
+	w.Enqueue("p", "v", sha)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker never finished non-pdf attachment job")
+	}
+	if called != 0 {
+		t.Errorf("extractor called %d times on non-pdf, want 0", called)
+	}
+	out, _ := fos.GetAttachment(context.Background(), "p", "v", sha)
+	if out.ExtractedText != "" {
+		t.Errorf("ExtractedText set on non-pdf: %q", out.ExtractedText)
 	}
 }
 

@@ -52,6 +52,13 @@ type SynthWorker struct {
 	// gate + distill. Failures are logged and non-fatal.
 	attach  AttachmentStore
 	capture CaptureConfig
+
+	// pdfExtractor pulls plain text out of PDF attachments at synth
+	// time so they become FTS-searchable. Nil-safe — when the daemon
+	// runs in an environment without poppler-utils, the field stays
+	// nil and PDF attachments synth as a no-op.
+	pdfExtractor    PDFExtractor
+	pdfAvailable    bool
 }
 
 type synthJob struct {
@@ -78,6 +85,11 @@ type SynthWorkerOpts struct {
 	// capture pass is skipped entirely.
 	Attach  AttachmentStore
 	Capture CaptureConfig
+	// PDFExtractor overrides the default pdftotext-backed extractor.
+	// Tests inject a deterministic fake; production leaves it nil and
+	// NewSynthWorker picks PDFExtractWithPdftotext when the binary is
+	// on PATH.
+	PDFExtractor PDFExtractor
 }
 
 // NewSynthWorker constructs a worker; call Start to spawn the
@@ -93,6 +105,11 @@ func NewSynthWorker(opts SynthWorkerOpts) *SynthWorker {
 	if opts.DisableCLI {
 		cli = false
 	}
+	extractor := opts.PDFExtractor
+	pdfAvail := PdftotextAvailable()
+	if extractor == nil && pdfAvail {
+		extractor = PDFExtractWithPdftotext
+	}
 	return &SynthWorker{
 		os:           opts.OSClient,
 		logger:       opts.Logger,
@@ -102,6 +119,8 @@ func NewSynthWorker(opts SynthWorkerOpts) *SynthWorker {
 		cliAvailable: cli,
 		attach:       opts.Attach,
 		capture:      opts.Capture,
+		pdfExtractor: extractor,
+		pdfAvailable: extractor != nil,
 	}
 }
 
@@ -137,6 +156,7 @@ func (w *SynthWorker) run(ctx context.Context) {
 	w.logger.Info("phantom-brain: synth worker started",
 		slog.Int("buf_size", w.bufSize),
 		slog.Bool("claude_cli", w.cliAvailable),
+		slog.Bool("pdftotext", w.pdfAvailable),
 	)
 	for {
 		select {
@@ -172,9 +192,10 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 		return err
 	}
 	if doc == nil {
-		// Race with a delete or the synth ran before the upsert
-		// committed (eventually-consistent OS refresh). Not an error.
-		return nil
+		// No summary doc — could be a delete race, or this SHA belongs
+		// to an attachment doc instead. Try the attachment path before
+		// silently returning so PDFs get their daemon-side extraction.
+		return w.processAttachmentJob(ctx, job)
 	}
 	if doc.Synthesised {
 		// Idempotent: re-enqueueing an already-synthed doc is fine
@@ -332,6 +353,63 @@ func (w *SynthWorker) upsertEntity(ctx context.Context, job synthJob, src *osear
 		return "", err
 	}
 	return slug, nil
+}
+
+// processAttachmentJob runs the attachment-specific synth pass.
+// Currently the only enrichment is PDF text extraction; future
+// mime types (.docx via docx2txt, .txt passthrough, OCR for images)
+// slot in as additional MIMEType branches.
+//
+// Failure modes are all soft — log + return nil — because an
+// attachment with no extracted text is still a valid recall hit on
+// title/filename and re-enqueue via brain_reflect is the operator
+// escape hatch.
+func (w *SynthWorker) processAttachmentJob(ctx context.Context, job synthJob) error {
+	doc, err := w.os.GetAttachment(ctx, job.Profile, job.Vault, job.SHA)
+	if err != nil {
+		return err
+	}
+	if doc == nil {
+		// True delete race / unknown SHA — nothing to do.
+		return nil
+	}
+	if doc.ExtractedText != "" {
+		// Idempotent: agent-side extraction already populated this, or
+		// a previous synth pass did. Don't pay the subprocess cost twice.
+		return nil
+	}
+	if doc.MIMEType != "application/pdf" {
+		// Other mime types: out of scope for this pass.
+		return nil
+	}
+	if w.attach == nil || w.pdfExtractor == nil {
+		w.logger.Info("phantom-brain: skipping PDF extraction (no store or pdftotext)",
+			slog.String("sha", job.SHA),
+			slog.Bool("have_store", w.attach != nil),
+			slog.Bool("have_extractor", w.pdfExtractor != nil))
+		return nil
+	}
+	body, err := w.attach.GetAttachmentBytes(ctx, doc.MinIOKey, 0)
+	if err != nil {
+		w.logger.Warn("phantom-brain: pdf fetch failed (non-fatal)",
+			slog.String("sha", job.SHA), slog.String("key", doc.MinIOKey),
+			slog.String("err", err.Error()))
+		return nil
+	}
+	text, err := w.pdfExtractor(ctx, body)
+	if err != nil {
+		w.logger.Warn("phantom-brain: pdf extract failed (non-fatal)",
+			slog.String("sha", job.SHA), slog.String("err", err.Error()))
+		return nil
+	}
+	if text == "" {
+		// Scanned PDF or one pdftotext couldn't parse — leave the doc
+		// alone rather than writing an empty body that signals "we
+		// tried" when callers may want to retry with OCR later.
+		return nil
+	}
+	doc.ExtractedText = text
+	return w.os.UpsertAttachment(ctx, *doc, false)
 }
 
 func containsString(xs []string, s string) bool {
