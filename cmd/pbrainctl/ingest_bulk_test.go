@@ -90,6 +90,92 @@ func TestScanVaultForIngest_RejectsOversizedFiles(t *testing.T) {
 	}
 }
 
+func TestResolveAttachmentTitle(t *testing.T) {
+	type sidecar struct {
+		name string
+		body string
+	}
+	cases := []struct {
+		name    string
+		attach  string
+		side    *sidecar
+		want    string
+		fallbck string
+	}{
+		{
+			name:    "frontmatter title (basename.md variant)",
+			attach:  "Raw/attachments/hand_muscles.jpg",
+			side:    &sidecar{name: "Raw/attachments/hand_muscles.md", body: "---\ntitle: Hand Muscles\n---\nbody"},
+			want:    "Hand Muscles",
+			fallbck: "hand_muscles",
+		},
+		{
+			name:    "frontmatter title (basename.ext.md variant)",
+			attach:  "Raw/attachments/hand_muscles.jpg",
+			side:    &sidecar{name: "Raw/attachments/hand_muscles.jpg.md", body: "---\ntitle: Hand Muscles Stub\n---\nbody"},
+			want:    "Hand Muscles Stub",
+			fallbck: "hand_muscles",
+		},
+		{
+			name:    "first H1 fallback when no frontmatter title",
+			attach:  "Raw/attachments/anatomy.jpg",
+			side:    &sidecar{name: "Raw/attachments/anatomy.md", body: "# Anatomy Reference\n\nbla"},
+			want:    "Anatomy Reference",
+			fallbck: "anatomy",
+		},
+		{
+			name:    "no sidecar -> fallback",
+			attach:  "Raw/attachments/lonely.jpg",
+			side:    nil,
+			want:    "lonely",
+			fallbck: "lonely",
+		},
+		{
+			name:    "sidecar without title or H1 -> fallback",
+			attach:  "Raw/attachments/blank.jpg",
+			side:    &sidecar{name: "Raw/attachments/blank.md", body: "just some body text"},
+			want:    "blank",
+			fallbck: "blank",
+		},
+		{
+			name:    "malformed frontmatter -> fallback",
+			attach:  "Raw/attachments/broken.jpg",
+			side:    &sidecar{name: "Raw/attachments/broken.md", body: "---\ntitle: [unterminated\n---\nbody"},
+			want:    "broken",
+			fallbck: "broken",
+		},
+		{
+			name:    "## h2 is not treated as title",
+			attach:  "Raw/attachments/h2only.jpg",
+			side:    &sidecar{name: "Raw/attachments/h2only.md", body: "## Not A Title\n\nbody"},
+			want:    "h2only",
+			fallbck: "h2only",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			attachAbs := filepath.Join(root, tc.attach)
+			if err := os.MkdirAll(filepath.Dir(attachAbs), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(attachAbs, []byte("blob"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.side != nil {
+				sidePath := filepath.Join(root, tc.side.name)
+				if err := os.WriteFile(sidePath, []byte(tc.side.body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := resolveAttachmentTitle(root, tc.attach, tc.fallbck, nil)
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestGuessAttachmentMIME(t *testing.T) {
 	if guessAttachmentMIME(".pdf") != "application/pdf" {
 		t.Error(".pdf mismatch")
