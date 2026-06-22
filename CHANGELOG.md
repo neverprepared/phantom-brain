@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.4.0](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.3.2...v2.4.0) (2026-06-22)
+
+
+### Features
+
+* **capture:** archive raw page bytes for brain_perceive ([#43](https://github.com/neverprepared/mcp-phantom-brain/issues/43)) ([bad62e2](https://github.com/neverprepared/mcp-phantom-brain/commit/bad62e2646a40b2c29020bb165bcc4cd284b0a5d))
+
+
+### Bug Fixes
+
+* **entities:** prompt for principal entities, not all mentions ([#42](https://github.com/neverprepared/mcp-phantom-brain/issues/42)) ([bc5da83](https://github.com/neverprepared/mcp-phantom-brain/commit/bc5da833055d34cdb385830513b2f955005eacda))
+
 ## [2.3.2](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.3.1...v2.3.2) (2026-06-22)
 
 
