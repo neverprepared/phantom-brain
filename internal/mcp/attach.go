@@ -169,7 +169,7 @@ func (s *Server) handleAttach(ctx context.Context, req mcp.CallToolRequest) (*mc
 		mimeType := guessMIMEType(ext)
 		if _, err := client.Attach(ctx, brain.AttachRequest{
 			SHA:              blobSHA,
-			OriginalFilename: filepath.Base(filePath),
+			OriginalFilename: canonicalize.Filename(filepath.Base(filePath)),
 			Title:            title,
 			MIMEType:         mimeType,
 			BytesB64:         base64.StdEncoding.EncodeToString(raw),

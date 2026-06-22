@@ -374,7 +374,7 @@ func (r *ingestRunner) processMarkdown(ctx context.Context, it ingestItem, raw [
 
 func (r *ingestRunner) processAttach(ctx context.Context, it ingestItem, raw []byte) error {
 	sha := osearch.SHA256Hex(raw)
-	name := filepath.Base(it.relPath)
+	name := canonicalize.Filename(filepath.Base(it.relPath))
 	title := strings.TrimSuffix(name, filepath.Ext(name))
 	embInput := title
 	embs, err := r.embedder.Embed(ctx, []string{embInput})
