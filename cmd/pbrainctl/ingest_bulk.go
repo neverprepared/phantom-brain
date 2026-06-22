@@ -342,9 +342,21 @@ func (r *ingestRunner) processMarkdown(ctx context.Context, it ingestItem, raw [
 	// vendor or obsidian_note), kind = email_import; otherwise
 	// the per-subdir default (web_scrape / note) applies.
 	mf, looksLikeEmailImport := buildLegacyMemoryFields(doc, it.relPath)
-	if looksLikeEmailImport && it.kind == kindLearn {
+	// Set default Kind + MemoryType per source kind. Email-imports get
+	// the more-specific classification; everything else falls through
+	// to note (curated) or web_scrape (gathered). Without this, the
+	// 57+ technical/curated notes without email frontmatter end up
+	// with empty kind in OS and aren't faceted-queryable.
+	switch {
+	case looksLikeEmailImport && it.kind == kindLearn:
 		mf.fields.Kind = string(osearch.KindEmailImport)
 		mf.fields.MemoryType = string(osearch.MemoryEpisodic)
+	case it.kind == kindLearn:
+		mf.fields.Kind = string(osearch.KindNote)
+		mf.fields.MemoryType = string(osearch.MemorySemantic)
+	case it.kind == kindPerceive:
+		mf.fields.Kind = string(osearch.KindWebScrape)
+		mf.fields.MemoryType = string(osearch.MemorySemantic)
 	}
 	tags = append(tags, mf.extraTags...)
 	// dedup tags
@@ -467,12 +479,20 @@ func buildLegacyMemoryFields(doc *vault.Document, relPath string) (legacyMemoryF
 	}
 
 	// Parse the date field as captured_at if present + parseable.
-	if dateStr := strings.TrimSpace(doc.FrontmatterString("date")); dateStr != "" {
-		// Try a couple of common formats.
-		for _, layout := range []string{"2006-01-02", "2006-01-02T15:04:05Z", time.RFC3339} {
-			if t, err := time.Parse(layout, dateStr); err == nil {
-				out.fields.CapturedAt = t
-				break
+	// yaml.v3 auto-types `date: 2025-07-15` as time.Time (not string),
+	// so FrontmatterString returns "" for those — read the raw value
+	// and handle both shapes.
+	if dateRaw, ok := doc.Frontmatter["date"]; ok {
+		switch v := dateRaw.(type) {
+		case time.Time:
+			out.fields.CapturedAt = v
+		case string:
+			s := strings.TrimSpace(v)
+			for _, layout := range []string{"2006-01-02", "2006-01-02T15:04:05Z", time.RFC3339} {
+				if t, err := time.Parse(layout, s); err == nil {
+					out.fields.CapturedAt = t
+					break
+				}
 			}
 		}
 	}
