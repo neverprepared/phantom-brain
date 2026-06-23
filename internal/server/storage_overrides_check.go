@@ -7,6 +7,15 @@ import (
 	"github.com/neverprepared/phantom-brain/internal/osearch"
 )
 
+// storageCountFn is the slice of OpenSearch the footgun verifier
+// needs: count the docs in pb_summaries matching (profile, vault)
+// inside the index identified by prefix. Defined as a callback so
+// tests can inject an in-memory equivalent without bringing up a
+// real OpenSearch cluster. Production wiring closes over a
+// *osearch.Client and delegates to CountByVault on the prefixed
+// view.
+type storageCountFn func(ctx context.Context, prefix, profile, vault string) (int64, error)
+
 // VerifyStorageOverrides walks every binding with a [storage_overrides]
 // active and refuses startup when the override would silently strand
 // existing data on the shared indices (operator-footgun: an operator
@@ -36,14 +45,26 @@ func VerifyStorageOverrides(ctx context.Context, oc *osearch.Client, defaultPref
 	if oc == nil {
 		return nil
 	}
+	count := func(ctx context.Context, prefix, profile, vault string) (int64, error) {
+		return oc.WithPrefix(prefix).CountByVault(ctx, osearch.IndexSummaries, profile, vault)
+	}
+	return verifyStorageOverridesWith(ctx, defaultPrefix, bindings, count)
+}
+
+// verifyStorageOverridesWith is the inner implementation parameterised
+// by the count adapter. Kept un-exported; the public surface above
+// closes over a *osearch.Client.
+func verifyStorageOverridesWith(
+	ctx context.Context,
+	defaultPrefix string,
+	bindings []VaultBinding,
+	count storageCountFn,
+) error {
 	for _, b := range bindings {
 		if b.Storage.IndexPrefix == defaultPrefix {
 			continue
 		}
-		prefixed := oc.WithPrefix(b.Storage.IndexPrefix)
-		shared := oc.WithPrefix(defaultPrefix)
-
-		prefixedCount, err := prefixed.CountByVault(ctx, osearch.IndexSummaries, b.Key.Profile, b.Key.Vault)
+		prefixedCount, err := count(ctx, b.Storage.IndexPrefix, b.Key.Profile, b.Key.Vault)
 		if err != nil {
 			return fmt.Errorf("verify storage overrides: count prefixed for %s: %w", b.Key, err)
 		}
@@ -52,7 +73,7 @@ func VerifyStorageOverrides(ctx context.Context, oc *osearch.Client, defaultPref
 			// fine. Don't second-guess.
 			continue
 		}
-		sharedCount, err := shared.CountByVault(ctx, osearch.IndexSummaries, b.Key.Profile, b.Key.Vault)
+		sharedCount, err := count(ctx, defaultPrefix, b.Key.Profile, b.Key.Vault)
 		if err != nil {
 			return fmt.Errorf("verify storage overrides: count shared for %s: %w", b.Key, err)
 		}

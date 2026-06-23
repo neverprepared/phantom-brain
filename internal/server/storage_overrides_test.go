@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -113,74 +114,83 @@ func TestRegistry_StorageOverrides_EmptyGlobalPrefix(t *testing.T) {
 
 // --- footgun detection ------------------------------------------------
 
-// countByVaultStub returns canned counts keyed by (prefix, profile, vault).
-type countByVaultStub struct {
-	t      *testing.T
-	counts map[string]int64 // key = prefix|profile|vault
+// fakeCounts seeds a storageCountFn from an in-memory map keyed by
+// "<prefix>|<profile>|<vault>". Missing keys return 0, matching the
+// production CountByVault's "404 → 0" behaviour on a never-created
+// prefixed index.
+func fakeCounts(t *testing.T, m map[string]int64) storageCountFn {
+	t.Helper()
+	return func(_ context.Context, prefix, profile, vault string) (int64, error) {
+		return m[prefix+"|"+profile+"|"+vault], nil
+	}
 }
 
-// VerifyStorageOverrides depends on osearch.Client.CountByVault; we
-// can't easily fake that without a live OS. The test instead drives
-// the function logic via an injected resolver: we wrap the verifier
-// in a tiny shim and check it manually here, since the production
-// verifier requires a real *osearch.Client.
-//
-// To avoid bringing up an OS cluster the test below exercises the
-// helper in isolation: we re-implement the decision matrix as a pure
-// function and assert each table row matches what VerifyStorageOverrides
-// would produce given the same counts.
-func TestStorageOverrides_FootgunDecisionMatrix(t *testing.T) {
+// TestVerifyStorageOverrides_FootgunDetected drives the REAL
+// verifyStorageOverridesWith — no parallel re-implementation — against
+// an injected counter. The matrix mirrors the production decision tree
+// for a single binding with [storage_overrides].
+func TestVerifyStorageOverrides_FootgunDetected(t *testing.T) {
+	binding := VaultBinding{
+		Key:     VaultKey{Profile: "client_x", Vault: "main"},
+		Storage: ResolvedStorage{IndexPrefix: "client_x_"},
+	}
+	const defaultPrefix = ""
+
 	type row struct {
 		name         string
-		hasOverride  bool
 		prefixedDocs int64
 		sharedDocs   int64
 		wantErr      bool
 	}
 	cases := []row{
-		{"no override, doesn't matter", false, 0, 999, false},
-		{"override, both empty — fresh binding", true, 0, 0, false},
-		{"override, prefixed populated — migration done", true, 5, 5, false},
-		{"override, only prefixed populated — clean", true, 5, 0, false},
-		{"override, prefixed empty + shared populated — FOOTGUN", true, 0, 5, true},
-		{"override, prefixed empty + shared empty — fresh binding", true, 0, 0, false},
+		{"both empty — fresh binding", 0, 0, false},
+		{"prefixed populated — migration done", 5, 5, false},
+		{"only prefixed populated — clean", 5, 0, false},
+		{"prefixed empty + shared populated — FOOTGUN", 0, 5, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			err := footgunDecide(c.hasOverride, c.prefixedDocs, c.sharedDocs)
+			counts := fakeCounts(t, map[string]int64{
+				"client_x_|client_x|main": c.prefixedDocs,
+				"|client_x|main":          c.sharedDocs,
+			})
+			err := verifyStorageOverridesWith(context.Background(), defaultPrefix, []VaultBinding{binding}, counts)
 			gotErr := err != nil
 			if gotErr != c.wantErr {
 				t.Fatalf("err=%v, wantErr=%v", err, c.wantErr)
 			}
-			if gotErr && !strings.Contains(err.Error(), "storage_overrides") {
-				t.Errorf("err missing diagnostic: %v", err)
+			if !gotErr {
+				return
+			}
+			// Diagnostic must name the offending binding AND the count
+			// (we hand the operator a useful message, not just "fail").
+			msg := err.Error()
+			if !strings.Contains(msg, "client_x/main") {
+				t.Errorf("err should mention binding key; got %q", msg)
+			}
+			if !strings.Contains(msg, fmt.Sprintf("%d docs", c.sharedDocs)) {
+				t.Errorf("err should mention shared doc count %d; got %q", c.sharedDocs, msg)
+			}
+			if !strings.Contains(msg, "storage_overrides") {
+				t.Errorf("err should mention storage_overrides; got %q", msg)
 			}
 		})
 	}
 }
 
-// footgunDecide mirrors VerifyStorageOverrides' inner decision so the
-// table-driven test above stays runnable without an OS cluster. Keep
-// this in sync with the production logic — both paths return the
-// same outcome for the same inputs.
-func footgunDecide(hasOverride bool, prefixedDocs, sharedDocs int64) error {
-	if !hasOverride {
-		return nil
+// TestVerifyStorageOverrides_SkipsBindingsWithoutOverride confirms a
+// binding whose resolved prefix matches the default (i.e. NO override)
+// is not checked at all, no matter how many docs sit on shared.
+func TestVerifyStorageOverrides_SkipsBindingsWithoutOverride(t *testing.T) {
+	binding := VaultBinding{
+		Key:     VaultKey{Profile: "personal", Vault: "memory"},
+		Storage: ResolvedStorage{IndexPrefix: ""},
 	}
-	if prefixedDocs > 0 {
-		return nil
+	counts := fakeCounts(t, map[string]int64{"|personal|memory": 999})
+	if err := verifyStorageOverridesWith(context.Background(), "", []VaultBinding{binding}, counts); err != nil {
+		t.Fatalf("binding without override should be skipped; got %v", err)
 	}
-	if sharedDocs > 0 {
-		return errSimulatedFootgun
-	}
-	return nil
 }
-
-type footgunErr struct{ msg string }
-
-func (e *footgunErr) Error() string { return e.msg }
-
-var errSimulatedFootgun = &footgunErr{msg: "binding x has [storage_overrides] but N docs exist on shared indices — run migration or revert config"}
 
 // --- binding view cache -----------------------------------------------
 
