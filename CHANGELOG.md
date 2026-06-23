@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.0](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.5.1...v2.6.0) (2026-06-23)
+
+
+### Features
+
+* **recall:** show title, kind, and snippet on each hit ([#49](https://github.com/neverprepared/mcp-phantom-brain/issues/49)) ([#54](https://github.com/neverprepared/mcp-phantom-brain/issues/54)) ([1f109d3](https://github.com/neverprepared/mcp-phantom-brain/commit/1f109d38bcee2924b8f8c3ef1bf4d5c107ba068d))
+
 ## [2.4.1](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.4.0...v2.4.1) (2026-06-23)
 
 
