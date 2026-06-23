@@ -39,6 +39,8 @@ pbrainctl server snapshot status|rebuild|prune|claims
 pbrainctl server queue depth|contributors
 pbrainctl server maintenance enter|exit
 pbrainctl server backfill-attachment-stubs
+pbrainctl server bucket create|list           # v3.3 MinIO bucket admin
+pbrainctl server binding create|list|delete   # v3.3 single-command binding workflow
 pbrainctl server version
 ```
 
@@ -207,7 +209,14 @@ index_prefix = "client_x_"   # APPENDED to daemon-global cfg.OpenSearch.IndexPre
 bucket       = "pb-client-x" # REPLACES cfg.Storage.MinIOBucket for this binding
 ```
 
-Allowed characters in `index_prefix`: lowercase ASCII letters, digits, underscore. Bucket must exist before daemon start — the daemon refuses to create it (operator runs `mc mb` first). See "Per-binding storage overrides (v3.2)" below for the full contract.
+Allowed characters in `index_prefix`: lowercase ASCII letters, digits, underscore. Bucket must exist before daemon start — the daemon refuses to create it. In v3.3+ the single-command operator workflow does this for you:
+
+```
+pbrainctl server binding create client_x/main \
+    --index-prefix client_x_ --bucket pb-client-x --create-bucket
+```
+
+The command writes `auth.toml` (mode 0o600) + `config.toml` with the override block, prints the generated bearer token once, and (with `--create-bucket`) calls MakeBucket inline. See "Per-binding storage overrides (v3.2)" below for the full contract.
 
 ### The Gate (`internal/server/gate.go`)
 
