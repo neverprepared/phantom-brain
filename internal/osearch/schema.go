@@ -28,6 +28,26 @@ import (
 //   - embedding: knn_vector with HNSW, cosine similarity, dim=768
 //   - created_at/updated_at: date
 //   - size_bytes: long
+// EnsurePrefixes runs EnsureIndices once for every distinct prefix in
+// prefixes. Idempotent. Used by daemon startup to walk every binding
+// in the registry (v3.2 per-binding storage overrides) and create
+// each binding's resolved index set before HTTP serves. Returns the
+// first error encountered.
+func (c *Client) EnsurePrefixes(ctx context.Context, prefixes []string) error {
+	seen := map[string]struct{}{}
+	for _, p := range prefixes {
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		view := c.WithPrefix(p)
+		if err := view.EnsureIndices(ctx); err != nil {
+			return fmt.Errorf("ensure prefix %q: %w", p, err)
+		}
+	}
+	return nil
+}
+
 func (c *Client) EnsureIndices(ctx context.Context) error {
 	for _, idx := range []struct {
 		logical string

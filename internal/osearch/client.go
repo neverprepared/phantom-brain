@@ -125,3 +125,30 @@ func (c *Client) IndexName(logical string) string {
 	}
 	return c.prefix + strings.TrimPrefix(logical, "")
 }
+
+// WithPrefix returns a shallow-copy of the Client that routes every
+// index operation through the supplied prefix instead of the one
+// baked in at Open time. The underlying HTTP connection + auth are
+// shared. Used by the daemon to derive per-binding views without
+// opening a second TCP pool.
+//
+// Phase 7 (Level 2 per-binding storage): every (profile, vault)
+// binding resolves to its own ResolvedStorage{IndexPrefix, Bucket}.
+// Handlers look up the binding's view, call WithPrefix(binding.
+// Storage.IndexPrefix), and hand the result to the OS write/read
+// methods. Bindings with no override keep using the daemon-global
+// prefix; bindings with [storage_overrides] get their prefixed
+// physical indices.
+func (c *Client) WithPrefix(prefix string) *Client {
+	if c == nil {
+		return nil
+	}
+	cp := *c
+	cp.prefix = prefix
+	return &cp
+}
+
+// Prefix returns the index prefix this Client is configured with.
+// Used by callers that need to log "which physical index am I about
+// to hit" without re-resolving via IndexName.
+func (c *Client) Prefix() string { return c.prefix }

@@ -25,9 +25,24 @@ func (k VaultKey) String() string { return k.Profile + "/" + k.Vault }
 // authenticated vault: its identity, the merged defaults, and the
 // bearer token operators issued for it.
 type VaultBinding struct {
-	Key       VaultKey
-	Auth      VaultAuth
-	Defaults  VaultDefaults
+	Key      VaultKey
+	Auth     VaultAuth
+	Defaults VaultDefaults
+	Storage  ResolvedStorage
+}
+
+// ResolvedStorage carries the binding's final OS index prefix +
+// MinIO bucket. Filled in by Registry.Load using LoadOpts'
+// DefaultIndexPrefix + DefaultBucket as the fallbacks. Every write
+// path consults this — there is no separate "look at overrides if
+// set, else default" branch outside Load.
+//
+// IndexPrefix is the FULL prefix to prepend to a logical name
+// ("pb_summaries"); it already includes the daemon-global prefix so
+// call sites just concatenate. Bucket is the absolute bucket name.
+type ResolvedStorage struct {
+	IndexPrefix string
+	Bucket      string
 }
 
 // Registry is the live view of every vault the daemon serves. The
@@ -94,6 +109,13 @@ func (r *Registry) Vaults() []VaultBinding {
 type LoadOpts struct {
 	ConfigDir string
 	Defaults  VaultDefaults
+
+	// DefaultIndexPrefix + DefaultBucket are the daemon-global
+	// storage targets. Bindings with no [storage_overrides] inherit
+	// these; bindings with an override block APPEND IndexPrefix and
+	// REPLACE Bucket. Both may be empty (shared OS prefix / no MinIO).
+	DefaultIndexPrefix string
+	DefaultBucket      string
 }
 
 // Load walks {configDir}/profiles/*/vaults/*/auth.toml, parses each,
@@ -151,10 +173,18 @@ func (r *Registry) Load(opts LoadOpts) (int, error) {
 			if _, dup := newByToken[auth.BearerToken]; dup {
 				return 0, fmt.Errorf("server: duplicate bearer_token across vaults; conflict at %s", key)
 			}
+			storage := ResolvedStorage{
+				IndexPrefix: opts.DefaultIndexPrefix + overrides.StorageOverrides.IndexPrefix,
+				Bucket:      opts.DefaultBucket,
+			}
+			if overrides.StorageOverrides.Bucket != "" {
+				storage.Bucket = overrides.StorageOverrides.Bucket
+			}
 			binding := VaultBinding{
 				Key:      key,
 				Auth:     auth,
 				Defaults: MergedDefaults(opts.Defaults, overrides),
+				Storage:  storage,
 			}
 			newByToken[auth.BearerToken] = binding
 			newByVault[key] = binding

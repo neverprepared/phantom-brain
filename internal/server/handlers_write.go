@@ -17,6 +17,30 @@ import (
 	"github.com/neverprepared/phantom-brain/internal/osearch"
 )
 
+// resolveOS returns the per-binding osWriter view (v3.2 per-binding
+// storage overrides). Falls back to d.osClient when no per-binding
+// view is registered — preserves the legacy/test path where a Daemon
+// is wired by hand without going through buildBindingDeps.
+func (d *Daemon) resolveOS(b VaultBinding) osWriter {
+	if d.bindings != nil {
+		if deps, ok := d.bindings.Get(b.Key); ok && deps != nil && deps.OS != nil {
+			return deps.OS
+		}
+	}
+	return d.osClient
+}
+
+// resolveAttach returns the per-binding AttachmentStore (v3.2). Same
+// fallback semantics as resolveOS.
+func (d *Daemon) resolveAttach(b VaultBinding) AttachmentStore {
+	if d.bindings != nil {
+		if deps, ok := d.bindings.Get(b.Key); ok && deps != nil && deps.Attach != nil {
+			return deps.Attach
+		}
+	}
+	return d.attach
+}
+
 // appendLogLine writes one newline-terminated record to the
 // audit-log file, creating parent dirs as needed. Open/write/close
 // per call — _log.md writes are infrequent and locking overhead
@@ -223,6 +247,7 @@ func (d *Daemon) handlePerceive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, _ := BindingFromContext(r.Context())
+	osc := d.resolveOS(binding)
 
 	var req PerceiveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -258,7 +283,7 @@ func (d *Daemon) handlePerceive(w http.ResponseWriter, r *http.Request) {
 		Embedding:   req.Embedding,
 	}
 	applyMemoryFields(&doc, req.MemoryFields)
-	if err := d.osClient.UpsertSummary(r.Context(), doc, false); err != nil {
+	if err := osc.UpsertSummary(r.Context(), doc, false); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch upsert failed: "+err.Error(), nil)
 		return
@@ -275,6 +300,7 @@ func (d *Daemon) handleLearn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, _ := BindingFromContext(r.Context())
+	osc := d.resolveOS(binding)
 
 	var req LearnRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -314,7 +340,7 @@ func (d *Daemon) handleLearn(w http.ResponseWriter, r *http.Request) {
 		Embedding:   req.Embedding,
 	}
 	applyMemoryFields(&doc, req.MemoryFields)
-	if err := d.osClient.UpsertSummary(r.Context(), doc, false); err != nil {
+	if err := osc.UpsertSummary(r.Context(), doc, false); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch upsert failed: "+err.Error(), nil)
 		return
@@ -336,6 +362,8 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, _ := BindingFromContext(r.Context())
+	osc := d.resolveOS(binding)
+	attach := d.resolveAttach(binding)
 
 	var req AttachRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -374,7 +402,7 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ext := extFromFilename(req.OriginalFilename)
-	key, err := d.attach.PutAttachmentWithTags(r.Context(), binding.Key.Profile, binding.Key.Vault, req.SHA, ext, bytes, req.MIMEType, req.Tags)
+	key, err := attach.PutAttachmentWithTags(r.Context(), binding.Key.Profile, binding.Key.Vault, req.SHA, ext, bytes, req.MIMEType, req.Tags)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"attachment put failed: "+err.Error(), nil)
@@ -414,11 +442,11 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 	// every re-attach (same SHA, same bytes) blows away the synth pass's
 	// ExtractedText until the next synth pass re-runs pdftotext.
 	if req.ExtractedText == "" {
-		if existing, _ := d.osClient.GetAttachment(r.Context(), binding.Key.Profile, binding.Key.Vault, req.SHA); existing != nil && existing.ExtractedText != "" {
+		if existing, _ := osc.GetAttachment(r.Context(), binding.Key.Profile, binding.Key.Vault, req.SHA); existing != nil && existing.ExtractedText != "" {
 			doc.ExtractedText = existing.ExtractedText
 		}
 	}
-	if err := d.osClient.UpsertAttachment(r.Context(), doc, false); err != nil {
+	if err := osc.UpsertAttachment(r.Context(), doc, false); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch upsert failed: "+err.Error(), nil)
 		return
@@ -458,7 +486,7 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 		Synthesised: false,
 		Embedding:   req.Embedding,
 	}
-	if err := d.osClient.UpsertSummary(r.Context(), stub, false); err != nil {
+	if err := osc.UpsertSummary(r.Context(), stub, false); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch summary stub upsert failed: "+err.Error(), nil)
 		return
@@ -513,13 +541,15 @@ func (d *Daemon) handleAttachGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, _ := BindingFromContext(r.Context())
+	osc := d.resolveOS(binding)
+	attach := d.resolveAttach(binding)
 	sha := chi.URLParam(r, "sha")
 	if err := validateSHA(sha); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error(), nil)
 		return
 	}
 
-	doc, err := d.osClient.GetAttachment(r.Context(), binding.Key.Profile, binding.Key.Vault, sha)
+	doc, err := osc.GetAttachment(r.Context(), binding.Key.Profile, binding.Key.Vault, sha)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch get failed: "+err.Error(), nil)
@@ -529,7 +559,7 @@ func (d *Daemon) handleAttachGet(w http.ResponseWriter, r *http.Request) {
 		WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound, "attachment not found", nil)
 		return
 	}
-	url, err := d.attach.PresignGet(r.Context(), doc.MinIOKey, 10*time.Minute)
+	url, err := attach.PresignGet(r.Context(), doc.MinIOKey, 10*time.Minute)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"presign failed: "+err.Error(), nil)
@@ -557,12 +587,14 @@ func (d *Daemon) handleCaptureGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, _ := BindingFromContext(r.Context())
+	osc := d.resolveOS(binding)
+	attach := d.resolveAttach(binding)
 	sha := chi.URLParam(r, "sha")
 	if err := validateSHA(sha); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error(), nil)
 		return
 	}
-	doc, err := d.osClient.GetSummary(r.Context(), binding.Key.Profile, binding.Key.Vault, sha)
+	doc, err := osc.GetSummary(r.Context(), binding.Key.Profile, binding.Key.Vault, sha)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch get failed: "+err.Error(), nil)
@@ -577,7 +609,7 @@ func (d *Daemon) handleCaptureGet(w http.ResponseWriter, r *http.Request) {
 			"no capture stored for this doc (capture disabled, URL absent, or fetch failed)", nil)
 		return
 	}
-	url, err := d.attach.PresignGet(r.Context(), doc.CaptureMinIOKey, 10*time.Minute)
+	url, err := attach.PresignGet(r.Context(), doc.CaptureMinIOKey, 10*time.Minute)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"presign failed: "+err.Error(), nil)

@@ -106,6 +106,28 @@ manually so agents pull a snapshot that contains the new stubs.`,
 				return fmt.Errorf("opensearch open: %w", err)
 			}
 
+			// v3.2 per-binding storage overrides: resolve the binding's
+			// IndexPrefix from the registry and re-prefix the client so
+			// the scroll + upsert hit the binding's physical indices,
+			// not the daemon-global shared ones. Bindings without an
+			// override resolve to cfg.OpenSearch.IndexPrefix — same as
+			// the client we just opened, so the WithPrefix call is a
+			// no-op in the common case.
+			reg := pbserver.NewRegistry()
+			if _, rerr := reg.Load(pbserver.LoadOpts{
+				ConfigDir:          resolveConfigDir(cmd),
+				Defaults:           cfg.Defaults,
+				DefaultIndexPrefix: cfg.OpenSearch.IndexPrefix,
+				DefaultBucket:      cfg.Storage.MinIOBucket,
+			}); rerr != nil {
+				return fmt.Errorf("load registry: %w", rerr)
+			}
+			binding, found := reg.LookupByVault(pbserver.VaultKey{Profile: profile, Vault: vault})
+			if !found {
+				return fmt.Errorf("binding %s/%s not in registry", profile, vault)
+			}
+			oc = oc.WithPrefix(binding.Storage.IndexPrefix)
+
 			emb := ollama.New(ollama.OptionsFromEnv())
 			if emb.Dims() != osearch.EmbeddingDim {
 				return fmt.Errorf("embedder dim %d != osearch.EmbeddingDim %d",

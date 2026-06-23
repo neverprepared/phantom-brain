@@ -169,6 +169,32 @@ type VaultOverrides struct {
 	MaxTarballBytes              int64 `toml:"max_tarball_bytes"`
 	MaxUncompressedBytes         int64 `toml:"max_uncompressed_bytes"`
 	ContributorQuotaBytesPerHour int64 `toml:"contributor_quota_bytes_per_hour"`
+
+	// StorageOverrides optionally re-routes this binding to its own
+	// OS index set and/or MinIO bucket. Both fields optional; missing
+	// fields fall through to the daemon-global defaults. See
+	// StorageOverrides for the per-field contract.
+	StorageOverrides StorageOverrides `toml:"storage_overrides"`
+}
+
+// StorageOverrides is the per-binding override block parsed from
+// profiles/<profile>/vaults/<vault>/config.toml under
+// [storage_overrides]. Both fields optional. When unset the binding
+// uses the daemon-global defaults (cfg.OpenSearch.IndexPrefix +
+// cfg.Storage.MinIOBucket).
+//
+// IndexPrefix is APPENDED to the daemon-global OS index prefix to
+// produce per-binding physical indices — e.g. with global prefix ""
+// and binding override "client_x_" the binding's summary index is
+// "client_x_pb_summaries". Both prefixes can be empty (shared mode).
+//
+// Bucket REPLACES the daemon-default MinIO bucket for this binding
+// only. MinIO credentials + endpoint are NOT overridable here — they
+// stay global. Bucket must exist before the daemon starts; the daemon
+// will NOT create it (operator runs `mc mb` first).
+type StorageOverrides struct {
+	IndexPrefix string `toml:"index_prefix"`
+	Bucket      string `toml:"bucket"`
 }
 
 // VaultAuth is parsed from profiles/{p}/vaults/{v}/auth.toml.
