@@ -86,25 +86,32 @@ func (noopSynthQueue) Enqueue(string, string, string) {}
 // the real impl; tests use an in-memory map. The store is the only
 // place that knows where bytes live — Day 8's tear-out of the v5.0
 // StorageBackend won't touch it.
+// v3.2 Level 2: every method takes a per-call bucket. The store keeps
+// one underlying client (one MinIO credential / endpoint) but routes
+// each request to the binding-resolved bucket. Pass "" to fall back to
+// the store's construction-time default bucket — keeps single-bucket
+// daemons working unchanged while Stream D threads real per-binding
+// values from VaultBinding.Storage.Bucket through every call site.
 type AttachmentStore interface {
 	// PutAttachment stores body at the canonical attachment key for
-	// (profile, vault, sha, ext). Idempotent — repeated puts with
-	// identical content are no-ops. Returns the resolved object key.
-	PutAttachment(ctx context.Context, profile, vault, sha, ext string, body []byte, contentType string) (key string, err error)
+	// (profile, vault, sha, ext) inside bucket. Idempotent — repeated
+	// puts with identical content are no-ops. Returns the resolved
+	// object key.
+	PutAttachment(ctx context.Context, bucket, profile, vault, sha, ext string, body []byte, contentType string) (key string, err error)
 	// PutAttachmentWithTags is PutAttachment plus an index-side tag
 	// slice the store mirrors onto the blob (S3 object tags on MinIO).
 	// v2.5.1: keeps blob and pb_attachments index in sync at attach
 	// time so lifecycle policies + tag-based access can use the same
 	// shape brain_recall sees.
-	PutAttachmentWithTags(ctx context.Context, profile, vault, sha, ext string, body []byte, contentType string, indexTags []string) (key string, err error)
+	PutAttachmentWithTags(ctx context.Context, bucket, profile, vault, sha, ext string, body []byte, contentType string, indexTags []string) (key string, err error)
 	// PresignGet returns a short-lived URL the agent can GET to
-	// retrieve the blob. ttl bounds validity.
-	PresignGet(ctx context.Context, key string, ttl time.Duration) (url string, err error)
-	// GetAttachmentBytes returns the raw blob at key. Used by the
-	// SynthWorker to pull PDFs back out of MinIO for pdftotext at
-	// synth time. maxBytes caps the read defensively — pass 0 for
-	// the impl's default ceiling.
-	GetAttachmentBytes(ctx context.Context, key string, maxBytes int64) ([]byte, error)
+	// retrieve the blob at key inside bucket. ttl bounds validity.
+	PresignGet(ctx context.Context, bucket, key string, ttl time.Duration) (url string, err error)
+	// GetAttachmentBytes returns the raw blob at key inside bucket.
+	// Used by the SynthWorker to pull PDFs back out of MinIO for
+	// pdftotext at synth time. maxBytes caps the read defensively —
+	// pass 0 for the impl's default ceiling.
+	GetAttachmentBytes(ctx context.Context, bucket, key string, maxBytes int64) ([]byte, error)
 }
 
 // ErrAttachmentStoreUnavailable signals that no AttachmentStore is
@@ -374,7 +381,7 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ext := extFromFilename(req.OriginalFilename)
-	key, err := d.attach.PutAttachmentWithTags(r.Context(), binding.Key.Profile, binding.Key.Vault, req.SHA, ext, bytes, req.MIMEType, req.Tags)
+	key, err := d.attach.PutAttachmentWithTags(r.Context(), "", binding.Key.Profile, binding.Key.Vault, req.SHA, ext, bytes, req.MIMEType, req.Tags)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"attachment put failed: "+err.Error(), nil)
@@ -529,7 +536,7 @@ func (d *Daemon) handleAttachGet(w http.ResponseWriter, r *http.Request) {
 		WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound, "attachment not found", nil)
 		return
 	}
-	url, err := d.attach.PresignGet(r.Context(), doc.MinIOKey, 10*time.Minute)
+	url, err := d.attach.PresignGet(r.Context(), "", doc.MinIOKey, 10*time.Minute)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"presign failed: "+err.Error(), nil)
@@ -577,7 +584,7 @@ func (d *Daemon) handleCaptureGet(w http.ResponseWriter, r *http.Request) {
 			"no capture stored for this doc (capture disabled, URL absent, or fetch failed)", nil)
 		return
 	}
-	url, err := d.attach.PresignGet(r.Context(), doc.CaptureMinIOKey, 10*time.Minute)
+	url, err := d.attach.PresignGet(r.Context(), "", doc.CaptureMinIOKey, 10*time.Minute)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"presign failed: "+err.Error(), nil)

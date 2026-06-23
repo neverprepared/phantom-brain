@@ -108,7 +108,7 @@ func TestMinIOBackend_RegisterUploadRoundTrip(t *testing.T) {
 		Endpoint: "x.invalid", Bucket: "b", AccessKey: "a", SecretKey: "s",
 		DataDir: DataDir(t.TempDir()),
 	})
-	mb.RegisterUpload("u1", "brain-X", "personal", "memory", "personal/memory/_uploads/u1.tar", time.Now().Add(time.Hour))
+	mb.RegisterUpload("u1", "brain-X", "personal", "memory", "", "personal/memory/_uploads/u1.tar", time.Now().Add(time.Hour))
 	st, ok := mb.lookupUpload("u1")
 	if !ok {
 		t.Fatal("lookup failed")
@@ -118,6 +118,56 @@ func TestMinIOBackend_RegisterUploadRoundTrip(t *testing.T) {
 	}
 	if st.ObjKey != "personal/memory/_uploads/u1.tar" {
 		t.Errorf("ObjKey = %q", st.ObjKey)
+	}
+	if st.Bucket != "b" {
+		t.Errorf("Bucket fallback to default failed: got %q want %q", st.Bucket, "b")
+	}
+
+	// v3.2: an explicit per-call bucket overrides the default.
+	mb.RegisterUpload("u2", "brain-Y", "client_x", "memory", "client-x-bucket", "client_x/memory/_uploads/u2.tar", time.Now().Add(time.Hour))
+	st2, _ := mb.lookupUpload("u2")
+	if st2.Bucket != "client-x-bucket" {
+		t.Errorf("per-call bucket not recorded: got %q want %q", st2.Bucket, "client-x-bucket")
+	}
+}
+
+// TestMinIOBackend_ResolveBucket exercises the per-call/default
+// fallback that every bucket-taking method funnels through. v3.2:
+// "" falls back to the construction-time default; a real string is
+// returned unchanged.
+func TestMinIOBackend_ResolveBucket(t *testing.T) {
+	mb, _ := NewMinIOBackend(MinIOOptions{
+		Endpoint: "x.invalid", Bucket: "default-bucket", AccessKey: "a", SecretKey: "s",
+		DataDir: DataDir(t.TempDir()),
+	})
+	if got := mb.resolveBucket(""); got != "default-bucket" {
+		t.Errorf("empty bucket should fall back to default: got %q", got)
+	}
+	if got := mb.resolveBucket("override"); got != "override" {
+		t.Errorf("explicit bucket should pass through: got %q", got)
+	}
+}
+
+// TestMinIOBackend_EnsureBucketExists_ProbeFailure proves the eager
+// startup check surfaces an error when the underlying probe cannot
+// reach MinIO. We can't assert the "missing bucket" path without a
+// real endpoint, but the unreachable-endpoint path runs the same
+// code branch and exercises the error-wrapping contract: every
+// failure must name the bucket so operators know which binding's
+// config to fix.
+func TestMinIOBackend_EnsureBucketExists_ProbeFailure(t *testing.T) {
+	mb, _ := NewMinIOBackend(MinIOOptions{
+		Endpoint: "127.0.0.1:1", Bucket: "default-bucket", AccessKey: "a", SecretKey: "s",
+		DataDir: DataDir(t.TempDir()),
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := mb.EnsureBucketExists(ctx, "client-x-bucket")
+	if err == nil {
+		t.Fatal("expected error against unreachable endpoint")
+	}
+	if !strings.Contains(err.Error(), "client-x-bucket") {
+		t.Errorf("error must name the bucket: %v", err)
 	}
 }
 

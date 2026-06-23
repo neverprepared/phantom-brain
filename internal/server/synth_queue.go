@@ -391,7 +391,7 @@ func (w *SynthWorker) enrichAttachmentStub(ctx context.Context, job synthJob, su
 	// can handle. Failures here are soft — the stub falls back to
 	// description-only RawBody.
 	if att.ExtractedText == "" && att.MIMEType == "application/pdf" && w.attach != nil && w.pdfExtractor != nil {
-		body, ferr := w.attach.GetAttachmentBytes(ctx, att.MinIOKey, 0)
+		body, ferr := w.attach.GetAttachmentBytes(ctx, "", att.MinIOKey, 0)
 		if ferr != nil {
 			w.logger.Warn("phantom-brain: pdf fetch failed (non-fatal)",
 				slog.String("sha", job.SHA), slog.String("key", att.MinIOKey),
@@ -472,7 +472,7 @@ func (w *SynthWorker) processAttachmentJob(ctx context.Context, job synthJob) er
 			slog.Bool("have_extractor", w.pdfExtractor != nil))
 		return nil
 	}
-	body, err := w.attach.GetAttachmentBytes(ctx, doc.MinIOKey, 0)
+	body, err := w.attach.GetAttachmentBytes(ctx, "", doc.MinIOKey, 0)
 	if err != nil {
 		w.logger.Warn("phantom-brain: pdf fetch failed (non-fatal)",
 			slog.String("sha", job.SHA), slog.String("key", doc.MinIOKey),
