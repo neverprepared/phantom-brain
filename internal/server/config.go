@@ -169,6 +169,36 @@ type VaultOverrides struct {
 	MaxTarballBytes              int64 `toml:"max_tarball_bytes"`
 	MaxUncompressedBytes         int64 `toml:"max_uncompressed_bytes"`
 	ContributorQuotaBytesPerHour int64 `toml:"contributor_quota_bytes_per_hour"`
+
+	StorageOverrides StorageOverrides `toml:"storage_overrides"`
+}
+
+// StorageOverrides is the per-binding override block parsed from
+// profiles/<profile>/vaults/<vault>/config.toml under [storage_overrides].
+// Both fields optional. When unset the binding uses the shared daemon
+// defaults (cfg.OpenSearch.IndexPrefix + cfg.Storage.MinIOBucket).
+//
+// IndexPrefix is APPENDED to the daemon-global cfg.OpenSearch.IndexPrefix
+// when constructing physical index names — final shape:
+//
+//	<daemon_global_prefix> + <binding_storage_override_prefix> + <logical>
+//
+// e.g. IndexPrefix="client_x_" + logical="pb_summaries" yields
+// "<global>client_x_pb_summaries". Global stays first so dev/test
+// sandbox prefixes still wrap every binding the same way.
+//
+// Bucket replaces the daemon-default MinIO bucket for this binding only.
+// MinIO credentials + endpoint are NOT overridable — those stay global
+// (Level 2 contract). The bucket must exist before daemon start; the
+// daemon will not create it.
+//
+// Allowed characters in IndexPrefix: lowercase ASCII letters, digits,
+// and underscore. Anything else is rejected at registry Load — typos
+// and shell metacharacters in index names tend to produce confusing
+// 4xx from OpenSearch much later.
+type StorageOverrides struct {
+	IndexPrefix string `toml:"index_prefix"`
+	Bucket      string `toml:"bucket"`
 }
 
 // VaultAuth is parsed from profiles/{p}/vaults/{v}/auth.toml.

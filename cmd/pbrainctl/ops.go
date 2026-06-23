@@ -57,7 +57,12 @@ func loadRegistryForOps(configDir string) (*pbserver.Registry, error) {
 		return nil, err
 	}
 	r := pbserver.NewRegistry()
-	if _, err := r.Load(pbserver.LoadOpts{ConfigDir: configDir, Defaults: cfg.Defaults}); err != nil {
+	if _, err := r.Load(pbserver.LoadOpts{
+		ConfigDir:          configDir,
+		Defaults:           cfg.Defaults,
+		DefaultIndexPrefix: cfg.OpenSearch.IndexPrefix,
+		DefaultBucket:      cfg.Storage.MinIOBucket,
+	}); err != nil {
 		return nil, err
 	}
 	return r, nil

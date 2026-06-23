@@ -22,12 +22,28 @@ type VaultKey struct {
 func (k VaultKey) String() string { return k.Profile + "/" + k.Vault }
 
 // VaultBinding is everything the daemon knows about a single
-// authenticated vault: its identity, the merged defaults, and the
-// bearer token operators issued for it.
+// authenticated vault: its identity, the merged defaults, the
+// bearer token operators issued for it, and the resolved storage
+// handle (OS index prefix + MinIO bucket).
 type VaultBinding struct {
-	Key       VaultKey
-	Auth      VaultAuth
-	Defaults  VaultDefaults
+	Key      VaultKey
+	Auth     VaultAuth
+	Defaults VaultDefaults
+	Storage  ResolvedStorage
+}
+
+// ResolvedStorage carries the binding's final OS index prefix + MinIO
+// bucket after applying StorageOverrides over the daemon defaults.
+// Filled in once by Registry.Load — every write path reads this
+// directly; there is no "look at overrides if set, else default"
+// branch outside Load.
+//
+// IndexPrefix is the FULL prefix callers prepend to a logical name
+// like "pb_summaries"; it already includes the daemon-global prefix.
+// Bucket is the absolute MinIO bucket name.
+type ResolvedStorage struct {
+	IndexPrefix string
+	Bucket      string
 }
 
 // Registry is the live view of every vault the daemon serves. The
@@ -91,9 +107,16 @@ func (r *Registry) Vaults() []VaultBinding {
 }
 
 // LoadOpts narrows what Registry.Load needs from outside this file.
+//
+// DefaultIndexPrefix + DefaultBucket are the daemon-global fallbacks
+// applied to every binding that omits the matching field in its
+// [storage_overrides] block. Empty values are valid (shared-mode
+// daemon with no global prefix / no MinIO bucket configured).
 type LoadOpts struct {
-	ConfigDir string
-	Defaults  VaultDefaults
+	ConfigDir          string
+	Defaults           VaultDefaults
+	DefaultIndexPrefix string
+	DefaultBucket      string
 }
 
 // Load walks {configDir}/profiles/*/vaults/*/auth.toml, parses each,
@@ -151,10 +174,21 @@ func (r *Registry) Load(opts LoadOpts) (int, error) {
 			if _, dup := newByToken[auth.BearerToken]; dup {
 				return 0, fmt.Errorf("server: duplicate bearer_token across vaults; conflict at %s", key)
 			}
+			if err := validateStorageOverridePrefix(overrides.StorageOverrides.IndexPrefix); err != nil {
+				return 0, fmt.Errorf("server: %s: %w", key, err)
+			}
+			storage := ResolvedStorage{
+				IndexPrefix: opts.DefaultIndexPrefix + overrides.StorageOverrides.IndexPrefix,
+				Bucket:      opts.DefaultBucket,
+			}
+			if overrides.StorageOverrides.Bucket != "" {
+				storage.Bucket = overrides.StorageOverrides.Bucket
+			}
 			binding := VaultBinding{
 				Key:      key,
 				Auth:     auth,
 				Defaults: MergedDefaults(opts.Defaults, overrides),
+				Storage:  storage,
 			}
 			newByToken[auth.BearerToken] = binding
 			newByVault[key] = binding
@@ -195,4 +229,25 @@ func (r *Registry) Diff(prior []VaultKey) (added, removed []VaultKey) {
 		}
 	}
 	return added, removed
+}
+
+// validateStorageOverridePrefix enforces the allowed character set for
+// per-binding index_prefix. Empty is fine (means "no override"). Else
+// only lowercase ASCII letters, digits, and underscore are permitted —
+// OpenSearch tolerates a wider set but typos / shell metacharacters
+// here surface as confusing 4xx much later.
+func validateStorageOverridePrefix(p string) error {
+	if p == "" {
+		return nil
+	}
+	for i, r := range p {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9':
+		case r == '_':
+		default:
+			return fmt.Errorf("storage_overrides.index_prefix %q invalid at byte %d (allowed: a-z 0-9 _)", p, i)
+		}
+	}
+	return nil
 }

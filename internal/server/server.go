@@ -231,7 +231,12 @@ func Start(opts StartOpts) (*Daemon, error) {
 		d.synth = w
 	}
 
-	n, err := d.registry.Load(LoadOpts{ConfigDir: opts.ConfigDir, Defaults: cfg.Defaults})
+	n, err := d.registry.Load(LoadOpts{
+		ConfigDir:          opts.ConfigDir,
+		Defaults:           cfg.Defaults,
+		DefaultIndexPrefix: cfg.OpenSearch.IndexPrefix,
+		DefaultBucket:      cfg.Storage.MinIOBucket,
+	})
 	if err != nil {
 		// Release the flock before returning so a second restart
 		// attempt doesn't have to wait on a stuck lock.
@@ -373,7 +378,12 @@ func (d *Daemon) Run() error {
 // (Phase 5 will add a finer-grained reload if the need arises).
 func (d *Daemon) reload() error {
 	prior := d.runners.Keys()
-	if _, err := d.registry.Load(LoadOpts{ConfigDir: d.ConfigDir, Defaults: d.Config.Defaults}); err != nil {
+	if _, err := d.registry.Load(LoadOpts{
+		ConfigDir:          d.ConfigDir,
+		Defaults:           d.Config.Defaults,
+		DefaultIndexPrefix: d.Config.OpenSearch.IndexPrefix,
+		DefaultBucket:      d.Config.Storage.MinIOBucket,
+	}); err != nil {
 		return err
 	}
 	added, removed := d.registry.Diff(prior)
