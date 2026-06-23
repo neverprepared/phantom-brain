@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.4.1](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.4.0...v2.4.1) (2026-06-23)
+
+
+### Bug Fixes
+
+* **attachments:** recall sees attachments + MinIO tag mirror ([#50](https://github.com/neverprepared/mcp-phantom-brain/issues/50)) ([ad6012d](https://github.com/neverprepared/mcp-phantom-brain/commit/ad6012dd32ddc68b11b7cda36f2d692f6dbefa54))
+
 ## [2.4.0](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.3.2...v2.4.0) (2026-06-22)
 
 
