@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.2.0](https://github.com/neverprepared/phantom-brain/compare/v3.1.0...v3.2.0) (2026-06-23)
+
+
+### Features
+
+* v3.2 per-binding storage isolation — index prefix + bucket overrides ([#65](https://github.com/neverprepared/phantom-brain/issues/65)) ([950a4f6](https://github.com/neverprepared/phantom-brain/commit/950a4f6e2377722f70ff7da6b23ac6f33c47cd02))
+
 ## [3.1.0](https://github.com/neverprepared/phantom-brain/compare/v3.0.0...v3.1.0) (2026-06-23)
 
 
