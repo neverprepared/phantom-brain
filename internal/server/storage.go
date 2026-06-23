@@ -530,6 +530,71 @@ func (m *MinIOBackend) PresignGetInBucket(ctx context.Context, bucket, key strin
 	return u.String(), nil
 }
 
+// BucketInfo is the operator-CLI-facing summary returned by ListBuckets.
+// Mirrors minio.BucketInfo but exposed in our own type so cmd/ doesn't
+// pull minio-go directly.
+type BucketInfo struct {
+	Name         string
+	CreationDate time.Time
+}
+
+// CreateBucket is the idempotent bucket-create entry used by the
+// operator CLI. Treats "already owned by you" as success so re-running
+// `pbrainctl server bucket create foo` after a previous successful run
+// exits 0.
+func (m *MinIOBackend) CreateBucket(ctx context.Context, name string) error {
+	if strings.TrimSpace(name) == "" {
+		return errors.New("server: CreateBucket requires a name")
+	}
+	err := m.client.MakeBucket(ctx, name, minio.MakeBucketOptions{})
+	if err == nil {
+		return nil
+	}
+	switch minio.ToErrorResponse(err).Code {
+	case "BucketAlreadyOwnedByYou", "BucketAlreadyExists":
+		return nil
+	}
+	return fmt.Errorf("server: minio make bucket %q: %w", name, err)
+}
+
+// ListBuckets returns every bucket the daemon's MinIO credentials can
+// see. Used by the operator CLI; daemon code paths use the binding-
+// resolved bucket directly.
+func (m *MinIOBackend) ListBuckets(ctx context.Context) ([]BucketInfo, error) {
+	raw, err := m.client.ListBuckets(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("server: minio list buckets: %w", err)
+	}
+	out := make([]BucketInfo, 0, len(raw))
+	for _, b := range raw {
+		out = append(out, BucketInfo{Name: b.Name, CreationDate: b.CreationDate})
+	}
+	return out, nil
+}
+
+// RemoveBucketWithObjects empties the bucket then deletes it. Used by
+// `pbrainctl server binding delete --purge-data`. Refuses to operate on
+// the daemon's default bucket — purging that would wipe every binding's
+// attachments.
+func (m *MinIOBackend) RemoveBucketWithObjects(ctx context.Context, name string) error {
+	if strings.TrimSpace(name) == "" {
+		return errors.New("server: RemoveBucketWithObjects requires a name")
+	}
+	if name == m.bucket {
+		return fmt.Errorf("server: refusing to remove daemon default bucket %q", name)
+	}
+	objCh := m.client.ListObjects(ctx, name, minio.ListObjectsOptions{Recursive: true})
+	for rerr := range m.client.RemoveObjects(ctx, name, objCh, minio.RemoveObjectsOptions{}) {
+		if rerr.Err != nil {
+			return fmt.Errorf("server: minio remove object %s/%s: %w", name, rerr.ObjectName, rerr.Err)
+		}
+	}
+	if err := m.client.RemoveBucket(ctx, name); err != nil {
+		return fmt.Errorf("server: minio remove bucket %q: %w", name, err)
+	}
+	return nil
+}
+
 // EnsureBucketExists returns nil when the bucket exists, an error
 // when it doesn't. Does NOT create — per the Level 2 contract the
 // operator runs `mc mb` first. Idempotent — called once per distinct
