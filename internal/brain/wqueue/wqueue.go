@@ -26,6 +26,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/neverprepared/phantom-brain/internal/sqlite"
@@ -94,6 +95,11 @@ var (
 	ErrOversize    = errors.New("wqueue: staged bytes exceed MaxStagedBytes")
 	ErrInvalidKind = errors.New("wqueue: invalid Kind")
 	ErrEmptySHA    = errors.New("wqueue: SHA required")
+	// ErrNotExist is returned by OpenReadOnly when no wqueue.sqlite is
+	// present yet (i.e. the agent has never had offline writes for this
+	// binding). Lets ops tooling print a friendly "no queue" message
+	// without creating side-effect files just to look.
+	ErrNotExist = errors.New("wqueue: queue does not exist")
 )
 
 const schemaSQL = `
@@ -106,7 +112,9 @@ CREATE TABLE IF NOT EXISTS wqueue (
   enqueued_at INTEGER NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0,
   last_attempt_at INTEGER NOT NULL DEFAULT 0,
-  last_error TEXT NOT NULL DEFAULT ''
+  claimed_at INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  UNIQUE(kind, sha)
 );
 CREATE INDEX IF NOT EXISTS wqueue_eligible ON wqueue(last_attempt_at, id);
 `
@@ -136,6 +144,35 @@ func Open(dir string) (*Queue, error) {
 		return nil, fmt.Errorf("wqueue: schema: %w", err)
 	}
 	return &Queue{dir: dir, attachDir: attachDir, db: db}, nil
+}
+
+// OpenReadOnly opens the queue without creating any side-effect files
+// when none exist. Returns ErrNotExist when dir/wqueue.sqlite is
+// missing. Used by `pbrainctl client queue list` so an inspection
+// command never materialises a queue just by looking.
+func OpenReadOnly(dir string) (*Queue, error) {
+	if dir == "" {
+		return nil, errors.New("wqueue: OpenReadOnly requires a directory")
+	}
+	if !filepath.IsAbs(dir) {
+		return nil, fmt.Errorf("wqueue: OpenReadOnly requires an absolute path, got %q", dir)
+	}
+	dbPath := filepath.Join(dir, "wqueue.sqlite")
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrNotExist
+		}
+		return nil, err
+	}
+	db, err := sqlite.Open(sqlite.Options{Path: dbPath})
+	if err != nil {
+		return nil, fmt.Errorf("wqueue: open db: %w", err)
+	}
+	if _, err := db.Exec(schemaSQL); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("wqueue: schema: %w", err)
+	}
+	return &Queue{dir: dir, attachDir: filepath.Join(dir, "wqueue-attach"), db: db}, nil
 }
 
 // Close releases the database handle. The staging directory is left in
@@ -183,6 +220,19 @@ func (q *Queue) Enqueue(ctx context.Context, opts EnqueueOpts) (*Item, error) {
 		`INSERT INTO wqueue(kind, sha, payload_json, staged_path, enqueued_at) VALUES(?, ?, ?, ?, ?)`,
 		string(opts.Kind), opts.SHA, payload, staged, now.UnixNano())
 	if err != nil {
+		// UNIQUE(kind, sha) collision: an earlier Enqueue (this process
+		// or a sibling MCP child) already staged the same write. Return
+		// the existing row — daemon dedups by SHA anyway, so the second
+		// caller's "Queued" UX is honest.
+		if isUniqueViolation(err) {
+			if staged != "" {
+				_ = os.Remove(staged) // duplicate blob; first staging wins
+			}
+			existing, lerr := q.lookupByKindSHA(ctx, opts.Kind, opts.SHA)
+			if lerr == nil && existing != nil {
+				return existing, nil
+			}
+		}
 		if staged != "" {
 			_ = os.Remove(staged)
 		}
@@ -199,6 +249,21 @@ func (q *Queue) Enqueue(ctx context.Context, opts EnqueueOpts) (*Item, error) {
 	}, nil
 }
 
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "UNIQUE constraint failed") || strings.Contains(s, "constraint failed: UNIQUE")
+}
+
+func (q *Queue) lookupByKindSHA(ctx context.Context, kind Kind, sha string) (*Item, error) {
+	row := q.db.QueryRowContext(ctx,
+		`SELECT id, kind, sha, payload_json, staged_path, enqueued_at, attempts, last_attempt_at, last_error
+		 FROM wqueue WHERE kind = ? AND sha = ?`, string(kind), sha)
+	return scanItem(row)
+}
+
 // Depth returns the current row count.
 func (q *Queue) Depth(ctx context.Context) (int, error) {
 	var n int
@@ -208,34 +273,76 @@ func (q *Queue) Depth(ctx context.Context) (int, error) {
 	return n, nil
 }
 
+// ClaimTTL bounds how long a claim is honoured. A drainer that crashes
+// mid-dispatch leaves a row with claimed_at != 0; after ClaimTTL the
+// next drainer treats the row as unclaimed and can pick it up.
+const ClaimTTL = 5 * time.Minute
+
 // NextEligible returns up to limit rows whose backoff window has
-// elapsed. Rows are returned oldest-first (id ASC).
+// elapsed AND that are not currently claimed by another drainer. Each
+// returned row is atomically claimed (claimed_at = now) inside a single
+// BEGIN IMMEDIATE transaction so concurrent drainers can't pick the
+// same row. Rows returned oldest-first (id ASC).
 func (q *Queue) NextEligible(ctx context.Context, now time.Time, limit int) ([]*Item, error) {
 	if limit <= 0 {
 		limit = 16
 	}
-	rows, err := q.db.QueryContext(ctx,
-		`SELECT id, kind, sha, payload_json, staged_path, enqueued_at, attempts, last_attempt_at, last_error
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	rows, err := tx.QueryContext(ctx,
+		`SELECT id, kind, sha, payload_json, staged_path, enqueued_at, attempts, last_attempt_at, last_error, claimed_at
 		 FROM wqueue ORDER BY id ASC LIMIT ?`, limit*4)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	out := make([]*Item, 0, limit)
+	ids := make([]int64, 0, limit)
+	staleClaim := now.Add(-ClaimTTL).UnixNano()
 	for rows.Next() {
-		it, err := scanItem(rows)
+		it, claimedAt, err := scanItemWithClaim(rows)
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
 		if !eligible(it, now) {
 			continue
 		}
+		if claimedAt != 0 && claimedAt >= staleClaim {
+			continue
+		}
 		out = append(out, it)
+		ids = append(ids, it.ID)
 		if len(out) >= limit {
 			break
 		}
 	}
-	return out, rows.Err()
+	rows.Close()
+	if rerr := rows.Err(); rerr != nil {
+		return nil, rerr
+	}
+	for _, id := range ids {
+		if _, uerr := tx.ExecContext(ctx,
+			`UPDATE wqueue SET claimed_at = ? WHERE id = ?`,
+			now.UnixNano(), id); uerr != nil {
+			return nil, uerr
+		}
+	}
+	if cerr := tx.Commit(); cerr != nil {
+		return nil, cerr
+	}
+	return out, nil
+}
+
+// ReleaseClaim drops a stale claim without touching attempt state.
+// Used by drainers that decide not to dispatch a claimed row (e.g.
+// context cancelled). MarkAttempt and Delete also implicitly release
+// the claim.
+func (q *Queue) ReleaseClaim(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, `UPDATE wqueue SET claimed_at = 0 WHERE id = ?`, id)
+	return err
 }
 
 func eligible(it *Item, now time.Time) bool {
@@ -257,7 +364,7 @@ func (q *Queue) MarkAttempt(ctx context.Context, id int64, now time.Time, attemp
 		msg = attemptErr.Error()
 	}
 	_, err := q.db.ExecContext(ctx,
-		`UPDATE wqueue SET attempts = attempts + 1, last_attempt_at = ?, last_error = ? WHERE id = ?`,
+		`UPDATE wqueue SET attempts = attempts + 1, last_attempt_at = ?, last_error = ?, claimed_at = 0 WHERE id = ?`,
 		now.UnixNano(), msg, id)
 	return err
 }
@@ -405,6 +512,26 @@ func backoffBase(attempts int) time.Duration {
 
 type rowScanner interface {
 	Scan(dest ...any) error
+}
+
+func scanItemWithClaim(s rowScanner) (*Item, int64, error) {
+	var (
+		it          Item
+		kind        string
+		enqueued    int64
+		lastAttempt int64
+		claimedAt   int64
+	)
+	if err := s.Scan(&it.ID, &kind, &it.SHA, &it.PayloadJSON, &it.StagedPath,
+		&enqueued, &it.Attempts, &lastAttempt, &it.LastError, &claimedAt); err != nil {
+		return nil, 0, err
+	}
+	it.Kind = Kind(kind)
+	it.EnqueuedAt = time.Unix(0, enqueued)
+	if lastAttempt != 0 {
+		it.LastAttemptAt = time.Unix(0, lastAttempt)
+	}
+	return &it, claimedAt, nil
 }
 
 func scanItem(s rowScanner) (*Item, error) {

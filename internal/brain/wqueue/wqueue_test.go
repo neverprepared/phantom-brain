@@ -291,3 +291,139 @@ func TestConcurrentEnqueueDelete(t *testing.T) {
 		t.Fatalf("Depth = %d, want 0", n)
 	}
 }
+
+func TestEnqueueDedupesOnKindSHA(t *testing.T) {
+	q := openTest(t)
+	ctx := context.Background()
+	it1, err := q.Enqueue(ctx, EnqueueOpts{Kind: KindPerceive, SHA: "dup", PayloadJSON: []byte(`{}`)})
+	if err != nil {
+		t.Fatalf("first enqueue: %v", err)
+	}
+	it2, err := q.Enqueue(ctx, EnqueueOpts{Kind: KindPerceive, SHA: "dup", PayloadJSON: []byte(`{}`)})
+	if err != nil {
+		t.Fatalf("second enqueue (should dedup, not error): %v", err)
+	}
+	if it1.ID != it2.ID {
+		t.Fatalf("expected dedup to return same row id %d, got %d", it1.ID, it2.ID)
+	}
+	n, _ := q.Depth(ctx)
+	if n != 1 {
+		t.Fatalf("Depth = %d, want 1", n)
+	}
+	// Different kind, same sha is allowed.
+	if _, err := q.Enqueue(ctx, EnqueueOpts{Kind: KindLearn, SHA: "dup", PayloadJSON: []byte(`{}`)}); err != nil {
+		t.Fatalf("cross-kind enqueue: %v", err)
+	}
+	n, _ = q.Depth(ctx)
+	if n != 2 {
+		t.Fatalf("Depth = %d, want 2", n)
+	}
+}
+
+func TestNextEligibleClaimsAtomically(t *testing.T) {
+	q := openTest(t)
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if _, err := q.Enqueue(ctx, EnqueueOpts{
+			Kind: KindPerceive, SHA: filepathJoin(t, i), PayloadJSON: []byte(`{}`),
+		}); err != nil {
+			t.Fatalf("Enqueue %d: %v", i, err)
+		}
+	}
+	now := time.Now()
+	first, err := q.NextEligible(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("NextEligible first: %v", err)
+	}
+	if len(first) != 3 {
+		t.Fatalf("first claim len=%d, want 3", len(first))
+	}
+	// Second drainer at the same instant must get nothing — every row
+	// is claimed (and the claim is fresh).
+	second, err := q.NextEligible(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("NextEligible second: %v", err)
+	}
+	if len(second) != 0 {
+		t.Fatalf("second claim len=%d, want 0 (all rows already claimed)", len(second))
+	}
+	// MarkAttempt releases the claim; row eligible again after backoff.
+	if err := q.MarkAttempt(ctx, first[0].ID, now, errTransient); err != nil {
+		t.Fatalf("MarkAttempt: %v", err)
+	}
+	later := now.Add(2 * time.Minute) // past base backoff for attempt 1
+	third, err := q.NextEligible(ctx, later, 10)
+	if err != nil {
+		t.Fatalf("NextEligible third: %v", err)
+	}
+	gotID := int64(0)
+	for _, it := range third {
+		if it.ID == first[0].ID {
+			gotID = it.ID
+		}
+	}
+	if gotID == 0 {
+		t.Fatalf("expected re-claim of id=%d after MarkAttempt; got ids %+v", first[0].ID, third)
+	}
+}
+
+func TestStaleClaimReleasedAfterTTL(t *testing.T) {
+	q := openTest(t)
+	ctx := context.Background()
+	it, err := q.Enqueue(ctx, EnqueueOpts{Kind: KindPerceive, SHA: "stale", PayloadJSON: []byte(`{}`)})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	now := time.Now()
+	if _, err := q.NextEligible(ctx, now, 10); err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	// Same-now second call sees the claim and skips.
+	if got, _ := q.NextEligible(ctx, now, 10); len(got) != 0 {
+		t.Fatalf("expected 0 (claimed), got %d", len(got))
+	}
+	// After ClaimTTL the claim is ignored.
+	got, err := q.NextEligible(ctx, now.Add(ClaimTTL+time.Second), 10)
+	if err != nil {
+		t.Fatalf("post-TTL: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != it.ID {
+		t.Fatalf("expected re-claim after TTL, got %+v", got)
+	}
+}
+
+func TestOpenReadOnlyMissingReturnsErrNotExist(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := OpenReadOnly(dir); !errors.Is(err, ErrNotExist) {
+		t.Fatalf("OpenReadOnly on empty dir = %v, want ErrNotExist", err)
+	}
+	// Confirm side-effect-free: no files created.
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 0 {
+		t.Fatalf("OpenReadOnly created files: %+v", entries)
+	}
+}
+
+func TestOpenReadOnlyAfterOpen(t *testing.T) {
+	dir := t.TempDir()
+	q, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	q.Close()
+	ro, err := OpenReadOnly(dir)
+	if err != nil {
+		t.Fatalf("OpenReadOnly after Open: %v", err)
+	}
+	defer ro.Close()
+	if _, err := ro.Depth(context.Background()); err != nil {
+		t.Fatalf("Depth via read-only: %v", err)
+	}
+}
+
+var errTransient = errors.New("transient")
+
+func filepathJoin(t *testing.T, i int) string {
+	t.Helper()
+	return "sha-" + filepath.Base(t.TempDir()) + "-" + string(rune('a'+i))
+}

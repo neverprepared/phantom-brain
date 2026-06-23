@@ -21,10 +21,11 @@ import (
 // surface staleness in brain_status output. The tarball itself sits
 // alongside this metadata as snapshot-<gen>.tar.zst.
 type CachedSnapshot struct {
-	Gen      uint64 `json:"gen"`
-	SHA256   string `json:"sha256"`
-	SizeBytes int64 `json:"size_bytes"`
-	FetchedAt string `json:"fetched_at"` // RFC3339
+	Gen         uint64 `json:"gen"`
+	SHA256      string `json:"sha256"`
+	SizeBytes   int64  `json:"size_bytes"`
+	FetchedAt   string `json:"fetched_at"` // RFC3339
+	BuiltAt     string `json:"built_at"`   // RFC3339, daemon-side timestamp
 	TarballPath string `json:"tarball_path"`
 }
 
@@ -134,6 +135,7 @@ func FetchSnapshotFromDaemon(ctx context.Context, cfg *config.Agent, logger *slo
 		SHA256:      manifest.SHA256,
 		SizeBytes:   size,
 		FetchedAt:   nowRFC3339(),
+		BuiltAt:     manifest.BuiltAt,
 		TarballPath: tarPath,
 	}
 	metaBytes, _ := json.MarshalIndent(cs, "", "  ")

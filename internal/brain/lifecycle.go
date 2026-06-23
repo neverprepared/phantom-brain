@@ -124,6 +124,13 @@ func Start(opts StartOpts) (*Lifecycle, error) {
 		brainDir: dir,
 		manifest: m,
 	}
+	// Stamp the daemon-side built-at for the snapshot we just pulled
+	// so brain_recall's staleness footer reflects reality from birth.
+	if m != nil && m.ParentSnapshotBuiltAt != "" {
+		if t, perr := time.Parse(time.RFC3339, m.ParentSnapshotBuiltAt); perr == nil {
+			lc.snapshotBuiltAt = t
+		}
+	}
 	// Phase 6: a Lifecycle started under the agent contract has a
 	// daemon API + bearer; construct the shared HTTP client once
 	// here so MCP handlers don't have to rebuild it per call.

@@ -191,6 +191,47 @@ func TestQueueDrainNowFailures(t *testing.T) {
 	}
 }
 
+func TestQueueListMissingPrintsFriendlyMessage(t *testing.T) {
+	// Bare temp dir with no wqueue.sqlite — list must succeed (exit 0)
+	// and tell the operator there's nothing yet without creating files.
+	dir := t.TempDir()
+	out, err := runQueueCmd(t, "list", "--queue-dir", dir)
+	if err != nil {
+		t.Fatalf("list missing: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "no queue") {
+		t.Fatalf("expected 'no queue' message, got:\n%s", out)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 0 {
+		t.Fatalf("OpenReadOnly path created files: %+v", entries)
+	}
+}
+
+func TestQueueDrainNowDaemonUnreachableExitsZero(t *testing.T) {
+	q, dir := newTestQueue(t)
+	payload, _ := json.Marshal(brain.PerceiveRequest{SHA: "u", Title: "t", Body: "b"})
+	_, _ = q.Enqueue(context.Background(), wqueue.EnqueueOpts{
+		Kind: wqueue.KindPerceive, SHA: "u", PayloadJSON: payload,
+	})
+	// Point at a closed httptest server so client.Do fails with a
+	// network error (connection refused) — wrapped as ErrDaemonUnreachable.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	ts.Close()
+	setAgentEnv(t, ts.URL)
+	out, err := runQueueCmd(t, "drain-now", "--queue-dir", dir)
+	if err != nil {
+		t.Fatalf("drain-now should exit 0 when daemon is unreachable; err=%v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "daemon unreachable") {
+		t.Fatalf("expected 'daemon unreachable' notice, got:\n%s", out)
+	}
+	n, _ := q.Depth(context.Background())
+	if n != 1 {
+		t.Fatalf("item should still be queued, depth=%d", n)
+	}
+}
+
 func TestQueueRejectsPathTraversalProfile(t *testing.T) {
 	_, err := runQueueCmd(t, "list", "--profile", "../etc", "--vault", "v")
 	if err == nil {

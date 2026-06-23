@@ -26,6 +26,12 @@ import (
 // error will only surface during genuine outages.
 var ErrDaemonUnavailable = errors.New("brain: daemon unavailable (Phase 2 not yet implemented)")
 
+// ErrDaemonUnreachable wraps transient network failures from any
+// client HTTP call (timeout, EOF, connection refused, DNS). Used by
+// `pbrainctl client queue drain-now` to distinguish "tried, daemon's
+// down" (exit 0) from genuine internal errors (exit 1).
+var ErrDaemonUnreachable = errors.New("brain: daemon unreachable")
+
 // BirthOpts narrows the inputs Birth() needs to a small struct so the
 // signature stays stable as we add knobs in later phases.
 type BirthOpts struct {
@@ -179,8 +185,9 @@ func Birth(opts BirthOpts) (brainDir string, m *Manifest, err error) {
 		ContributorID:        ContributorID(opts.Agent.Profile, opts.Agent.Vault, hostUUID, containerNonce),
 		Profile:              opts.Agent.Profile,
 		Vault:                opts.Agent.Vault,
-		ParentGen:            nilUint64IfZero(seed.Gen),
-		ParentSnapshotSHA256: seed.SHA256,
+		ParentGen:             nilUint64IfZero(seed.Gen),
+		ParentSnapshotSHA256:  seed.SHA256,
+		ParentSnapshotBuiltAt: formatBuiltAt(seed.BuiltAt),
 		BornAt:               tnow,
 		Status:               StatusAlive,
 		Host:                 hostUUID,
@@ -278,10 +285,11 @@ func readOrCreateContainerNonce(brainDir string) (string, error) {
 // seedResult bundles what seedFromDaemon teaches Birth about the
 // snapshot used to seed the brain dir. Zero value means greenfield.
 type seedResult struct {
-	Source SeedSource
-	Gen    uint64
-	SHA256 string
-	Stale  bool
+	Source  SeedSource
+	Gen     uint64
+	SHA256  string
+	Stale   bool
+	BuiltAt time.Time // zero when unknown
 }
 
 // seedFromDaemon tries (in order):
@@ -313,14 +321,32 @@ func seedFromDaemon(ctx context.Context, cfg *config.Agent, brainDir string, log
 			if eerr := extractSnapshotTarball(cached.TarballPath, brainDir); eerr != nil {
 				return seedResult{}, fmt.Errorf("brain: extract cached snapshot: %w", eerr)
 			}
-			return seedResult{Source: SeedCachedStale, Gen: cached.Gen, SHA256: cached.SHA256, Stale: true}, nil
+			return seedResult{Source: SeedCachedStale, Gen: cached.Gen, SHA256: cached.SHA256, Stale: true, BuiltAt: parseRFC3339OrZero(cached.BuiltAt)}, nil
 		}
 		return seedResult{}, err
 	}
 	if eerr := extractSnapshotTarball(cs.TarballPath, brainDir); eerr != nil {
 		return seedResult{}, fmt.Errorf("brain: extract fresh snapshot: %w", eerr)
 	}
-	return seedResult{Source: SeedTarball, Gen: cs.Gen, SHA256: cs.SHA256}, nil
+	return seedResult{Source: SeedTarball, Gen: cs.Gen, SHA256: cs.SHA256, BuiltAt: parseRFC3339OrZero(cs.BuiltAt)}, nil
+}
+
+func formatBuiltAt(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+func parseRFC3339OrZero(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // mostRecentCachedSnapshot returns the freshest CachedSnapshot from

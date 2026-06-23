@@ -120,6 +120,23 @@ func openResolvedQueue(opts queueResolveOpts) (*wqueue.Queue, string, error) {
 	return q, dir, nil
 }
 
+// openResolvedQueueReadOnly opens an existing queue without creating
+// dir/wqueue.sqlite or dir/wqueue-attach/ when neither exists yet.
+// Returns wqueue.ErrNotExist when the binding has had no offline
+// activity. Used by `queue list` so a passive look never materialises
+// a queue on disk.
+func openResolvedQueueReadOnly(opts queueResolveOpts) (*wqueue.Queue, string, error) {
+	dir, err := resolveQueueDir(opts)
+	if err != nil {
+		return nil, "", err
+	}
+	q, err := wqueue.OpenReadOnly(dir)
+	if err != nil {
+		return nil, dir, err
+	}
+	return q, dir, nil
+}
+
 func clientQueueListCmd() *cobra.Command {
 	var (
 		opts     queueResolveOpts
@@ -130,8 +147,12 @@ func clientQueueListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "Print queued items, newest first",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			q, dir, err := openResolvedQueue(opts)
+			q, dir, err := openResolvedQueueReadOnly(opts)
 			if err != nil {
+				if errors.Is(err, wqueue.ErrNotExist) {
+					fmt.Fprintln(cmd.OutOrStdout(), "no queue (no offline activity yet)")
+					return nil
+				}
 				return err
 			}
 			defer q.Close()
@@ -272,10 +293,16 @@ Exits non-zero when any item failed.`,
 			sent, failed, lastErr := drainOnce(ctx, q, client, 256)
 			fmt.Fprintf(cmd.OutOrStdout(), "# queue: %s\nsent=%d failed=%d\n",
 				filepath.Join(dir, "wqueue.sqlite"), sent, failed)
-			if failed > 0 {
-				if lastErr != nil {
-					fmt.Fprintf(cmd.OutOrStdout(), "last_error: %s\n", lastErr)
+			if failed > 0 && lastErr != nil {
+				// Distinguish "daemon's down, retry later" (exit 0) from
+				// a genuine internal error like a corrupted DB row or
+				// missing staging file (exit 1).
+				if errors.Is(lastErr, brain.ErrDaemonUnreachable) {
+					depth, _ := q.Depth(ctx)
+					fmt.Fprintf(cmd.OutOrStdout(), "daemon unreachable, %d items still pending\n", depth)
+					return nil
 				}
+				fmt.Fprintf(cmd.OutOrStdout(), "last_error: %s\n", lastErr)
 				return fmt.Errorf("drain-now: %d item(s) failed", failed)
 			}
 			return nil

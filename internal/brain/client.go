@@ -389,7 +389,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("brain: %s %s: %w", method, path, err)
+		return fmt.Errorf("brain: %s %s: %w: %w", method, path, ErrDaemonUnreachable, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

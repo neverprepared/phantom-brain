@@ -222,6 +222,8 @@ func walkAllBindings(out io.Writer, opts gcBrainsOpts, dataHome string) error {
 		return fmt.Errorf("scan %s: %w", pattern, err)
 	}
 	sort.Strings(matches)
+	fmt.Fprintf(out, "Walking all bindings under %s (no profile/vault scope set).\n",
+		filepath.Join(dataHome, "phantom-brain"))
 	if len(matches) == 0 {
 		fmt.Fprintf(out, "no bindings found under %s\n", filepath.Join(dataHome, "phantom-brain"))
 		return nil

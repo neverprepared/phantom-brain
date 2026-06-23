@@ -63,6 +63,12 @@ type learnItem struct {
 
 const learnBatchMax = 100
 
+// queueNoticeCap bounds how many per-item "Queued ..." suffixes
+// appear in the batch output before the loop drops to a single-line
+// summary. Prevents a 100-item offline batch from emitting 100 copies
+// of the same outage notice.
+const queueNoticeCap = 3
+
 func (s *Server) handleLearn(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	items, ok := extractLearnItems(req)
 	if !ok {
@@ -77,6 +83,7 @@ func (s *Server) handleLearn(ctx context.Context, req mcp.CallToolRequest) (*mcp
 
 	var b strings.Builder
 	stored, dups, failed := 0, 0, 0
+	queuedItems := 0
 	for i, it := range items {
 		res, errMsg, success := s.ingestMarkdown(ctx, ingestParams{
 			Subdir:    "curated",
@@ -97,8 +104,21 @@ func (s *Server) handleLearn(ctx context.Context, req mcp.CallToolRequest) (*mcp
 			fmt.Fprintf(&b, "[%d] %s — duplicate (SHA %s)\n", i+1, it.Title, res.SHA[:12])
 		default:
 			stored++
-			fmt.Fprintf(&b, "[%d] %s — stored to %s (SHA %s)%s\n", i+1, it.Title, res.RelativePath, res.SHA[:12], res.Notice)
+			notice := res.Notice
+			if notice != "" {
+				queuedItems++
+			}
+			// Cap per-item notice output: after queueNoticeCap items
+			// have emitted a notice, drop the per-item suffix and let
+			// the batch-level summary line carry the count.
+			if queuedItems > queueNoticeCap {
+				notice = ""
+			}
+			fmt.Fprintf(&b, "[%d] %s — stored to %s (SHA %s)%s\n", i+1, it.Title, res.RelativePath, res.SHA[:12], notice)
 		}
+	}
+	if queuedItems > queueNoticeCap {
+		fmt.Fprintf(&b, "... and %d more pending (%d total queued).\n", queuedItems-queueNoticeCap, queuedItems)
 	}
 
 	header := fmt.Sprintf("brain_learn: %d stored, %d duplicate, %d failed (of %d)\n\n",

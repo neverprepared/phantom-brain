@@ -75,9 +75,10 @@ type Manifest struct {
 	Vault         string `json:"vault"`
 
 	// Parentage. Absent on a greenfield birth (no daemon).
-	ParentGen            *uint64 `json:"parent_gen,omitempty"`
-	ParentSnapshotSHA256 string  `json:"parent_snapshot_sha256,omitempty"`
-	ParentSynthesisID    string  `json:"parent_synthesis_id,omitempty"`
+	ParentGen              *uint64 `json:"parent_gen,omitempty"`
+	ParentSnapshotSHA256   string  `json:"parent_snapshot_sha256,omitempty"`
+	ParentSnapshotBuiltAt  string  `json:"parent_snapshot_built_at,omitempty"` // RFC3339
+	ParentSynthesisID      string  `json:"parent_synthesis_id,omitempty"`
 
 	BornAt string `json:"born_at"`            // RFC3339
 	Status Status `json:"status"`             // alive | shutting_down | dead
