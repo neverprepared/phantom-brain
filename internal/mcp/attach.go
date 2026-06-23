@@ -198,7 +198,7 @@ func (s *Server) handleAttach(ctx context.Context, req mcp.CallToolRequest) (*mc
 			Title:            title,
 			MIMEType:         mimeType,
 			BytesB64:         base64.StdEncoding.EncodeToString(raw),
-			ExtractedText:    description,
+			Description:      description,
 			Tags:             tags,
 			Embedding:        embs[0],
 			MemoryFields:     mf,

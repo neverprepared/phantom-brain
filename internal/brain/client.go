@@ -265,6 +265,7 @@ type AttachRequest struct {
 	Title            string    `json:"title,omitempty"`
 	MIMEType         string    `json:"mime_type,omitempty"`
 	BytesB64         string    `json:"bytes_b64"`
+	Description      string    `json:"description,omitempty"`
 	ExtractedText    string    `json:"extracted_text,omitempty"`
 	Tags             []string  `json:"tags,omitempty"`
 	Embedding        []float32 `json:"embedding,omitempty"`

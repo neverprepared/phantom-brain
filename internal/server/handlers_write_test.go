@@ -347,6 +347,125 @@ func TestHandlerAttach_TagsAndContentType(t *testing.T) {
 	}
 }
 
+// v2.5.1 (#48): handleAttach must write a companion SummaryDoc to
+// pb_summaries so brain_recall can see attachments via the existing
+// summaries-only snapshot export path.
+func TestHandlerAttach_WritesSummaryStub(t *testing.T) {
+	r := startWriteRig(t)
+	defer r.cleanup()
+
+	payload := []byte("attachment body bytes")
+	sha := osearch.SHA256Hex(payload)
+	resp := r.post(t, "/api/brain/attach", AttachRequest{
+		SHA:              sha,
+		OriginalFilename: "note.pdf",
+		Title:            "Important note",
+		MIMEType:         "application/pdf",
+		BytesB64:         base64.StdEncoding.EncodeToString(payload),
+		Description:      "why I kept this",
+		Tags:             []string{"keep"},
+		MemoryFields: MemoryFields{
+			Source: []string{"file:///tmp/note.pdf"},
+		},
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
+	}
+
+	// AttachmentDoc carries Description, NOT ExtractedText (#47 fix).
+	att := r.os.attachments[osearch.DocID("personal", "memory", sha)]
+	if att.Description != "why I kept this" {
+		t.Errorf("AttachmentDoc.Description = %q, want caller text", att.Description)
+	}
+	if att.ExtractedText != "" {
+		t.Errorf("AttachmentDoc.ExtractedText = %q, want empty (pdftotext owns it)", att.ExtractedText)
+	}
+	if att.SummarySHA != sha {
+		t.Errorf("AttachmentDoc.SummarySHA = %q, want %q", att.SummarySHA, sha)
+	}
+
+	// Companion stub in pb_summaries — same SHA, different index.
+	stub, ok := r.os.summaries[osearch.DocID("personal", "memory", sha)]
+	if !ok {
+		t.Fatal("companion SummaryDoc stub not written")
+	}
+	if stub.Kind != osearch.KindAttachmentStub {
+		t.Errorf("stub.Kind = %q, want attachment_stub", stub.Kind)
+	}
+	if stub.RawBody != "why I kept this" {
+		t.Errorf("stub.RawBody = %q, want description", stub.RawBody)
+	}
+	if stub.Title != "Important note" {
+		t.Errorf("stub.Title = %q", stub.Title)
+	}
+	if stub.Reliability != osearch.ReliabilityMedium {
+		t.Errorf("stub.Reliability = %q, want medium", stub.Reliability)
+	}
+	if !strings.HasPrefix(stub.GateReason, "curated") {
+		t.Errorf("stub.GateReason = %q, want curated-prefixed", stub.GateReason)
+	}
+	if len(stub.Attachments) != 1 || stub.Attachments[0] != sha {
+		t.Errorf("stub.Attachments = %v, want [%s]", stub.Attachments, sha)
+	}
+	// Tags include attachment + mime: prefix.
+	hasMime, hasAttachment := false, false
+	for _, tag := range stub.Tags {
+		if tag == "attachment" {
+			hasAttachment = true
+		}
+		if tag == "mime:application/pdf" {
+			hasMime = true
+		}
+	}
+	if !hasAttachment || !hasMime {
+		t.Errorf("stub.Tags = %v, want to include 'attachment' + 'mime:application/pdf'", stub.Tags)
+	}
+	if len(stub.Source) == 0 || stub.Source[0] != "file:///tmp/note.pdf" {
+		t.Errorf("stub.Source = %v, want mirror of req.Source", stub.Source)
+	}
+}
+
+// v2.5.1: re-attaching the same SHA must preserve any pdftotext output
+// the synth worker previously wrote, otherwise every re-attach
+// transiently wipes ExtractedText until the next synth pass.
+func TestHandlerAttach_PreservesExtractedTextOnReattach(t *testing.T) {
+	r := startWriteRig(t)
+	defer r.cleanup()
+
+	payload := []byte("idempotent bytes")
+	sha := osearch.SHA256Hex(payload)
+	// Seed an existing AttachmentDoc with ExtractedText (as if synth ran).
+	r.os.attachments[osearch.DocID("personal", "memory", sha)] = osearch.AttachmentDoc{
+		Profile: "personal", Vault: "memory", SHA: sha,
+		OriginalFilename: "note.pdf",
+		MIMEType:         "application/pdf",
+		ExtractedText:    "prior pdftext from a previous synth pass",
+	}
+
+	resp := r.post(t, "/api/brain/attach", AttachRequest{
+		SHA:              sha,
+		OriginalFilename: "note.pdf",
+		MIMEType:         "application/pdf",
+		BytesB64:         base64.StdEncoding.EncodeToString(payload),
+		Description:      "re-attaching",
+		// req.ExtractedText intentionally empty
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
+	}
+	got := r.os.attachments[osearch.DocID("personal", "memory", sha)]
+	if got.ExtractedText != "prior pdftext from a previous synth pass" {
+		t.Errorf("ExtractedText not preserved on re-attach: got %q", got.ExtractedText)
+	}
+	if got.Description != "re-attaching" {
+		t.Errorf("Description not refreshed on re-attach: got %q", got.Description)
+	}
+}
+
 func TestHandlerAttach_RejectsSHAMismatch(t *testing.T) {
 	r := startWriteRig(t)
 	defer r.cleanup()

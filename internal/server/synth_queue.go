@@ -204,6 +204,18 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 		return nil
 	}
 
+	// Attachment stubs (v2.5.1, #48): before gate/distill, attempt PDF
+	// text extraction and fold it into the stub's RawBody so the
+	// downstream distill pass sees real attachment content rather than
+	// just the caller's description. Non-fatal — a failure leaves the
+	// stub with description-only RawBody, which is still recall-visible.
+	if doc.Kind == osearch.KindAttachmentStub {
+		if err := w.enrichAttachmentStub(ctx, job, doc); err != nil {
+			w.logger.Warn("phantom-brain: attachment stub enrichment failed (non-fatal)",
+				slog.String("sha", job.SHA), slog.String("err", err.Error()))
+		}
+	}
+
 	content := doc.RawBody
 	if content == "" {
 		content = doc.Body // shouldn't happen for handler-fed docs but defensible
@@ -353,6 +365,77 @@ func (w *SynthWorker) upsertEntity(ctx context.Context, job synthJob, src *osear
 		return "", err
 	}
 	return slug, nil
+}
+
+// enrichAttachmentStub is the v2.5.1 attachment path: fold the
+// AttachmentDoc's extracted text into the companion stub SummaryDoc's
+// RawBody so the existing gate + distill + UpsertSummary tail handles
+// the stub like any other summary. Runs pdftotext on demand when the
+// attachment hasn't been extracted yet.
+//
+// Mutates `summary` in place — caller continues with the standard
+// pipeline using the updated RawBody.
+func (w *SynthWorker) enrichAttachmentStub(ctx context.Context, job synthJob, summary *osearch.SummaryDoc) error {
+	att, err := w.os.GetAttachment(ctx, job.Profile, job.Vault, job.SHA)
+	if err != nil {
+		return err
+	}
+	if att == nil {
+		// Stub without companion AttachmentDoc — legacy or torn-write.
+		// Nothing to enrich from; stub still gets synthesised on its
+		// description-only RawBody.
+		return nil
+	}
+
+	// Run pdftotext when text is absent and the mime is something we
+	// can handle. Failures here are soft — the stub falls back to
+	// description-only RawBody.
+	if att.ExtractedText == "" && att.MIMEType == "application/pdf" && w.attach != nil && w.pdfExtractor != nil {
+		body, ferr := w.attach.GetAttachmentBytes(ctx, att.MinIOKey, 0)
+		if ferr != nil {
+			w.logger.Warn("phantom-brain: pdf fetch failed (non-fatal)",
+				slog.String("sha", job.SHA), slog.String("key", att.MinIOKey),
+				slog.String("err", ferr.Error()))
+		} else {
+			text, eerr := w.pdfExtractor(ctx, body)
+			if eerr != nil {
+				w.logger.Warn("phantom-brain: pdf extract failed (non-fatal)",
+					slog.String("sha", job.SHA), slog.String("err", eerr.Error()))
+			} else if text != "" {
+				att.ExtractedText = text
+			}
+		}
+	}
+
+	// Backfill the AttachmentDoc <-> SummaryDoc cross-link when missing.
+	dirty := false
+	if att.SummarySHA == "" {
+		att.SummarySHA = summary.SHA
+		dirty = true
+	}
+	if att.ExtractedText != "" {
+		dirty = true // persist newly-extracted text
+	}
+	if dirty {
+		if err := w.os.UpsertAttachment(ctx, *att, false); err != nil {
+			return err
+		}
+	}
+
+	// Compose the stub's RawBody. Description first (curator intent),
+	// extracted text after (machine signal). Either alone is fine.
+	desc := strings.TrimSpace(att.Description)
+	extracted := strings.TrimSpace(att.ExtractedText)
+	switch {
+	case desc != "" && extracted != "":
+		summary.RawBody = desc + "\n\n---\n\n" + extracted
+	case extracted != "":
+		summary.RawBody = extracted
+	case desc != "":
+		summary.RawBody = desc
+		// else: leave whatever the stub already carried (likely empty).
+	}
+	return nil
 }
 
 // processAttachmentJob runs the attachment-specific synth pass.

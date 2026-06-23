@@ -361,6 +361,172 @@ func TestSynthWorker_NonPDFAttachmentSkipped(t *testing.T) {
 	}
 }
 
+// v2.5.1 (#48): attachment stub + PDF — synth folds pdftotext output
+// into the stub's RawBody/Body so brain_recall sees attachment content.
+func TestSynthWorker_AttachmentStub_PDFEnrichesSummary(t *testing.T) {
+	fos := newFakeOS()
+	store := newCaptureStore()
+	sha := "pdfsha"
+	key := "p/v/attachments/" + sha + ".pdf"
+	store.puts[key] = []byte("%PDF-fake")
+	now := time.Now().UTC()
+	// Companion AttachmentDoc and stub SummaryDoc at the same SHA.
+	fos.attachments[osearch.DocID("p", "v", sha)] = osearch.AttachmentDoc{
+		Profile: "p", Vault: "v", SHA: sha,
+		OriginalFilename: "doc.pdf",
+		MIMEType:         "application/pdf",
+		MinIOKey:         key,
+		Description:      "kept for billing",
+		CreatedAt:        now,
+	}
+	fos.summaries[osearch.DocID("p", "v", sha)] = osearch.SummaryDoc{
+		Profile: "p", Vault: "v", SHA: sha,
+		Kind:        osearch.KindAttachmentStub,
+		Title:       "doc.pdf",
+		RawBody:     "kept for billing",
+		Reliability: osearch.ReliabilityMedium,
+		GateReason:  "curated (attachment)",
+		CreatedAt:   now, UpdatedAt: now,
+	}
+
+	extractor := func(_ context.Context, body []byte) (string, error) {
+		return "INVOICE TOTAL $42", nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := NewSynthWorker(SynthWorkerOpts{
+		OSClient:     fos,
+		Logger:       slog.New(slog.DiscardHandler),
+		BufferSize:   8,
+		DisableCLI:   true,
+		Attach:       store,
+		PDFExtractor: extractor,
+	})
+	w.Start(ctx)
+	defer w.Stop()
+
+	w.Enqueue("p", "v", sha)
+	waitUntil(t, 5*time.Second, func() bool {
+		d, _ := fos.GetSummary(context.Background(), "p", "v", sha)
+		return d != nil && d.Synthesised
+	})
+
+	stub, _ := fos.GetSummary(context.Background(), "p", "v", sha)
+	if !strings.Contains(stub.RawBody, "kept for billing") {
+		t.Errorf("stub.RawBody dropped description: %q", stub.RawBody)
+	}
+	if !strings.Contains(stub.RawBody, "INVOICE TOTAL $42") {
+		t.Errorf("stub.RawBody missing pdftotext output: %q", stub.RawBody)
+	}
+	if stub.Body == "" {
+		t.Error("stub.Body empty after synth (should fall back to RawBody at minimum)")
+	}
+	att, _ := fos.GetAttachment(context.Background(), "p", "v", sha)
+	if att.ExtractedText != "INVOICE TOTAL $42" {
+		t.Errorf("AttachmentDoc.ExtractedText = %q", att.ExtractedText)
+	}
+	if att.SummarySHA != sha {
+		t.Errorf("AttachmentDoc.SummarySHA cross-link missing: %q", att.SummarySHA)
+	}
+}
+
+// Idempotency: re-enqueueing a synthesised stub MUST NOT re-run pdftotext.
+func TestSynthWorker_AttachmentStub_Idempotent(t *testing.T) {
+	fos := newFakeOS()
+	store := newCaptureStore()
+	sha := "pdfsha2"
+	key := "p/v/attachments/" + sha + ".pdf"
+	store.puts[key] = []byte("%PDF-fake")
+	now := time.Now().UTC()
+	fos.attachments[osearch.DocID("p", "v", sha)] = osearch.AttachmentDoc{
+		Profile: "p", Vault: "v", SHA: sha,
+		OriginalFilename: "doc.pdf",
+		MIMEType:         "application/pdf",
+		MinIOKey:         key,
+		Description:      "ctx",
+		CreatedAt:        now,
+	}
+	fos.summaries[osearch.DocID("p", "v", sha)] = osearch.SummaryDoc{
+		Profile: "p", Vault: "v", SHA: sha,
+		Kind: osearch.KindAttachmentStub, Title: "x", RawBody: "ctx",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	called := 0
+	extractor := func(_ context.Context, _ []byte) (string, error) {
+		called++
+		return "extracted", nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := NewSynthWorker(SynthWorkerOpts{
+		OSClient: fos, Logger: slog.New(slog.DiscardHandler),
+		BufferSize: 8, DisableCLI: true,
+		Attach: store, PDFExtractor: extractor,
+	})
+	w.Start(ctx)
+	defer w.Stop()
+
+	w.Enqueue("p", "v", sha)
+	waitUntil(t, 5*time.Second, func() bool {
+		d, _ := fos.GetSummary(context.Background(), "p", "v", sha)
+		return d != nil && d.Synthesised
+	})
+	w.Enqueue("p", "v", sha)
+	time.Sleep(150 * time.Millisecond)
+	if called != 1 {
+		t.Errorf("extractor called %d times on re-enqueue of synthesised stub, want 1", called)
+	}
+}
+
+// Non-PDF stub: synth still completes; RawBody stays description-only.
+func TestSynthWorker_AttachmentStub_NonPDF(t *testing.T) {
+	fos := newFakeOS()
+	store := newCaptureStore()
+	sha := "imgsha"
+	key := "p/v/attachments/" + sha + ".png"
+	store.puts[key] = []byte("fake-png")
+	now := time.Now().UTC()
+	fos.attachments[osearch.DocID("p", "v", sha)] = osearch.AttachmentDoc{
+		Profile: "p", Vault: "v", SHA: sha,
+		OriginalFilename: "img.png",
+		MIMEType:         "image/png",
+		MinIOKey:         key,
+		Description:      "screenshot",
+		CreatedAt:        now,
+	}
+	fos.summaries[osearch.DocID("p", "v", sha)] = osearch.SummaryDoc{
+		Profile: "p", Vault: "v", SHA: sha,
+		Kind: osearch.KindAttachmentStub, Title: "img.png", RawBody: "screenshot",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	called := 0
+	extractor := func(_ context.Context, _ []byte) (string, error) {
+		called++
+		return "no", nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := NewSynthWorker(SynthWorkerOpts{
+		OSClient: fos, Logger: slog.New(slog.DiscardHandler),
+		BufferSize: 8, DisableCLI: true,
+		Attach: store, PDFExtractor: extractor,
+	})
+	w.Start(ctx)
+	defer w.Stop()
+	w.Enqueue("p", "v", sha)
+	waitUntil(t, 5*time.Second, func() bool {
+		d, _ := fos.GetSummary(context.Background(), "p", "v", sha)
+		return d != nil && d.Synthesised
+	})
+	if called != 0 {
+		t.Errorf("extractor called %d on non-pdf stub, want 0", called)
+	}
+	stub, _ := fos.GetSummary(context.Background(), "p", "v", sha)
+	if !strings.Contains(stub.RawBody, "screenshot") {
+		t.Errorf("non-pdf stub lost description: %q", stub.RawBody)
+	}
+}
+
 // failingOS lets us assert that an UpsertSummary error doesn't crash
 // the worker.
 type failingOS struct{ *fakeOS }

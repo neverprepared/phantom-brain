@@ -156,6 +156,7 @@ type AttachRequest struct {
 	Title            string    `json:"title,omitempty"`
 	MIMEType         string    `json:"mime_type,omitempty"`
 	BytesB64         string    `json:"bytes_b64"`
+	Description      string    `json:"description,omitempty"`
 	ExtractedText    string    `json:"extracted_text,omitempty"`
 	Tags             []string  `json:"tags,omitempty"`
 	Embedding        []float32 `json:"embedding,omitempty"`
@@ -393,6 +394,7 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:        now,
 		CapturedAt:       req.CapturedAt,
 		MinIOKey:         key,
+		Description:      req.Description,
 		ExtractedText:    req.ExtractedText,
 		Kind:             kind,
 		MemoryType:       osearch.MemoryType(req.MemoryType),
@@ -400,10 +402,59 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 		References:       req.References,
 		Tags:             req.Tags,
 		Embedding:        req.Embedding,
+		SummarySHA:       req.SHA, // companion stub lives at the same SHA in pb_summaries
+	}
+	// Preserve existing pdftotext output on re-attach. Without this guard
+	// every re-attach (same SHA, same bytes) blows away the synth pass's
+	// ExtractedText until the next synth pass re-runs pdftotext.
+	if req.ExtractedText == "" {
+		if existing, _ := d.osClient.GetAttachment(r.Context(), binding.Key.Profile, binding.Key.Vault, req.SHA); existing != nil && existing.ExtractedText != "" {
+			doc.ExtractedText = existing.ExtractedText
+		}
 	}
 	if err := d.osClient.UpsertAttachment(r.Context(), doc, false); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch upsert failed: "+err.Error(), nil)
+		return
+	}
+
+	// Companion SummaryDoc — the fix for #48. Sits in pb_summaries so
+	// the existing summaries-only snapshot export carries it to agents,
+	// where brain_recall can FTS-hit on description + (post-synth) the
+	// extracted attachment body. Same SHA, different index — no collision.
+	stubTitle := req.Title
+	if strings.TrimSpace(stubTitle) == "" {
+		stubTitle = req.OriginalFilename
+	}
+	stubTags := append([]string(nil), req.Tags...)
+	stubTags = append(stubTags, "attachment")
+	if req.MIMEType != "" {
+		stubTags = append(stubTags, "mime:"+req.MIMEType)
+	}
+	stub := osearch.SummaryDoc{
+		Profile:     binding.Key.Profile,
+		Vault:       binding.Key.Vault,
+		SHA:         req.SHA,
+		Kind:        osearch.KindAttachmentStub,
+		MemoryType:  osearch.MemoryType(req.MemoryType),
+		SourcePath:  "attachment://" + req.SHA,
+		Source:      req.Source,
+		References:  req.References,
+		CapturedAt:  req.CapturedAt,
+		Title:       stubTitle,
+		RawBody:     req.Description, // pdftotext fills this in synth
+		Tags:        stubTags,
+		Attachments: []string{req.SHA},
+		Reliability: osearch.ReliabilityMedium,
+		GateReason:  "curated (attachment)",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		Synthesised: false,
+		Embedding:   req.Embedding,
+	}
+	if err := d.osClient.UpsertSummary(r.Context(), stub, false); err != nil {
+		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
+			"opensearch summary stub upsert failed: "+err.Error(), nil)
 		return
 	}
 	d.synth.Enqueue(binding.Key.Profile, binding.Key.Vault, req.SHA)

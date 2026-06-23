@@ -181,6 +181,11 @@ type AttachmentDoc struct {
 	//   <profile>/<vault>/attachments/<sha256><ext>
 	MinIOKey string `json:"minio_key"`
 
+	// Description is the caller-supplied human context (the "why I'm
+	// keeping this"). Distinct from ExtractedText, which is reserved
+	// for machine-extracted body (pdftotext / textutil / OCR).
+	Description string `json:"description,omitempty"`
+
 	// ExtractedText is whatever pdftotext / textutil / tesseract /
 	// plaintext-read produced from the binary. Indexed for FTS so
 	// brain_recall can hit attachments by content.
