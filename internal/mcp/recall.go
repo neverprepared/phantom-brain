@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
@@ -82,7 +83,19 @@ func (s *Server) handleRecall(ctx context.Context, req mcp.CallToolRequest) (*mc
 		return mcp.NewToolResultError(fmt.Sprintf("hybrid search: %v", err)), nil
 	}
 
-	return mcp.NewToolResultText(renderRecallHits(query, hits)), nil
+	// Issue #61: append a staleness footer when the parent snapshot
+	// is more than an hour old. Helps the agent reason about why a
+	// just-written perceive wouldn't show up yet (snapshot rebuild
+	// + sync are async). Lifecycle is nil in legacy mode — skip.
+	var snapAge time.Duration
+	var snapGen uint64
+	if lc := s.deps.Lifecycle; lc != nil {
+		snapAge = lc.SnapshotAge(time.Now())
+		if pg := lc.Snapshot().ParentGen; pg != nil {
+			snapGen = *pg
+		}
+	}
+	return mcp.NewToolResultText(renderRecallHits(query, hits, snapGen, snapAge)), nil
 }
 
 // renderRecallHits formats search results for the agent. The output is
@@ -94,9 +107,9 @@ func (s *Server) handleRecall(ctx context.Context, req mcp.CallToolRequest) (*mc
 // full without a second tool call. Attachment hits include a hint that
 // the body lives behind GET /api/brain/attach/<sha> (presigned MinIO
 // URL), since the snippet alone won't convey the binary content.
-func renderRecallHits(query string, hits []index.Hit) string {
+func renderRecallHits(query string, hits []index.Hit, snapGen uint64, snapAge time.Duration) string {
 	if len(hits) == 0 {
-		return fmt.Sprintf("No results for %q.", query)
+		return fmt.Sprintf("No results for %q.%s", query, snapshotFooter(snapGen, snapAge))
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d result(s) for %q:\n\n", len(hits), query)
@@ -128,7 +141,20 @@ func renderRecallHits(query string, hits []index.Hit) string {
 		}
 		b.WriteString("\n")
 	}
+	b.WriteString(snapshotFooter(snapGen, snapAge))
 	return b.String()
+}
+
+// snapshotFooter returns a one-line staleness disclosure when the
+// parent snapshot is more than an hour old, otherwise empty.
+func snapshotFooter(gen uint64, age time.Duration) string {
+	if age <= time.Hour {
+		return ""
+	}
+	if gen == 0 {
+		return fmt.Sprintf("\n_Snapshot built %s ago._\n", humanizeAge(age))
+	}
+	return fmt.Sprintf("\n_Snapshot gen %d, built %s ago._\n", gen, humanizeAge(age))
 }
 
 // kindIndicator renders the short bracketed label that follows the

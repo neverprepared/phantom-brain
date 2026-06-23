@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/neverprepared/phantom-brain/internal/brain"
+	"github.com/neverprepared/phantom-brain/internal/brain/wqueue"
 	"github.com/neverprepared/phantom-brain/internal/canonicalize"
 	"github.com/neverprepared/phantom-brain/internal/index"
 	"github.com/neverprepared/phantom-brain/internal/osearch"
@@ -45,9 +46,13 @@ type ingestParams struct {
 
 // ingestResult mirrors what callers want to render back to the user.
 type ingestResult struct {
-	Status      string // "stored" or "duplicate"
+	Status       string // "stored" or "duplicate"
 	RelativePath string
-	SHA         string
+	SHA          string
+	// Notice is empty when the daemon accepted the write directly.
+	// When the daemon was unreachable the write was persisted to
+	// wqueue and Notice carries the user-facing "Queued ..." line.
+	Notice string
 }
 
 // ingestMarkdown is the shared write+index path. Returns ingestResult
@@ -142,6 +147,7 @@ func (s *Server) ingestMarkdown(ctx context.Context, p ingestParams) (*ingestRes
 			}
 			return mf
 		}
+		var notice string
 		switch p.Subdir {
 		case "gathered":
 			mf := brain.MemoryFields{
@@ -153,14 +159,21 @@ func (s *Server) ingestMarkdown(ctx context.Context, p ingestParams) (*ingestRes
 				mf.Source = []string{p.SourceURL}
 			}
 			mf = applyOverrides(mf)
-			if _, err := client.Perceive(ctx, brain.PerceiveRequest{
+			req := brain.PerceiveRequest{
 				SHA: sha, Title: p.Title, Body: p.Content,
 				URL: p.SourceURL, SourcePath: dest, Tags: tags,
 				Embedding:    embs[0],
 				MemoryFields: mf,
-			}); err != nil {
+			}
+			res, err := s.enqueueAndAttempt(ctx, wqueue.KindPerceive, sha, req, nil, "",
+				func(ctx context.Context) error {
+					_, e := client.Perceive(ctx, req)
+					return e
+				})
+			if err != nil {
 				return nil, fmt.Sprintf("daemon perceive: %v", err), false
 			}
+			notice = res.Notice
 		case "curated":
 			mf := brain.MemoryFields{
 				Kind:       string(osearch.KindNote),
@@ -168,19 +181,30 @@ func (s *Server) ingestMarkdown(ctx context.Context, p ingestParams) (*ingestRes
 				CapturedAt: &now,
 			}
 			mf = applyOverrides(mf)
-			if _, err := client.Learn(ctx, brain.LearnRequest{
+			kind := wqueue.KindLearn
+			if p.KindOverride == string(osearch.KindTaskSummary) {
+				kind = wqueue.KindTaskPromote
+			}
+			req := brain.LearnRequest{
 				SHA: sha, Title: p.Title, Body: p.Content,
 				SourcePath: dest, Tags: tags,
 				Embedding:    embs[0],
 				MemoryFields: mf,
-			}); err != nil {
+			}
+			res, err := s.enqueueAndAttempt(ctx, kind, sha, req, nil, "",
+				func(ctx context.Context) error {
+					_, e := client.Learn(ctx, req)
+					return e
+				})
+			if err != nil {
 				return nil, fmt.Sprintf("daemon learn: %v", err), false
 			}
+			notice = res.Notice
 		}
 		if s.deps.Lifecycle != nil {
 			s.deps.Lifecycle.RecordWrite()
 		}
-		return &ingestResult{Status: "stored", RelativePath: dest, SHA: sha}, "", true
+		return &ingestResult{Status: "stored", RelativePath: dest, SHA: sha, Notice: notice}, "", true
 	}
 
 	// Legacy fallback: no daemon client — write locally so the v1.x

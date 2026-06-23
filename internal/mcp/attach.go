@@ -14,6 +14,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/neverprepared/phantom-brain/internal/brain"
+	"github.com/neverprepared/phantom-brain/internal/brain/wqueue"
 	"github.com/neverprepared/phantom-brain/internal/canonicalize"
 	"github.com/neverprepared/phantom-brain/internal/index"
 	"github.com/neverprepared/phantom-brain/internal/osearch"
@@ -192,25 +193,36 @@ func (s *Server) handleAttach(ctx context.Context, req mcp.CallToolRequest) (*mc
 		if sourceURL != "" {
 			mf.Source = append(mf.Source, sourceURL)
 		}
-		if _, err := client.Attach(ctx, brain.AttachRequest{
+		// Queue payload omits BytesB64 — bytes are staged to disk
+		// by wqueue under <vault>/wqueue-attach/<sha><ext> so the
+		// sqlite row stays KB-scale. The live attempt below uses
+		// liveReq with BytesB64 populated.
+		queueReq := brain.AttachRequest{
 			SHA:              blobSHA,
 			OriginalFilename: canonicalize.Filename(filepath.Base(filePath)),
 			Title:            title,
 			MIMEType:         mimeType,
-			BytesB64:         base64.StdEncoding.EncodeToString(raw),
 			Description:      description,
 			Tags:             tags,
 			Embedding:        embs[0],
 			MemoryFields:     mf,
-		}); err != nil {
+		}
+		liveReq := queueReq
+		liveReq.BytesB64 = base64.StdEncoding.EncodeToString(raw)
+		res, err := s.enqueueAndAttempt(ctx, wqueue.KindAttach, blobSHA, queueReq, raw, ext,
+			func(ctx context.Context) error {
+				_, e := client.Attach(ctx, liveReq)
+				return e
+			})
+		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("daemon attach: %v", err)), nil
 		}
 		if s.deps.Lifecycle != nil {
 			s.deps.Lifecycle.RecordWrite()
 		}
 		return mcp.NewToolResultText(fmt.Sprintf(
-			"Attached %d bytes via daemon. Blob SHA: %s.",
-			st.Size(), blobSHA,
+			"Attached %d bytes via daemon. Blob SHA: %s.%s",
+			st.Size(), blobSHA, res.Notice,
 		)), nil
 	}
 

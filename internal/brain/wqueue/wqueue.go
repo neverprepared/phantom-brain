@@ -150,6 +150,9 @@ func (q *Queue) Close() error {
 // Dir returns the queue's root directory. Useful for ops tooling.
 func (q *Queue) Dir() string { return q.dir }
 
+// StageDir returns the staging directory holding attachment bytes.
+func (q *Queue) StageDir() string { return q.attachDir }
+
 // Enqueue persists one item. For KindAttach the bytes are copied to
 // the staging directory BEFORE the row inserts, so a crash mid-Enqueue
 // leaves an orphan file (recoverable via Cleanup) rather than a row

@@ -48,11 +48,15 @@ type Lifecycle struct {
 
 	// v3.1 (#61): write-ahead queue + connectivity state + drainer
 	// goroutine. queue and conn are nil in legacy BRAIN_VAULT_PATH
-	// mode — call sites MUST nil-guard before use.
-	queue     *wqueue.Queue
-	conn      *Connectivity
-	drainStop context.CancelFunc
-	drainDone chan struct{}
+	// mode — call sites MUST nil-guard before use. snapshotBuiltAt
+	// records the daemon-side build timestamp of the parent_gen
+	// snapshot the agent currently has; refreshed by the drainer.
+	queue           *wqueue.Queue
+	conn            *Connectivity
+	drainStop       context.CancelFunc
+	drainDone       chan struct{}
+	snapshotBuiltAt time.Time
+	snapshotMu      sync.RWMutex
 }
 
 // StartOpts narrows what callers must supply to instantiate a
@@ -186,35 +190,56 @@ func Start(opts StartOpts) (*Lifecycle, error) {
 // handlers branch on this to decide local-only vs POST-to-daemon.
 func (l *Lifecycle) Client() *Client { return l.client }
 
-// Queue returns the per-Lifecycle write-ahead queue, or nil when the
-// Lifecycle was started in legacy BRAIN_VAULT_PATH mode (no daemon).
-// Callers MUST nil-guard before use.
-func (l *Lifecycle) Queue() *wqueue.Queue { return l.queue }
-
-// Connectivity returns the per-Lifecycle daemon connectivity state,
-// or nil in legacy mode. Callers MUST nil-guard before use.
-func (l *Lifecycle) Connectivity() *Connectivity { return l.conn }
-
-// SnapshotAge returns the age of the parent snapshot this brain was
-// born against, approximated as time since BornAt (a brand-new brain
-// just pulled the latest snapshot, so age ≈ now - born_at). Returns
-// 0 when the manifest has no BornAt or now is before BornAt.
-func (l *Lifecycle) SnapshotAge(now time.Time) time.Duration {
-	l.mu.Lock()
-	m := l.manifest
-	l.mu.Unlock()
-	if m == nil || m.BornAt == "" {
-		return 0
+// Queue returns the per-Lifecycle write-ahead queue. Nil in legacy
+// BRAIN_VAULT_PATH mode.
+func (l *Lifecycle) Queue() *wqueue.Queue {
+	if l == nil {
+		return nil
 	}
-	born, err := time.Parse(time.RFC3339, m.BornAt)
-	if err != nil {
-		return 0
-	}
-	if now.Before(born) {
-		return 0
-	}
-	return now.Sub(born)
+	return l.queue
 }
+
+// Connectivity returns the per-Lifecycle daemon-reachability tracker.
+// Nil in legacy mode. The returned holder's methods are nil-receiver
+// tolerant.
+func (l *Lifecycle) Connectivity() *Connectivity {
+	if l == nil {
+		return nil
+	}
+	return l.conn
+}
+
+// SetSnapshotBuiltAt records the daemon-side built_at timestamp for
+// the snapshot this brain was birthed from (refreshed by the drainer
+// each cycle so the recall footer stays accurate after rebuilds).
+// Zero means unknown.
+func (l *Lifecycle) SetSnapshotBuiltAt(t time.Time) {
+	if l == nil {
+		return
+	}
+	l.snapshotMu.Lock()
+	defer l.snapshotMu.Unlock()
+	l.snapshotBuiltAt = t
+}
+
+// SnapshotAge returns how long ago the parent snapshot was built on
+// the daemon. Returns 0 when unknown.
+func (l *Lifecycle) SnapshotAge(now time.Time) time.Duration {
+	if l == nil {
+		return 0
+	}
+	l.snapshotMu.RLock()
+	defer l.snapshotMu.RUnlock()
+	if l.snapshotBuiltAt.IsZero() {
+		return 0
+	}
+	d := now.Sub(l.snapshotBuiltAt)
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
 
 // RecordWrite is the hook ingest handlers (brain_perceive,
 // brain_learn, brain_attach) call after a successful write so the
@@ -371,6 +396,14 @@ func (l *Lifecycle) Shutdown(ctx context.Context) (*DeathResult, error) {
 		l.mu.Unlock()
 		<-l.ckptDone
 		l.mu.Lock()
+	}
+	// Close the write-ahead queue before Death so the underlying
+	// sqlite file is released cleanly. The drainer goroutine (Stream
+	// B) will already have shut down via its own ctx; closing here
+	// is just the handle release.
+	if l.queue != nil {
+		_ = l.queue.Close()
+		l.queue = nil
 	}
 	res, err := Death(DeathOpts{
 		Agent:    l.agent,
