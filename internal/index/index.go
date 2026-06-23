@@ -9,9 +9,12 @@
 //
 // # Schema
 //
-//	vec_map(rowid PK, sha TEXT UNIQUE, source_path TEXT, updated_at TEXT)
+//	vec_map(rowid PK, sha TEXT UNIQUE, source_path TEXT, updated_at TEXT,
+//	        title TEXT, kind TEXT, tags TEXT)
 //	    -- bookkeeping: maps content SHA to its source file and emit time
-//	    -- so sync can skip already-embedded content in O(1).
+//	    -- so sync can skip already-embedded content in O(1). title/kind/
+//	    -- tags are denormalised here so renderRecallHits can describe a
+//	    -- hit without a second hop into fts_memories.
 //
 //	vec_embeddings USING vec0(embedding float[<dims>])
 //	    -- the actual vectors. vec_embeddings.rowid == vec_map.rowid.
@@ -34,6 +37,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	pbsqlite "github.com/neverprepared/mcp-phantom-brain/internal/sqlite"
 )
@@ -93,9 +97,19 @@ func applySchema(db *sql.DB, dims int) error {
 		    rowid       INTEGER PRIMARY KEY AUTOINCREMENT,
 		    sha         TEXT NOT NULL UNIQUE,
 		    source_path TEXT NOT NULL,
-		    updated_at  TEXT NOT NULL
+		    updated_at  TEXT NOT NULL,
+		    title       TEXT NOT NULL DEFAULT '',
+		    kind        TEXT NOT NULL DEFAULT '',
+		    tags        TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_vec_map_source ON vec_map(source_path)`,
+		// Backfill columns when reopening a snapshot built by an older
+		// daemon that wrote only the original four columns. SQLite has
+		// no IF NOT EXISTS for ADD COLUMN; the duplicate-column error is
+		// swallowed in applySchema below.
+		`ALTER TABLE vec_map ADD COLUMN title TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE vec_map ADD COLUMN kind  TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE vec_map ADD COLUMN tags  TEXT NOT NULL DEFAULT ''`,
 		fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec0(
 		    embedding float[%d]
 		)`, dims),
@@ -109,10 +123,24 @@ func applySchema(db *sql.DB, dims int) error {
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
+			if isDuplicateColumnErr(err) {
+				continue
+			}
 			return fmt.Errorf("apply schema: %w", err)
 		}
 	}
 	return nil
+}
+
+// isDuplicateColumnErr matches SQLite's "duplicate column name" error
+// raised when an ALTER TABLE ADD COLUMN runs against a table that
+// already has the column. Treated as a no-op so schema application is
+// idempotent across snapshot generations.
+func isDuplicateColumnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "duplicate column name")
 }
 
 // ErrDimMismatch is returned when Upsert receives an embedding whose

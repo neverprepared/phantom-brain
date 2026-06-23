@@ -31,6 +31,12 @@ type Record struct {
 	// Body is the markdown body without the frontmatter block.
 	Body string
 
+	// Kind is the SummaryDoc kind ("note", "web_scrape",
+	// "attachment_stub", "task_summary", ...). Stored on vec_map so
+	// recall renders can label hits without a daemon round-trip.
+	// Empty string is tolerated for legacy records.
+	Kind string
+
 	// Embedding is the dense vector. Length must equal Index.Dims().
 	Embedding []float32
 }
@@ -98,8 +104,8 @@ func (i *Index) Upsert(ctx context.Context, r Record) error {
 
 	if existing {
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE vec_map SET source_path = ?, updated_at = ? WHERE rowid = ?`,
-			r.SourcePath, now, rowid,
+			`UPDATE vec_map SET source_path = ?, updated_at = ?, title = ?, kind = ?, tags = ? WHERE rowid = ?`,
+			r.SourcePath, now, r.Title, r.Kind, r.Tags, rowid,
 		); err != nil {
 			return fmt.Errorf("index: Upsert: vec_map update: %w", err)
 		}
@@ -111,8 +117,8 @@ func (i *Index) Upsert(ctx context.Context, r Record) error {
 		}
 	} else {
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO vec_map(sha, source_path, updated_at) VALUES (?, ?, ?)`,
-			r.SHA, r.SourcePath, now,
+			`INSERT INTO vec_map(sha, source_path, updated_at, title, kind, tags) VALUES (?, ?, ?, ?, ?, ?)`,
+			r.SHA, r.SourcePath, now, r.Title, r.Kind, r.Tags,
 		)
 		if err != nil {
 			return fmt.Errorf("index: Upsert: vec_map insert: %w", err)

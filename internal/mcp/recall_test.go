@@ -1,6 +1,11 @@
 package mcp
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/neverprepared/mcp-phantom-brain/internal/index"
+)
 
 func TestFtsPhrase(t *testing.T) {
 	cases := map[string]string{
@@ -29,5 +34,75 @@ func TestFtsPhrase(t *testing.T) {
 		if got := ftsPhrase(in); got != want {
 			t.Errorf("ftsPhrase(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestKindIndicator(t *testing.T) {
+	cases := []struct {
+		kind, tags, want string
+	}{
+		{"note", "", "[note]"},
+		{"web_scrape", "", "[web]"},
+		{"task_summary", "", "[task]"},
+		{"email_import", "", "[email]"},
+		{"attachment_stub", "mime:application/pdf attachment", "[attachment pdf]"},
+		{"attachment_stub", "attachment mime:image/png", "[attachment png]"},
+		{"attachment_stub", "attachment", "[attachment]"},
+		{"attachment_stub", "mime:text", "[attachment text]"},
+		{"", "", "[unknown]"},
+		{"future_kind", "", "[future_kind]"},
+	}
+	for _, c := range cases {
+		if got := kindIndicator(c.kind, c.tags); got != c.want {
+			t.Errorf("kindIndicator(%q,%q) = %q, want %q", c.kind, c.tags, got, c.want)
+		}
+	}
+}
+
+func TestRenderRecallHitsIncludesTitleKindSnippet(t *testing.T) {
+	hits := []index.Hit{
+		{
+			SHA: "deadbeef", SourcePath: "Raw/curated/2026-tax.md",
+			Title: "Tax forms 2026", Kind: "note",
+			Snippet: "Short body excerpt.",
+			Score:   0.123, VectorRank: 1, TextRank: 2,
+		},
+		{
+			SHA: "cafebabe", SourcePath: "attachment://cafebabe",
+			Title: "1099-misc-2025.pdf", Kind: "attachment_stub",
+			Tags:    "attachment mime:application/pdf",
+			Snippet: "(binary attachment — see fetch hint)",
+			Score:   0.05, VectorRank: 0, TextRank: 3,
+		},
+	}
+	out := renderRecallHits("tax", hits)
+
+	wantSubs := []string{
+		"## 1. Tax forms 2026 [note]",
+		"- SHA: `deadbeef`",
+		"- Path: `Raw/curated/2026-tax.md`",
+		"- Snippet: Short body excerpt.",
+		"## 2. 1099-misc-2025.pdf [attachment pdf]",
+		"- Fetch via `GET /api/brain/attach/cafebabe`",
+	}
+	for _, s := range wantSubs {
+		if !strings.Contains(out, s) {
+			t.Errorf("output missing %q\n--full--\n%s", s, out)
+		}
+	}
+
+	// Non-attachment hits must not get the fetch hint.
+	if strings.Contains(strings.SplitN(out, "## 2.", 2)[0], "/api/brain/attach/") {
+		t.Errorf("note hit got attachment fetch hint")
+	}
+}
+
+func TestRenderRecallHitsFallsBackToPathWhenTitleEmpty(t *testing.T) {
+	hits := []index.Hit{{
+		SHA: "x", SourcePath: "Wiki/x.md", Kind: "web_scrape", Score: 1,
+	}}
+	out := renderRecallHits("q", hits)
+	if !strings.Contains(out, "## 1. Wiki/x.md [web]") {
+		t.Errorf("fallback heading missing: %s", out)
 	}
 }

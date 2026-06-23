@@ -240,6 +240,7 @@ func writeHitToIndex(ctx context.Context, h osapi.SearchHit, opts ExportOptions,
 		Title:      doc.Title,
 		Tags:       strings.Join(doc.Tags, " "),
 		Body:       body,
+		Kind:       string(doc.Kind),
 		Embedding:  doc.Embedding,
 	}
 	if rec.SourcePath == "" {

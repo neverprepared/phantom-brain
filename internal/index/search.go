@@ -4,12 +4,31 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // Hit is one search result row.
 type Hit struct {
 	SHA        string
 	SourcePath string
+
+	// Title is the doc's title (from SummaryDoc.Title at export time).
+	// Empty when the snapshot was produced by a pre-fix/49 daemon.
+	Title string
+
+	// Kind is the SummaryDoc kind ("note", "web_scrape",
+	// "attachment_stub", "task_summary", ...). Empty for legacy rows.
+	Kind string
+
+	// Tags is the space-joined tag blob (same wire shape as the
+	// fts_memories.tags column). Render consumers split on whitespace
+	// to extract prefixed facets like "mime:application/pdf".
+	Tags string
+
+	// Snippet is the first ~150 chars of the doc body, frontmatter
+	// stripped and newlines collapsed. Populated by the hybrid search
+	// path so renderRecallHits can show context without a second hop.
+	Snippet string
 
 	// Score is the result's fused score (higher is better). For
 	// SearchVector this is cosine similarity converted from distance;
@@ -42,7 +61,7 @@ func (i *Index) SearchVector(ctx context.Context, query []float32, limit int) ([
 	}
 
 	rows, err := i.sql.QueryContext(ctx, `
-		SELECT m.sha, m.source_path, v.distance
+		SELECT m.sha, m.source_path, m.title, m.kind, m.tags, v.distance
 		FROM vec_embeddings v
 		JOIN vec_map m ON m.rowid = v.rowid
 		WHERE v.embedding MATCH ? AND k = ?
@@ -57,16 +76,19 @@ func (i *Index) SearchVector(ctx context.Context, query []float32, limit int) ([
 	rank := 0
 	for rows.Next() {
 		var (
-			sha, path string
-			distance  float64
+			sha, path, title, kind, tags string
+			distance                     float64
 		)
-		if err := rows.Scan(&sha, &path, &distance); err != nil {
+		if err := rows.Scan(&sha, &path, &title, &kind, &tags, &distance); err != nil {
 			return nil, fmt.Errorf("index: SearchVector: scan: %w", err)
 		}
 		rank++
 		out = append(out, Hit{
 			SHA:        sha,
 			SourcePath: path,
+			Title:      title,
+			Kind:       kind,
+			Tags:       tags,
 			Score:      1.0 - distance,
 			VectorRank: rank,
 		})
@@ -113,17 +135,22 @@ func (i *Index) SearchText(ctx context.Context, query string, limit int) ([]Hit,
 		return nil, err
 	}
 
-	// Hydrate paths in a second query so the FTS5 path stays narrow.
-	paths, err := i.pathsForSHAs(ctx, shas)
+	// Hydrate paths + render metadata in a second query so the FTS5
+	// path stays narrow.
+	meta, err := i.metaForSHAs(ctx, shas)
 	if err != nil {
 		return nil, err
 	}
 
 	out := make([]Hit, 0, len(shas))
 	for rank, sha := range shas {
+		m := meta[sha]
 		out = append(out, Hit{
 			SHA:        sha,
-			SourcePath: paths[sha],
+			SourcePath: m.sourcePath,
+			Title:      m.title,
+			Kind:       m.kind,
+			Tags:       m.tags,
 			Score:      1.0 / float64(rank+1),
 			TextRank:   rank + 1,
 		})
@@ -180,6 +207,15 @@ func (i *Index) SearchHybrid(ctx context.Context, textQuery string, vectorQuery 
 		}
 		got.VectorRank = h.VectorRank
 		got.SourcePath = h.SourcePath
+		if h.Title != "" {
+			got.Title = h.Title
+		}
+		if h.Kind != "" {
+			got.Kind = h.Kind
+		}
+		if h.Tags != "" {
+			got.Tags = h.Tags
+		}
 		got.Score += 1.0 / (rrfK + float64(h.VectorRank))
 	}
 
@@ -193,19 +229,38 @@ func (i *Index) SearchHybrid(ctx context.Context, textQuery string, vectorQuery 
 	if len(all) > limit {
 		all = all[:limit]
 	}
+
+	// Hydrate snippets for the final top-K only — keeps the FTS body
+	// scan small even when overfetch pulled wide.
+	shas := make([]string, 0, len(all))
+	for _, h := range all {
+		shas = append(shas, h.SHA)
+	}
+	snips, err := i.snippetsForSHAs(ctx, shas)
+	if err != nil {
+		return nil, err
+	}
+	for i := range all {
+		all[i].Snippet = snips[all[i].SHA]
+	}
 	return all, nil
 }
 
-// pathsForSHAs returns sha -> source_path for the given SHAs.
-// Single-query batch lookup; preserves caller's slice order in the
-// returned map sense (map iteration order is randomized but lookup
-// is O(1)).
-func (i *Index) pathsForSHAs(ctx context.Context, shas []string) (map[string]string, error) {
+// hitMeta is the per-SHA bundle metaForSHAs hydrates from vec_map.
+type hitMeta struct {
+	sourcePath string
+	title      string
+	kind       string
+	tags       string
+}
+
+// metaForSHAs returns sha -> render metadata for the given SHAs in a
+// single batched lookup.
+func (i *Index) metaForSHAs(ctx context.Context, shas []string) (map[string]hitMeta, error) {
 	if len(shas) == 0 {
-		return map[string]string{}, nil
+		return map[string]hitMeta{}, nil
 	}
-	// Build a parameterized IN clause.
-	q := `SELECT sha, source_path FROM vec_map WHERE sha IN (?`
+	q := `SELECT sha, source_path, title, kind, tags FROM vec_map WHERE sha IN (?`
 	args := make([]any, 0, len(shas))
 	args = append(args, shas[0])
 	for _, s := range shas[1:] {
@@ -216,16 +271,99 @@ func (i *Index) pathsForSHAs(ctx context.Context, shas []string) (map[string]str
 
 	rows, err := i.sql.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("index: pathsForSHAs: %w", err)
+		return nil, fmt.Errorf("index: metaForSHAs: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]hitMeta, len(shas))
+	for rows.Next() {
+		var sha string
+		var m hitMeta
+		if err := rows.Scan(&sha, &m.sourcePath, &m.title, &m.kind, &m.tags); err != nil {
+			return nil, fmt.Errorf("index: metaForSHAs: scan: %w", err)
+		}
+		out[sha] = m
+	}
+	return out, rows.Err()
+}
+
+// snippetsForSHAs returns sha -> 150-char snippet pulled from
+// fts_memories.body. Snippets are normalised: frontmatter stripped,
+// newlines collapsed, truncated with an ellipsis. Empty bodies yield
+// an empty string.
+func (i *Index) snippetsForSHAs(ctx context.Context, shas []string) (map[string]string, error) {
+	if len(shas) == 0 {
+		return map[string]string{}, nil
+	}
+	q := `SELECT sha, body FROM fts_memories WHERE sha IN (?`
+	args := make([]any, 0, len(shas))
+	args = append(args, shas[0])
+	for _, s := range shas[1:] {
+		q += `,?`
+		args = append(args, s)
+	}
+	q += `)`
+
+	rows, err := i.sql.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("index: snippetsForSHAs: %w", err)
 	}
 	defer rows.Close()
 	out := make(map[string]string, len(shas))
 	for rows.Next() {
-		var sha, path string
-		if err := rows.Scan(&sha, &path); err != nil {
-			return nil, fmt.Errorf("index: pathsForSHAs: scan: %w", err)
+		var sha, body string
+		if err := rows.Scan(&sha, &body); err != nil {
+			return nil, fmt.Errorf("index: snippetsForSHAs: scan: %w", err)
 		}
-		out[sha] = path
+		out[sha] = Snippet(body, snippetMaxRunes)
 	}
 	return out, rows.Err()
+}
+
+// snippetMaxRunes is the target snippet length surfaced in recall hits.
+// Sized to be informative without flooding the agent's context window.
+const snippetMaxRunes = 150
+
+// Snippet strips a leading YAML frontmatter block, collapses all
+// whitespace to single spaces, and truncates to maxRunes (appending
+// an ellipsis when the body was longer). Exported so callers outside
+// the package can render hits the same way.
+func Snippet(body string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	b := strings.TrimLeft(body, " \t\r\n")
+	if strings.HasPrefix(b, "---\n") || strings.HasPrefix(b, "---\r\n") {
+		// Skip past the opening fence.
+		rest := b[4:]
+		if strings.HasPrefix(b, "---\r\n") {
+			rest = b[5:]
+		}
+		if end := strings.Index(rest, "\n---"); end >= 0 {
+			tail := rest[end+4:]
+			// Trim the closing fence's own newline.
+			tail = strings.TrimLeft(tail, "\r\n")
+			b = tail
+		}
+	}
+	// Collapse whitespace runs to single spaces.
+	var sb strings.Builder
+	sb.Grow(len(b))
+	prevSpace := false
+	for _, r := range b {
+		if r == '\n' || r == '\r' || r == '\t' || r == ' ' {
+			if !prevSpace && sb.Len() > 0 {
+				sb.WriteByte(' ')
+				prevSpace = true
+			}
+			continue
+		}
+		sb.WriteRune(r)
+		prevSpace = false
+	}
+	out := strings.TrimRight(sb.String(), " ")
+	runes := []rune(out)
+	if len(runes) <= maxRunes {
+		return out
+	}
+	return string(runes[:maxRunes]) + "…"
 }

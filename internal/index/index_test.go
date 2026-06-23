@@ -358,3 +358,109 @@ func TestAllSHAs(t *testing.T) {
 func TestEmbedderInterfaceShape(t *testing.T) {
 	var _ Embedder = &fakeEmbedder{dims: 3}
 }
+
+func TestSearchHydratesTitleKindTagsSnippet(t *testing.T) {
+	idx := openTest(t, 3)
+	ctx := context.Background()
+
+	rec := Record{
+		SHA:        "h",
+		SourcePath: "Wiki/h.md",
+		Title:      "Tax forms 2026",
+		Tags:       "vendor:UIA mime:application/pdf attachment",
+		Body:       "---\ntitle: ignore me\n---\nLine one of body.\n\nLine two — should collapse.",
+		Kind:       "attachment_stub",
+		Embedding:  []float32{1, 0, 0},
+	}
+	if err := idx.Upsert(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+
+	vec, err := idx.SearchVector(ctx, []float32{1, 0, 0}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vec) != 1 {
+		t.Fatalf("vec hits = %d, want 1", len(vec))
+	}
+	if vec[0].Title != "Tax forms 2026" || vec[0].Kind != "attachment_stub" {
+		t.Errorf("vec hit metadata = %+v", vec[0])
+	}
+	if vec[0].Tags == "" {
+		t.Errorf("vec hit Tags empty")
+	}
+
+	txt, err := idx.SearchText(ctx, "tax", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(txt) != 1 || txt[0].Title != "Tax forms 2026" || txt[0].Kind != "attachment_stub" {
+		t.Errorf("text hit metadata = %+v", txt)
+	}
+
+	hyb, err := idx.SearchHybrid(ctx, "tax", []float32{1, 0, 0}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hyb) != 1 {
+		t.Fatalf("hybrid hits = %d, want 1", len(hyb))
+	}
+	if hyb[0].Title != "Tax forms 2026" || hyb[0].Kind != "attachment_stub" {
+		t.Errorf("hybrid hit metadata = %+v", hyb[0])
+	}
+	if hyb[0].Snippet == "" {
+		t.Errorf("hybrid hit Snippet empty")
+	}
+	if !contains(hyb[0].Snippet, "Line one of body.") {
+		t.Errorf("snippet missing body text: %q", hyb[0].Snippet)
+	}
+	if contains(hyb[0].Snippet, "ignore me") {
+		t.Errorf("snippet leaked frontmatter: %q", hyb[0].Snippet)
+	}
+}
+
+func TestSnippetStripsFrontmatterAndTruncates(t *testing.T) {
+	body := "---\nfoo: bar\nbaz: qux\n---\nhello   world\nsecond\tline"
+	got := Snippet(body, 150)
+	want := "hello world second line"
+	if got != want {
+		t.Errorf("Snippet = %q, want %q", got, want)
+	}
+
+	long := "abcdefghij" // 10 chars
+	for i := 0; i < 20; i++ {
+		long += "abcdefghij"
+	}
+	got = Snippet(long, 50)
+	if len([]rune(got)) != 51 { // 50 + ellipsis
+		t.Errorf("truncated len = %d runes, want 51", len([]rune(got)))
+	}
+	if got[len(got)-len("…"):] != "…" {
+		t.Errorf("truncated suffix = %q, want ellipsis", got)
+	}
+}
+
+func TestSchemaApplyIdempotentAcrossVersions(t *testing.T) {
+	// Simulate a pre-fix/49 snapshot: open, close, reopen. The second
+	// open re-runs ALTER TABLE ADD COLUMN which would otherwise fail.
+	dir := t.TempDir()
+	idx, err := Open(dir, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = idx.Close()
+	idx2, err := Open(dir, 3)
+	if err != nil {
+		t.Fatalf("reopen failed: %v", err)
+	}
+	_ = idx2.Close()
+}
+
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}

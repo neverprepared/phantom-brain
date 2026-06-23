@@ -88,6 +88,12 @@ func (s *Server) handleRecall(ctx context.Context, req mcp.CallToolRequest) (*mc
 // renderRecallHits formats search results for the agent. The output is
 // markdown-ish so a downstream agent can copy paths or quote scores
 // readably.
+//
+// Each hit is rendered with title + kind indicator + body snippet so
+// the calling agent can decide whether the hit is worth fetching in
+// full without a second tool call. Attachment hits include a hint that
+// the body lives behind GET /api/brain/attach/<sha> (presigned MinIO
+// URL), since the snippet alone won't convey the binary content.
 func renderRecallHits(query string, hits []index.Hit) string {
 	if len(hits) == 0 {
 		return fmt.Sprintf("No results for %q.", query)
@@ -95,8 +101,14 @@ func renderRecallHits(query string, hits []index.Hit) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d result(s) for %q:\n\n", len(hits), query)
 	for i, h := range hits {
-		fmt.Fprintf(&b, "## %d. %s\n", i+1, h.SourcePath)
+		heading := h.Title
+		if heading == "" {
+			heading = h.SourcePath
+		}
+		indicator := kindIndicator(h.Kind, h.Tags)
+		fmt.Fprintf(&b, "## %d. %s %s\n", i+1, heading, indicator)
 		fmt.Fprintf(&b, "- SHA: `%s`\n", h.SHA)
+		fmt.Fprintf(&b, "- Path: `%s`\n", h.SourcePath)
 		fmt.Fprintf(&b, "- Score: %.4f", h.Score)
 		if h.VectorRank > 0 {
 			fmt.Fprintf(&b, "  (vector rank %d", h.VectorRank)
@@ -107,9 +119,62 @@ func renderRecallHits(query string, hits []index.Hit) string {
 		} else if h.TextRank > 0 {
 			fmt.Fprintf(&b, "  (text rank %d)", h.TextRank)
 		}
-		b.WriteString("\n\n")
+		b.WriteString("\n")
+		if h.Kind == "attachment_stub" {
+			fmt.Fprintf(&b, "- Fetch via `GET /api/brain/attach/%s`\n", h.SHA)
+		}
+		if h.Snippet != "" {
+			fmt.Fprintf(&b, "- Snippet: %s\n", h.Snippet)
+		}
+		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// kindIndicator renders the short bracketed label that follows the
+// hit title. Attachment stubs surface the MIME extracted from the
+// "mime:<type>" tag the daemon writes at attach time, formatted as
+// "[attachment pdf]" / "[attachment png]" / "[attachment]" when MIME
+// is unknown.
+func kindIndicator(kind, tags string) string {
+	switch kind {
+	case "note":
+		return "[note]"
+	case "web_scrape":
+		return "[web]"
+	case "task_summary":
+		return "[task]"
+	case "email_import":
+		return "[email]"
+	case "manual_curate":
+		return "[curated]"
+	case "attachment_stub":
+		mime := extractMIMETag(tags)
+		if mime == "" {
+			return "[attachment]"
+		}
+		// Prefer the subtype ("pdf" from "application/pdf"); fall back
+		// to the full MIME when no slash.
+		if slash := strings.LastIndex(mime, "/"); slash >= 0 && slash < len(mime)-1 {
+			return "[attachment " + mime[slash+1:] + "]"
+		}
+		return "[attachment " + mime + "]"
+	case "":
+		return "[unknown]"
+	default:
+		return "[" + kind + "]"
+	}
+}
+
+// extractMIMETag pulls the value of the first "mime:..." token from a
+// space-joined tag blob. Returns "" when no such tag is present.
+func extractMIMETag(tags string) string {
+	for _, t := range strings.Fields(tags) {
+		if strings.HasPrefix(t, "mime:") {
+			return strings.TrimPrefix(t, "mime:")
+		}
+	}
+	return ""
 }
 
 // ftsPhrase rewrites a free-text query into FTS5 syntax that does an
