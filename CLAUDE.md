@@ -29,7 +29,8 @@ pbrainctl client mcp                 # stdio JSON-RPC MCP server (per agent proc
 pbrainctl client ingest-bulk         # bulk loader for an Obsidian-shaped tree
 pbrainctl client migrate-legacy      # one-time v4.x → v5.0 brain dir migration
 pbrainctl client brain list|show|orphans
-pbrainctl client gc-brains           # local brain dir GC (closes #31)
+pbrainctl client gc-brains           # local brain dir GC; bindless walk if no scope set
+pbrainctl client queue list|drain-now|clear   # v3.1 write-ahead queue inspection
 pbrainctl client version
 
 pbrainctl server serve               # HTTP daemon (per-(profile, vault) synth + snapshot publisher)
@@ -50,24 +51,31 @@ phantom-brain is a **Model Context Protocol server** that gives Claude Code (and
 
 Phase 6 (v2.0+) moved the canonical content store from a local Obsidian vault to **OpenSearch + MinIO**. The local-filesystem "vault" still exists for legacy bulk-migration paths and tests, but agent reads + writes target the daemon, not disk.
 
-### Three storage tiers (memory model)
+### Storage tiers (memory model)
 
 | Tier | What it is | Where in code |
 |---|---|---|
 | **Long-term memory** | OpenSearch indices (`pb_summaries`, `pb_entities`, `pb_attachments`) + MinIO for attachment blobs. Canonical, durable, shared across all agents bound to the same vault. | `internal/osearch/` + the daemon HTTP surface in `internal/server/` |
 | **Active memory** | Per-process SQLite at `_index/wm-<pid>.sqlite`. Tasks, findings, artifacts, open questions. Lives only for the agent process; dropped at exit. | `internal/working/` |
 | **Read cache** | Per-brain `_index/vectors.db` (sqlite-vec + FTS5). A snapshot of the daemon's OS view, pulled as a tarball at birth. Read-only — the agent doesn't write directly. | `internal/index/` + `internal/brain/` birth machinery |
+| **Write-ahead queue** (v3.1) | Per-binding SQLite at `<VaultBaseDir>/wqueue.sqlite` + attachment staging dir. Catches writes when the daemon is unreachable; drainer goroutine retries with exponential backoff. Persists across MCP child deaths. | `internal/brain/wqueue/` + `internal/brain/drainer.go` |
 
 Promotion path: `task_complete` aggregates important findings into a single markdown note and POSTs it as a `brain_learn` to the daemon → lands in long-term as a `task_summary` doc.
+
+Write path (v3.1): every write tool calls `wqueue.Enqueue` first, then attempts the daemon POST inline. Success → `Delete` the row, return clean result. Failure (network error, 5xx, timeout) → leave the row, append a queued-notice to the tool's text result, retry from the drainer. Caller never sees a write failure. Daemon SHA-dedups so retries are always safe.
 
 ### Entry points
 
 | Path | Role |
 |---|---|
-| `cmd/pbrainctl/main.go` | CLI entry. Subcommand dispatcher: `mcp` (agent), `serve` (daemon), `ingest-bulk`, `vault`, `snapshot`, etc. |
-| `internal/server/server.go::Start()` | Daemon lifecycle: load config, build OS client, init MinIO backend, spawn `SynthWorker` + `SnapshotDebouncer`, mount chi router |
+| `cmd/pbrainctl/main.go` | CLI entry. Routes to `clientCmd` or `serverCmd` parents (v3.0 restructure). |
+| `internal/server/server.go::Start()` | Daemon lifecycle: load config, build OS client, init MinIO backend, spawn `SynthWorker` + `SnapshotDebouncer`, mount chi router. |
 | `internal/mcp/server.go::Register()` | MCP tool registration. Mounts every `brain_*` and `task_*` tool against an `mcp-go` server. |
-| `internal/brain/lifecycle.go::Start()` | Per-agent birth: claim a brain dir, pull current snapshot, start heartbeat, prep deps for the MCP tools. |
+| `internal/brain/lifecycle.go::Start()` | Per-agent birth: claim a brain dir, pull current snapshot, open `wqueue`, start heartbeat + drainer goroutine. |
+| `internal/brain/wqueue/wqueue.go` | Per-binding SQLite write-ahead queue. `OpenOrCreate` (agent) vs `OpenReadOnly` (CLI inspection). `UNIQUE(kind, sha)` + `claimed_at` TTL prevents concurrent-drainer races. |
+| `internal/brain/drainer.go` | 30s-tick goroutine spawned by Lifecycle. Drains eligible queue rows, refreshes snapshot metadata via `/api/brain/snapshot/current`, sweeps orphaned staging files. |
+| `internal/brain/connectivity.go` | Per-Lifecycle state machine: `offline` (no successful contact this session) → `degraded` (had success, last attempt failed) → `online` (last attempt succeeded). Flips on first successful daemon contact, not on empty queue. |
+| `internal/mcp/wqueue_helper.go` | Bridges MCP write tools to `wqueue.Enqueue` + appends queued-notice when daemon POST fails. |
 
 ### MCP tools (the public surface)
 
@@ -76,10 +84,10 @@ Promotion path: `task_complete` aggregates important findings into a single mark
 | `brain_perceive` | `internal/mcp/ingest.go` | Ingest gathered web content. Kind: `web_scrape`. | Long-term (daemon → OS) |
 | `brain_learn` | `internal/mcp/learn.go` | Ingest a curated note. Kind: `note`. Skips LLM gate (defaults to medium reliability). | Long-term |
 | `brain_attach` | `internal/mcp/attach.go` | Ingest a binary file. Kind: `attachment_stub`. Bytes → MinIO; metadata → OS. | Long-term + MinIO |
-| `brain_recall` | `internal/mcp/recall.go` | Hybrid BM25 + kNN over the local read cache. Optional `topic` filter. | Reads only |
+| `brain_recall` | `internal/mcp/recall.go` | Hybrid BM25 + kNN over the local read cache. Result hits include title, kind indicator (`[note]` / `[attachment pdf]` / etc.), 150-char snippet, and a fetch hint for attachments. Footer mentions snapshot age when > 1h. | Reads only |
 | `brain_trace` | `internal/mcp/trace.go` | Read the local Wiki/_log.md audit trail. | Reads only |
 | `brain_checkpoint` | `internal/mcp/brain_checkpoint.go` | Force a checkpoint of the working-memory state. | Local working DB |
-| `brain_status` | `internal/mcp/brain_status.go` | Report brain state (gen, snapshot SHA, heartbeat age). | Reads only |
+| `brain_status` | `internal/mcp/brain_status.go` | Report brain state (gen, snapshot SHA, heartbeat age) + v3.1 connectivity (`online`/`degraded`/`offline`), `queued_writes` depth, `last_daemon_contact_secs`, `snapshot_age_secs`. | Reads only |
 | `brain_death` | `internal/mcp/brain_death.go` | Flip brain status to dead. Phase 6: no payload tarball, just status + log marker. | Local manifest |
 | `task_start` | `internal/mcp/task.go` | Create a working-memory task, auto-seeded from a `brain_recall` against the goal. | Active (local WM) |
 | `task_update` | `internal/mcp/task.go` | Append a finding / artifact / question. | Active |
@@ -95,8 +103,13 @@ internal/mcp/ingest.go
   ├─ canonicalize.SumBody → SHA (content-stable across re-ingest)
   ├─ Index.Has(SHA) → "Duplicate" early-out
   ├─ Ollama.Embed(title + "\n\n" + body) → 768-dim vector
-  └─ brain.Client.Perceive(req)              ← agent-side HTTP
-       ↓
+  └─ internal/mcp/wqueue_helper.go::EnqueueAndAttempt   ← v3.1 intercept
+       ├─ wqueue.Enqueue → row written to local SQLite + (attach only) bytes staged
+       ├─ brain.Client.Perceive(req)        ← agent-side HTTP, inline attempt
+       │   ├─ success → wqueue.Delete, return clean tool result
+       │   └─ failure (ErrDaemonUnreachable / 5xx / timeout) → row stays, append queued-notice
+       │         (drainer goroutine retries every 30s with exp backoff)
+       ↓ (success path continues to daemon)
 internal/server/handlers_write.go::handlePerceive
   ├─ validate SHA, title/body, Kind enum
   ├─ osearch.Client.UpsertSummary(doc, synthesised=false)
@@ -154,19 +167,22 @@ Resolved from `$PHANTOM_BRAIN_DATA_DIR` in the daemon's env (defaults under the 
     maintenance.flag        ← present = pause writes
 ```
 
-Agent-side (per brain instance):
+Agent-side (per binding, shared across brain instances):
 
 ```
-$XDG_DATA_HOME/phantom-brain/<profile>/<vault>/brains/<brain_id>/
-  manifest.json             ← alive | shutting_down | dead, heartbeat, parent_gen
-  markers/<brain_id>        ← heartbeat sentinel
-  vectors.db                ← legacy v1 location; ignored in v2
-  _index/
-    vectors.db              ← snapshot extract — what `internal/index` opens
-    wm-<pid>.sqlite         ← per-process working memory
+$XDG_DATA_HOME/phantom-brain/<profile>/<vault>/
+  wqueue.sqlite             ← v3.1 write-ahead queue (per binding)
+  wqueue-attach/<sha><ext>  ← v3.1 staged attachment bytes
+  _snapshot-cache/          ← snapcache fallback for offline-at-birth
+  brains/<brain_id>/
+    manifest.json           ← alive | shutting_down | dead, heartbeat, parent_gen, parent_snapshot_built_at
+    markers/<brain_id>      ← heartbeat sentinel
+    _index/
+      vectors.db            ← snapshot extract — what `internal/index` opens
+      wm-<pid>.sqlite       ← per-process working memory
 ```
 
-`_index/vectors.db` is what hybrid recall reads. The `vault/` subdir under each brain holds the extracted snapshot's Wiki/ when one exists.
+`_index/vectors.db` is what hybrid recall reads. `wqueue.sqlite` survives brain-dir destruction — next agent for the same binding picks up any pending writes. The drainer also polls `/api/brain/snapshot/current` every cycle to refresh the in-memory snapshot-built-at without re-pulling the tarball (mid-session full refresh remains a Phase 7 item).
 
 ### Config layout
 
@@ -213,11 +229,13 @@ Embeddings computed locally via Ollama. Idempotent — daemon dedups by SHA. `--
 
 ### Concurrency invariants
 
-- **Queue claiming**: SynthWorker uses an in-memory channel, single worker per daemon. No file-queue. Restart drops queued-but-not-processed jobs (Phase 7 will durable-queue).
+- **Daemon synth queue**: in-memory channel, single worker per daemon. No file-queue on the daemon side. Restart drops queued-but-not-processed jobs (Phase 7 will durable-queue).
+- **Agent write-ahead queue (v3.1)**: SQLite-backed, durable across MCP child deaths. `UNIQUE(kind, sha)` makes re-enqueue of the same SHA a no-op (benign). `claimed_at` + 5min TTL prevents two drainers from racing on the same row; on expiry an abandoned claim auto-releases. WAL mode + 5s busy_timeout for multi-process safety.
 - **Entity pages**: `UpsertEntity` reads-modifies-writes the OS doc. Safe under single-worker; would need OS painless scripts for multi-worker.
 - **Snapshot rebuild**: `SnapshotDebouncer` per-vault timer registry. Bursts collapse into one rebuild per `snapshot_rebuild_debounce_secs` (default 60s).
 - **Doc-ID separator**: SHA-based, format `<profile>:<vault>:<sha>`. Colon, not slash — opensearch-go interpolates IDs raw into URL paths and slashes silently 404.
 - **Embedding zero check**: OS rejects all-zero vectors under cosine similarity. Either send nil (caller didn't compute) or a real embedding.
+- **Drainer cadence**: 30s poll. On each cycle: claim eligible rows, attempt POSTs, refresh snapshot metadata from `/api/brain/snapshot/current`, sweep orphan staging files. Backoff per row: exponential, base 30s, cap 5min, ±20% jitter.
 
 ### Configuration knobs (env / server.toml)
 
@@ -241,6 +259,39 @@ Embeddings computed locally via Ollama. Idempotent — daemon dedups by SHA. `--
 
 - `cmd/pbrainctl/ops.go` — operator subcommands: `vault list`, `snapshot status`, `maintenance enter/exit`, `brain list`, etc.
 - `scripts/seed-vault-via-minio.sh` — bootstrap a remote MinIO with a seed tarball (rare).
+
+## Offline resilience (v3.1)
+
+Writes never fail because the daemon is unreachable. The three failure modes (workstation offline, daemon down, OS/MinIO down) all collapse to one path: enqueue + retry.
+
+### Flow
+
+1. MCP write tool (perceive/learn/attach/trace, or task_complete's promote step) calls `internal/mcp/wqueue_helper.go::EnqueueAndAttempt`.
+2. `wqueue.Enqueue` writes the row to local SQLite. For `attach`, bytes are copied to the staging dir BEFORE the row is inserted — a crash mid-Enqueue leaves orphan files (swept by drainer), never an orphan row pointing at missing bytes.
+3. Inline POST to daemon attempted. Success → `wqueue.Delete` the row, return clean tool result. Failure → row stays, tool result gets a queued-notice appended: `Queued (daemon unreachable since 2m). 3 writes pending sync.`
+4. Background drainer (30s tick) picks eligible rows (backoff-elapsed, not currently claimed), claims with `claimed_at = now`, attempts POST, deletes on success, releases claim + bumps `attempts` on failure.
+5. Drainer also refreshes `Lifecycle.snapshotBuiltAt` from `/api/brain/snapshot/current` each cycle — so `brain_recall`'s footer + `brain_status`'s `snapshot_age_secs` reflect the daemon's view, not just the birth-time value.
+
+### What queued writes look like to recall
+
+**Invisible** until they sync. Queued ≠ searchable. The local `vectors.db` is built from the snapshot tarball at birth and never mutated by the agent. A note queued at 10am while offline is in `wqueue.sqlite` but not in `vectors.db` — recall won't surface it until the drainer syncs + the daemon synthesises + a new snapshot publishes + the agent restarts and pulls the new gen.
+
+This is a deliberate decision (#61): the snapshot is canonical; local divergence is not. Users who care about searching their own offline writes can `pbrainctl client queue list` to inspect what's pending.
+
+### Sentinel error: `brain.ErrDaemonUnreachable`
+
+`internal/brain/client.go::do` wraps every transport failure (timeout, connection refused, EOF) with this sentinel. Callers that need to distinguish "daemon down" from "internal error" use `errors.Is(err, brain.ErrDaemonUnreachable)`. The `pbrainctl client queue drain-now` subcommand uses this to exit 0 (daemon-down, retry later, not the operator's problem) vs exit 1 (real internal error).
+
+### Operator subcommands
+
+- `pbrainctl client queue list` — read-only inspection. Returns `no queue (no offline activity yet)` on a fresh box (uses `wqueue.OpenReadOnly` — does NOT side-effect-create the file).
+- `pbrainctl client queue drain-now` — force a drain attempt. Exits 0 with "N pending" if daemon still down; exits 0 + clean if drained; exits 1 on internal error.
+- `pbrainctl client queue clear --confirm` — escape hatch. Deletes rows + staging files.
+
+### What v3.1 does NOT solve
+
+- **Daemon-side synth durability**: SynthWorker still uses an in-memory channel. Daemon crash during synth loses the in-memory queue.
+- **Mid-session full snapshot refresh**: agent's local `vectors.db` is still birth-time. The drainer refreshes the displayed metadata, not the data. Phase 7 remains the home for true mid-session refresh.
 
 ## What changed in Phase 6 (v2.0+)
 
