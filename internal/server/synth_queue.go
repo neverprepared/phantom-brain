@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
+	"github.com/neverprepared/phantom-brain/internal/osearch"
 )
 
 // SynthWorker is Phase 6's replacement for the file-queue +

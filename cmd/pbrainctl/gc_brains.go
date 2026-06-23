@@ -13,8 +13,8 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/spf13/cobra"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/brain"
-	"github.com/neverprepared/mcp-phantom-brain/internal/config"
+	"github.com/neverprepared/phantom-brain/internal/brain"
+	"github.com/neverprepared/phantom-brain/internal/config"
 )
 
 // gcBrainsCmd is the operator lever for reclaiming local brain dirs left

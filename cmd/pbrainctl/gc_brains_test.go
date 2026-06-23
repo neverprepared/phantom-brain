@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/brain"
+	"github.com/neverprepared/phantom-brain/internal/brain"
 )
 
 // fakeGCPlatform reports a fixed set of pids as alive. Only

@@ -17,11 +17,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/brain"
-	"github.com/neverprepared/mcp-phantom-brain/internal/canonicalize"
-	"github.com/neverprepared/mcp-phantom-brain/internal/ollama"
-	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
-	"github.com/neverprepared/mcp-phantom-brain/internal/vault"
+	"github.com/neverprepared/phantom-brain/internal/brain"
+	"github.com/neverprepared/phantom-brain/internal/canonicalize"
+	"github.com/neverprepared/phantom-brain/internal/ollama"
+	"github.com/neverprepared/phantom-brain/internal/osearch"
+	"github.com/neverprepared/phantom-brain/internal/vault"
 )
 
 // ingestBulkCmd is the Phase 6 bootstrap loader: walk a vault dir

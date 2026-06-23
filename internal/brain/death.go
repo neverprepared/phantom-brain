@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/config"
+	"github.com/neverprepared/phantom-brain/internal/config"
 )
 
 // DeathOpts collects everything Death() needs. Same shape as BirthOpts

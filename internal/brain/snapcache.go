@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/config"
-	"github.com/neverprepared/mcp-phantom-brain/internal/vault"
+	"github.com/neverprepared/phantom-brain/internal/config"
+	"github.com/neverprepared/phantom-brain/internal/vault"
 )
 
 // CachedSnapshot describes a snapshot that was previously downloaded

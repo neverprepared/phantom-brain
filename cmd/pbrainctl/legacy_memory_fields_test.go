@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/vault"
+	"github.com/neverprepared/phantom-brain/internal/vault"
 )
 
 func TestBuildLegacyMemoryFields_EmailShape(t *testing.T) {

@@ -1,4 +1,4 @@
-# mcp-phantom-brain
+# phantom-brain
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server that gives Claude a structured, validated long-term memory backed by an Obsidian vault on disk.
 
@@ -17,21 +17,25 @@ In agent-contract mode (v5.0), the lifecycle adds **mortal brains**: each MCP pr
 
 ## Binary
 
-```
-pbrainctl mcp              # stdio JSON-RPC MCP server (per agent process)
-pbrainctl serve            # HTTP synthesis daemon (multi-vault, per-vault reaper + synth)
-pbrainctl migrate-legacy   # one-time port of an old vault into the v5.0 layout
+v3.0 groups every command under `client` (workstation / agent side) or `server` (daemon host). The old flat names were removed; there are no aliases.
 
-pbrainctl vault            # list | status | reload (SIGHUPs the daemon)
-pbrainctl snapshot         # status | rebuild | prune | claims  [profile/vault]
-pbrainctl queue            # depth | contributors  [profile/vault]
-pbrainctl maintenance      # enter | exit          [profile/vault]
-pbrainctl list             # list local brain dirs
-pbrainctl show <brain_id>  # dump a brain's manifest
-pbrainctl orphans          # dry-run recovery sweep
-pbrainctl force-merge      # one ReapOnce  [profile/vault]
-pbrainctl force-checkpoint # one SynthesizeOne  [profile/vault]
-pbrainctl version
+```
+# client (agent / workstation)
+pbrainctl client mcp                 # stdio JSON-RPC MCP server (per agent process)
+pbrainctl client ingest-bulk         # bulk loader for an Obsidian-shaped tree
+pbrainctl client migrate-legacy      # one-time port of an old vault into the v5.0 layout
+pbrainctl client brain list|show|orphans
+pbrainctl client gc-brains           # garbage-collect dead local brain dirs
+pbrainctl client version
+
+# server (daemon host)
+pbrainctl server serve               # HTTP synthesis daemon (multi-vault)
+pbrainctl server vault               # list | status | reload (SIGHUPs the daemon)
+pbrainctl server snapshot            # status | rebuild | prune | claims  [profile/vault]
+pbrainctl server queue               # depth | contributors  [profile/vault]
+pbrainctl server maintenance         # enter | exit          [profile/vault]
+pbrainctl server backfill-attachment-stubs
+pbrainctl server version
 ```
 
 ## MCP tools
@@ -100,7 +104,7 @@ brew install neverprepared/tap/pbrainctl
 **Linux — release tarball:**
 
 ```bash
-curl -L -o pb.tar.gz https://github.com/neverprepared/mcp-phantom-brain/releases/latest/download/pbrainctl_linux_amd64.tar.gz
+curl -L -o pb.tar.gz https://github.com/neverprepared/phantom-brain/releases/latest/download/pbrainctl_linux_amd64.tar.gz
 tar -xzf pb.tar.gz
 sudo install pbrainctl_linux_amd64/pbrainctl /usr/local/bin/
 pbrainctl version
@@ -109,8 +113,8 @@ pbrainctl version
 **Any platform — build from source:**
 
 ```bash
-git clone https://github.com/neverprepared/mcp-phantom-brain
-cd mcp-phantom-brain
+git clone https://github.com/neverprepared/phantom-brain
+cd phantom-brain
 make build           # produces ./pbrainctl
 ```
 
@@ -123,8 +127,8 @@ Two startup modes, selected automatically by environment.
 ```json
 {
   "phantom-brain": {
-    "command": "/path/to/mcp-phantom-brain/pbrainctl",
-    "args": ["mcp"],
+    "command": "/path/to/phantom-brain/pbrainctl",
+    "args": ["client", "mcp"],
     "env": { "BRAIN_VAULT_PATH": "/path/to/your/vault" }
   }
 }
@@ -135,8 +139,8 @@ Two startup modes, selected automatically by environment.
 ```json
 {
   "phantom-brain": {
-    "command": "/path/to/mcp-phantom-brain/pbrainctl",
-    "args": ["mcp"],
+    "command": "/path/to/phantom-brain/pbrainctl",
+    "args": ["client", "mcp"],
     "env": {
       "CL_BRAIN_API": "https://your-daemon",
       "CL_BRAIN_API_TOKEN": "pb_personal_memory_…",
@@ -152,7 +156,7 @@ Two startup modes, selected automatically by environment.
 ### Daemon
 
 ```bash
-pbrainctl serve
+pbrainctl server serve
 ```
 
 Reads `$PHANTOM_BRAIN_CONFIG_DIR` (default `~/.config/phantom-brain-server`) for `server.toml` + per-vault `config.toml` + `auth.toml`. State lives under `$PHANTOM_BRAIN_DATA_DIR` (default `/var/lib/phantom-brain`). Acquires an exclusive flock so a second daemon refuses to start.

@@ -15,10 +15,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/brain"
-	"github.com/neverprepared/mcp-phantom-brain/internal/config"
-	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
-	pbserver "github.com/neverprepared/mcp-phantom-brain/internal/server"
+	"github.com/neverprepared/phantom-brain/internal/brain"
+	"github.com/neverprepared/phantom-brain/internal/config"
+	"github.com/neverprepared/phantom-brain/internal/osearch"
+	pbserver "github.com/neverprepared/phantom-brain/internal/server"
 )
 
 // All operator subcommands honour PHANTOM_BRAIN_CONFIG_DIR /

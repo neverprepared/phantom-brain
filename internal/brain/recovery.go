@@ -10,7 +10,7 @@ import (
 
 	"github.com/gofrs/flock"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/config"
+	"github.com/neverprepared/phantom-brain/internal/config"
 )
 
 // RecoverySweepResult enumerates what one Recover() invocation did.

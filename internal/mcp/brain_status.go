@@ -8,7 +8,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/brain"
+	"github.com/neverprepared/phantom-brain/internal/brain"
 )
 
 // brainStatusTool exposes the brain's manifest + heartbeat freshness

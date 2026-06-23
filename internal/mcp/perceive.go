@@ -8,7 +8,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/vault"
+	"github.com/neverprepared/phantom-brain/internal/vault"
 )
 
 // perceiveTool defines the brain_perceive MCP tool schema.

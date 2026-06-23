@@ -20,12 +20,33 @@ make all
 
 Plain `go build`/`go test` won't work — `internal/index` panics at init() without the `sqlite_fts5` build tag. Always use `make` or `GOFLAGS=-tags=sqlite_fts5 go test ./...`.
 
+### Subcommand layout (v3.0)
+
+`pbrainctl` groups every command under one of two parents — `client` (workstation / agent side) or `server` (daemon host). The old flat names (`pbrainctl serve`, `pbrainctl mcp`, `pbrainctl vault ...`) were removed in v3.0; there are no aliases. Quick reference:
+
+```
+pbrainctl client mcp                 # stdio JSON-RPC MCP server (per agent process)
+pbrainctl client ingest-bulk         # bulk loader for an Obsidian-shaped tree
+pbrainctl client migrate-legacy      # one-time v4.x → v5.0 brain dir migration
+pbrainctl client brain list|show|orphans
+pbrainctl client gc-brains           # local brain dir GC (closes #31)
+pbrainctl client version
+
+pbrainctl server serve               # HTTP daemon (per-(profile, vault) synth + snapshot publisher)
+pbrainctl server vault list|status|reload
+pbrainctl server snapshot status|rebuild|prune|claims
+pbrainctl server queue depth|contributors
+pbrainctl server maintenance enter|exit
+pbrainctl server backfill-attachment-stubs
+pbrainctl server version
+```
+
 ## Architecture
 
 phantom-brain is a **Model Context Protocol server** that gives Claude Code (and any other MCP-compatible agent) long-term durable memory plus per-session active memory. The implementation is Go, the runtime split is two-process:
 
-- **`pbrainctl mcp`** — per-agent stdio MCP server. Talks to the daemon over HTTP. Holds local SQLite for active memory + a snapshot cache for fast recall. Spawned by Claude Code per session.
-- **`pbrainctl serve`** — single HTTP daemon. The canonical store. Receives writes, persists to OpenSearch + MinIO, runs async synth (gate + distill via the `claude` CLI), publishes snapshot tarballs the agents pull at birth.
+- **`pbrainctl client mcp`** — per-agent stdio MCP server. Talks to the daemon over HTTP. Holds local SQLite for active memory + a snapshot cache for fast recall. Spawned by Claude Code per session.
+- **`pbrainctl server serve`** — single HTTP daemon. The canonical store. Receives writes, persists to OpenSearch + MinIO, runs async synth (gate + distill via the `claude` CLI), publishes snapshot tarballs the agents pull at birth.
 
 Phase 6 (v2.0+) moved the canonical content store from a local Obsidian vault to **OpenSearch + MinIO**. The local-filesystem "vault" still exists for legacy bulk-migration paths and tests, but agent reads + writes target the daemon, not disk.
 
@@ -180,7 +201,7 @@ Without the OAuth token the daemon still starts; gate + distill fall through to 
 One-shot bulk loader for either a legacy Obsidian vault (the migration we're doing now) OR any future on-disk format the operator wants to import.
 
 ```bash
-pbrainctl ingest-bulk <path> [--dry-run] [--concurrency N] [--max-file-bytes N] [--timeout-secs N]
+pbrainctl client ingest-bulk <path> [--dry-run] [--concurrency N] [--max-file-bytes N] [--timeout-secs N]
 ```
 
 Routes by directory:

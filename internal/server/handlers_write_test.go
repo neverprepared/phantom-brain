@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
+	"github.com/neverprepared/phantom-brain/internal/osearch"
 )
 
 func osReadFile(path string) ([]byte, error) { return os.ReadFile(path) }

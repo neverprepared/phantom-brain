@@ -16,7 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/config"
+	"github.com/neverprepared/phantom-brain/internal/config"
 )
 
 // ErrDaemonUnavailable is returned by any Phase 1 path that would

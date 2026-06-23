@@ -10,7 +10,7 @@ import (
 
 	"strings"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
+	"github.com/neverprepared/phantom-brain/internal/osearch"
 )
 
 // waitUntil polls fn until it returns true or the deadline passes.

@@ -23,7 +23,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/vault"
+	"github.com/neverprepared/phantom-brain/internal/vault"
 )
 
 // ManifestSchemaVersion is bumped any time Manifest's wire schema

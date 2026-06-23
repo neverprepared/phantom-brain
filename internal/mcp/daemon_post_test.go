@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	pbbrain "github.com/neverprepared/mcp-phantom-brain/internal/brain"
+	pbbrain "github.com/neverprepared/phantom-brain/internal/brain"
 )
 
 // recordingDaemon stands in for the Phase 6 daemon. It echoes the

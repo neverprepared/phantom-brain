@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/config"
+	"github.com/neverprepared/phantom-brain/internal/config"
 )
 
 // --- Death ------------------------------------------------------------

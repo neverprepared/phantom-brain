@@ -20,15 +20,15 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/spf13/cobra"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/brain"
-	"github.com/neverprepared/mcp-phantom-brain/internal/config"
-	"github.com/neverprepared/mcp-phantom-brain/internal/index"
-	pbmcp "github.com/neverprepared/mcp-phantom-brain/internal/mcp"
-	"github.com/neverprepared/mcp-phantom-brain/internal/ollama"
-	pbserver "github.com/neverprepared/mcp-phantom-brain/internal/server"
-	"github.com/neverprepared/mcp-phantom-brain/internal/vault"
-	"github.com/neverprepared/mcp-phantom-brain/internal/version"
-	"github.com/neverprepared/mcp-phantom-brain/internal/working"
+	"github.com/neverprepared/phantom-brain/internal/brain"
+	"github.com/neverprepared/phantom-brain/internal/config"
+	"github.com/neverprepared/phantom-brain/internal/index"
+	pbmcp "github.com/neverprepared/phantom-brain/internal/mcp"
+	"github.com/neverprepared/phantom-brain/internal/ollama"
+	pbserver "github.com/neverprepared/phantom-brain/internal/server"
+	"github.com/neverprepared/phantom-brain/internal/vault"
+	"github.com/neverprepared/phantom-brain/internal/version"
+	"github.com/neverprepared/phantom-brain/internal/working"
 )
 
 func main() {

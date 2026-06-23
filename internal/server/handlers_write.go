@@ -14,7 +14,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
+	"github.com/neverprepared/phantom-brain/internal/osearch"
 )
 
 // appendLogLine writes one newline-terminated record to the

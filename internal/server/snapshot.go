@@ -17,8 +17,8 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/brain"
-	"github.com/neverprepared/mcp-phantom-brain/internal/vault"
+	"github.com/neverprepared/phantom-brain/internal/brain"
+	"github.com/neverprepared/phantom-brain/internal/vault"
 )
 
 // genCounterFilename holds the monotonic snapshot generation number,
