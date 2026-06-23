@@ -95,11 +95,11 @@ func newFakeAttach() *fakeAttach {
 	return &fakeAttach{blobs: map[string][]byte{}, tags: map[string][]string{}}
 }
 
-func (f *fakeAttach) PutAttachment(ctx context.Context, profile, vault, sha, ext string, body []byte, ct string) (string, error) {
-	return f.PutAttachmentWithTags(ctx, profile, vault, sha, ext, body, ct, nil)
+func (f *fakeAttach) PutAttachment(ctx context.Context, bucket, profile, vault, sha, ext string, body []byte, ct string) (string, error) {
+	return f.PutAttachmentWithTags(ctx, bucket, profile, vault, sha, ext, body, ct, nil)
 }
 
-func (f *fakeAttach) PutAttachmentWithTags(_ context.Context, profile, vault, sha, ext string, body []byte, _ string, indexTags []string) (string, error) {
+func (f *fakeAttach) PutAttachmentWithTags(_ context.Context, _ string, profile, vault, sha, ext string, body []byte, _ string, indexTags []string) (string, error) {
 	if f.failPut {
 		return "", errors.New("fake: put failed")
 	}
@@ -112,10 +112,10 @@ func (f *fakeAttach) PutAttachmentWithTags(_ context.Context, profile, vault, sh
 	}
 	return key, nil
 }
-func (f *fakeAttach) PresignGet(_ context.Context, key string, _ time.Duration) (string, error) {
+func (f *fakeAttach) PresignGet(_ context.Context, _ string, key string, _ time.Duration) (string, error) {
 	return "https://example.test/" + key + "?sig=fake", nil
 }
-func (f *fakeAttach) GetAttachmentBytes(_ context.Context, key string, _ int64) ([]byte, error) {
+func (f *fakeAttach) GetAttachmentBytes(_ context.Context, _ string, key string, _ int64) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	b, ok := f.blobs[key]

@@ -84,7 +84,7 @@ func CaptureURL(ctx context.Context, store AttachmentStore, profile, vault, docS
 	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
 	ext := extFromContentType(contentType)
 
-	key, err := store.PutAttachment(ctx, profile, vault, captureKeyPrefix+docSHA, ext, body, contentType)
+	key, err := store.PutAttachment(ctx, "", profile, vault, captureKeyPrefix+docSHA, ext, body, contentType)
 	if err != nil {
 		return nil, fmt.Errorf("capture: minio put: %w", err)
 	}
