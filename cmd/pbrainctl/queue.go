@@ -78,10 +78,10 @@ func resolveQueueDir(opts queueResolveOpts) (string, error) {
 		return "", errors.New("--profile and --vault must be set together")
 	}
 	if opts.profile != "" && opts.vault != "" {
-		if err := validateBindingSegment(opts.profile, "profile"); err != nil {
+		if err := validateBindingSegment("profile", opts.profile); err != nil {
 			return "", err
 		}
-		if err := validateBindingSegment(opts.vault, "vault"); err != nil {
+		if err := validateBindingSegment("vault", opts.vault); err != nil {
 			return "", err
 		}
 		dh, err := resolveXDGDataHome()
@@ -106,16 +106,6 @@ func resolveXDGDataHome() (string, error) {
 		return "", fmt.Errorf("resolve $HOME: %w", err)
 	}
 	return filepath.Join(home, ".local", "share"), nil
-}
-
-// validateBindingSegment rejects values that could escape the
-// data-home prefix when joined into a path. Profile and vault names
-// are short single-segment identifiers in practice.
-func validateBindingSegment(s, label string) error {
-	if strings.ContainsAny(s, `/\`) || s == "." || s == ".." || strings.Contains(s, "..") {
-		return fmt.Errorf("invalid %s %q: must not contain path separators or ..", label, s)
-	}
-	return nil
 }
 
 func openResolvedQueue(opts queueResolveOpts) (*wqueue.Queue, string, error) {

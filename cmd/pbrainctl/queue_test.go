@@ -196,7 +196,7 @@ func TestQueueRejectsPathTraversalProfile(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error rejecting path traversal")
 	}
-	if !strings.Contains(err.Error(), "invalid profile") {
+	if !strings.Contains(err.Error(), "--profile") {
 		t.Fatalf("unexpected err: %v", err)
 	}
 }
