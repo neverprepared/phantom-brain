@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/neverprepared/phantom-brain/internal/brain/wqueue"
 	"github.com/neverprepared/phantom-brain/internal/config"
 )
 
@@ -44,6 +45,14 @@ type Lifecycle struct {
 	// otherwise (legacy BRAIN_VAULT_PATH mode). MCP handlers branch
 	// on Client() != nil to choose POST-to-daemon vs local-only.
 	client *Client
+
+	// v3.1 (#61): write-ahead queue + connectivity state + drainer
+	// goroutine. queue and conn are nil in legacy BRAIN_VAULT_PATH
+	// mode — call sites MUST nil-guard before use.
+	queue     *wqueue.Queue
+	conn      *Connectivity
+	drainStop context.CancelFunc
+	drainDone chan struct{}
 }
 
 // StartOpts narrows what callers must supply to instantiate a
@@ -65,6 +74,12 @@ type StartOpts struct {
 	// Production callers leave it false; tests that don't want a
 	// background goroutine ticking through fixture lifetimes set it.
 	SkipCheckpointer bool
+
+	// SkipDrainer disables the write-ahead-queue drainer goroutine.
+	// Production callers leave it false; tests that don't want a
+	// background ticker firing through fixtures set it. Has no effect
+	// in legacy mode (no daemon client → no drainer regardless).
+	SkipDrainer bool
 
 	// CheckpointTickInterval is how often the background checkpointer
 	// re-evaluates ShouldCheckpoint. Zero falls back to 60s — far
@@ -114,6 +129,22 @@ func Start(opts StartOpts) (*Lifecycle, error) {
 			return nil, fmt.Errorf("brain: start: build daemon client: %w", cerr)
 		}
 		lc.client = c
+		q, qerr := wqueue.Open(opts.Agent.VaultBaseDir())
+		if qerr != nil {
+			return nil, fmt.Errorf("brain: start: open write-ahead queue: %w", qerr)
+		}
+		lc.queue = q
+		lc.conn = NewConnectivity()
+		if !opts.SkipDrainer {
+			drainParent := opts.HeartbeatCtx
+			if drainParent == nil {
+				drainParent = context.Background()
+			}
+			drainCtx, cancel := context.WithCancel(drainParent)
+			lc.drainStop = cancel
+			lc.drainDone = make(chan struct{})
+			go lc.runDrainer(drainCtx)
+		}
 	}
 	if !opts.SkipHeartbeat {
 		hbCtx := opts.HeartbeatCtx
@@ -154,6 +185,36 @@ func Start(opts StartOpts) (*Lifecycle, error) {
 // Lifecycle was started without API + Token (legacy mode). MCP
 // handlers branch on this to decide local-only vs POST-to-daemon.
 func (l *Lifecycle) Client() *Client { return l.client }
+
+// Queue returns the per-Lifecycle write-ahead queue, or nil when the
+// Lifecycle was started in legacy BRAIN_VAULT_PATH mode (no daemon).
+// Callers MUST nil-guard before use.
+func (l *Lifecycle) Queue() *wqueue.Queue { return l.queue }
+
+// Connectivity returns the per-Lifecycle daemon connectivity state,
+// or nil in legacy mode. Callers MUST nil-guard before use.
+func (l *Lifecycle) Connectivity() *Connectivity { return l.conn }
+
+// SnapshotAge returns the age of the parent snapshot this brain was
+// born against, approximated as time since BornAt (a brand-new brain
+// just pulled the latest snapshot, so age ≈ now - born_at). Returns
+// 0 when the manifest has no BornAt or now is before BornAt.
+func (l *Lifecycle) SnapshotAge(now time.Time) time.Duration {
+	l.mu.Lock()
+	m := l.manifest
+	l.mu.Unlock()
+	if m == nil || m.BornAt == "" {
+		return 0
+	}
+	born, err := time.Parse(time.RFC3339, m.BornAt)
+	if err != nil {
+		return 0
+	}
+	if now.Before(born) {
+		return 0
+	}
+	return now.Sub(born)
+}
 
 // RecordWrite is the hook ingest handlers (brain_perceive,
 // brain_learn, brain_attach) call after a successful write so the
@@ -285,6 +346,19 @@ func (l *Lifecycle) Shutdown(ctx context.Context) (*DeathResult, error) {
 	if l.heartbeat != nil {
 		if err := l.heartbeat.Stop(); err != nil {
 			l.logger.Warn("phantom-brain: heartbeat stop returned error", slog.String("err", err.Error()))
+		}
+	}
+	// Stop the drainer before Death — it would otherwise race the
+	// queue close + try to POST through a half-torn-down lifecycle.
+	if l.drainStop != nil {
+		l.drainStop()
+		l.mu.Unlock()
+		<-l.drainDone
+		l.mu.Lock()
+	}
+	if l.queue != nil {
+		if err := l.queue.Close(); err != nil {
+			l.logger.Warn("phantom-brain: wqueue close returned error", slog.String("err", err.Error()))
 		}
 	}
 	// Stop the checkpoint ticker before Death() so a tick mid-pack
