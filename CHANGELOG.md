@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.1.0](https://github.com/neverprepared/phantom-brain/compare/v3.0.0...v3.1.0) (2026-06-23)
+
+
+### Features
+
+* v3.1 offline resilience — write-ahead queue + gc-brains UX fix ([#62](https://github.com/neverprepared/phantom-brain/issues/62)) ([aa21c7b](https://github.com/neverprepared/phantom-brain/commit/aa21c7bf7e1efa207df67d939e5747882f31dfa4))
+
 ## [3.0.0](https://github.com/neverprepared/phantom-brain/compare/v2.6.1...v3.0.0) (2026-06-23)
 
 
