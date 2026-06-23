@@ -17,7 +17,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gofrs/flock"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
+	"github.com/neverprepared/phantom-brain/internal/osearch"
 )
 
 // Daemon is the in-process state for a running pbrainctl serve

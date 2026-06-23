@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/index"
+	"github.com/neverprepared/phantom-brain/internal/index"
 )
 
 func TestFtsPhrase(t *testing.T) {

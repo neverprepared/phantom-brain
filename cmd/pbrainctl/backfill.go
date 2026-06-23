@@ -10,9 +10,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/ollama"
-	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
-	pbserver "github.com/neverprepared/mcp-phantom-brain/internal/server"
+	"github.com/neverprepared/phantom-brain/internal/ollama"
+	"github.com/neverprepared/phantom-brain/internal/osearch"
+	pbserver "github.com/neverprepared/phantom-brain/internal/server"
 )
 
 // backfillEmbedder is the minimal slice of *ollama.Client the backfill

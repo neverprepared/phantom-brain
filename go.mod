@@ -1,4 +1,4 @@
-module github.com/neverprepared/mcp-phantom-brain
+module github.com/neverprepared/phantom-brain
 
 go 1.26.2
 

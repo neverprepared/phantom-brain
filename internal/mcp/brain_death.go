@@ -6,7 +6,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/brain"
+	"github.com/neverprepared/phantom-brain/internal/brain"
 )
 
 // brainDeathTool exposes Lifecycle.Shutdown via MCP. Calling it

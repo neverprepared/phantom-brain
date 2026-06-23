@@ -10,7 +10,7 @@ import (
 
 	"github.com/gofrs/flock"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/config"
+	"github.com/neverprepared/phantom-brain/internal/config"
 )
 
 // RecoverySweepResult enumerates what one Recover() invocation did.
@@ -27,6 +27,13 @@ type RecoverySweepResult struct {
 	// for operator diagnostics — every non-MarkedDead inspection lands
 	// here so the sweep's behavior is fully accounted for.
 	Skipped map[string]string
+	// Deleted is the set of brain dirs the GC pass os.RemoveAll'd because
+	// their manifests were status=dead and aged past LocalRetentionHours.
+	Deleted []string
+	// DeleteSkipped maps a brain dir to the reason the GC pass left it
+	// on disk despite the brain being a candidate (held flock racing the
+	// delete, RemoveAll error, manifest tampered between passes, etc.).
+	DeleteSkipped map[string]string
 }
 
 // RecoverOpts collects the inputs to a sweep.
@@ -80,7 +87,8 @@ func Recover(opts RecoverOpts) (*RecoverySweepResult, error) {
 	}
 
 	res := &RecoverySweepResult{
-		Skipped: map[string]string{},
+		Skipped:       map[string]string{},
+		DeleteSkipped: map[string]string{},
 	}
 
 	currentBoot, err := opts.Platform.BootID()
@@ -200,7 +208,98 @@ func Recover(opts RecoverOpts) (*RecoverySweepResult, error) {
 		)
 	}
 
+	gcSweep(res, root, entries, opts, now, logger)
+
 	return res, nil
+}
+
+// gcSweep deletes brain dirs whose manifests are status=dead and aged
+// past Agent.LocalRetentionHours. It runs after the alive->dead pass so
+// brains transitioned this cycle have a synthetic dead-time of "now"
+// and are still well within retention — they survive at least one cycle
+// before becoming GC candidates.
+//
+// Failures are recorded in res.DeleteSkipped but never abort the sweep.
+// GC is best-effort cleanup; a transient RemoveAll failure (read-only
+// mount, in-use file on a bind mount, racing sibling birth) is not
+// worth blocking daemon startup over.
+func gcSweep(res *RecoverySweepResult, root string, entries []os.DirEntry, opts RecoverOpts, now func() time.Time, logger *slog.Logger) {
+	retention := time.Duration(opts.Agent.LocalRetentionHours) * time.Hour
+	if retention <= 0 {
+		return
+	}
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		brainID := e.Name()
+		if brainID == opts.CurrentBrainID {
+			continue
+		}
+		dir := filepath.Join(root, brainID)
+
+		// Belt-and-braces: refuse to descend out of BrainsRoot even
+		// though ReadDir already gave us names rooted there. Defends
+		// against a future layout shift that puts snapcache/ or
+		// _published/ side-by-side with brain UUIDs.
+		if filepath.Dir(dir) != root {
+			res.DeleteSkipped[dir] = "path assertion failed"
+			continue
+		}
+
+		m, err := ReadManifest(dir)
+		if err != nil {
+			res.DeleteSkipped[dir] = fmt.Sprintf("manifest: %v", err)
+			continue
+		}
+		eligible, reason := IsGCEligible(m, dir, now(), retention)
+		if !eligible {
+			res.DeleteSkipped[dir] = reason
+			continue
+		}
+
+		// Take the flock and hold it across RemoveAll. Releasing
+		// before deletion would let a sibling birth into the same
+		// marker between Unlock and RemoveAll, after which we'd wipe
+		// its fresh dir from underneath it. Hold to the end.
+		marker := AliveMarkerPath(dir)
+		var heldLock *flock.Flock
+		if _, err := os.Stat(marker); err == nil {
+			lk := flock.New(marker)
+			took, lockErr := lk.TryLock()
+			if lockErr != nil {
+				res.DeleteSkipped[dir] = fmt.Sprintf("flock probe: %v", lockErr)
+				continue
+			}
+			if !took {
+				res.DeleteSkipped[dir] = "flock acquired between sweep passes"
+				continue
+			}
+			heldLock = lk
+		}
+
+		if err := os.RemoveAll(dir); err != nil {
+			res.DeleteSkipped[dir] = fmt.Sprintf("remove: %v", err)
+			if heldLock != nil {
+				_ = heldLock.Unlock()
+			}
+			continue
+		}
+		if heldLock != nil {
+			// RemoveAll already nuked the marker file; Unlock is a
+			// no-op on a deleted fd path but releases the kernel
+			// lock entry for tidiness.
+			_ = heldLock.Unlock()
+		}
+		res.Deleted = append(res.Deleted, dir)
+		logger.Info(
+			"phantom-brain: garbage-collected dead brain",
+			slog.String("brain_id", m.BrainID),
+			slog.String("reason", reason),
+			slog.Duration("retention", retention),
+		)
+	}
 }
 
 // markDead flips the manifest's status field. Separated for

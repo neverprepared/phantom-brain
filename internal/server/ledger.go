@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	pbsqlite "github.com/neverprepared/mcp-phantom-brain/internal/sqlite"
+	pbsqlite "github.com/neverprepared/phantom-brain/internal/sqlite"
 )
 
 // Ledger wraps the per-vault merges.sqlite database that records

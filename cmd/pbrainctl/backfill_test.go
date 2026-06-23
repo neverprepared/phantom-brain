@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
+	"github.com/neverprepared/phantom-brain/internal/osearch"
 )
 
 // fakeEmbedder returns a deterministic non-zero vector of the right dim

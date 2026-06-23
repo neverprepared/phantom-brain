@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/index"
-	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
+	"github.com/neverprepared/phantom-brain/internal/index"
+	"github.com/neverprepared/phantom-brain/internal/osearch"
 )
 
 // --- fakeExporter -------------------------------------------------

@@ -14,9 +14,9 @@ package mcp
 import (
 	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/brain"
-	"github.com/neverprepared/mcp-phantom-brain/internal/index"
-	"github.com/neverprepared/mcp-phantom-brain/internal/working"
+	"github.com/neverprepared/phantom-brain/internal/brain"
+	"github.com/neverprepared/phantom-brain/internal/index"
+	"github.com/neverprepared/phantom-brain/internal/working"
 )
 
 // ServerDeps is the dependency container the MCP tool handlers close

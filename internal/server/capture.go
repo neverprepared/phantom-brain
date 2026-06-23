@@ -47,7 +47,7 @@ func CaptureURL(ctx context.Context, store AttachmentStore, profile, vault, docS
 		timeout = 30 * time.Second
 	}
 	if userAgent == "" {
-		userAgent = "phantom-brain/2 (+https://github.com/neverprepared/mcp-phantom-brain)"
+		userAgent = "phantom-brain/2 (+https://github.com/neverprepared/phantom-brain)"
 	}
 
 	fetchCtx, cancel := context.WithTimeout(ctx, timeout)

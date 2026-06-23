@@ -7,11 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/brain"
-	"github.com/neverprepared/mcp-phantom-brain/internal/canonicalize"
-	"github.com/neverprepared/mcp-phantom-brain/internal/index"
-	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
-	"github.com/neverprepared/mcp-phantom-brain/internal/vault"
+	"github.com/neverprepared/phantom-brain/internal/brain"
+	"github.com/neverprepared/phantom-brain/internal/canonicalize"
+	"github.com/neverprepared/phantom-brain/internal/index"
+	"github.com/neverprepared/phantom-brain/internal/osearch"
+	"github.com/neverprepared/phantom-brain/internal/vault"
 )
 
 // ingestParams is the shared shape for brain_perceive (Raw/gathered/)

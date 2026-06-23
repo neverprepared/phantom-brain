@@ -5,7 +5,7 @@
   "packages": {
     ".": {
       "release-type": "simple",
-      "package-name": "mcp-phantom-brain",
+      "package-name": "phantom-brain",
       "changelog-path": "CHANGELOG.md",
       "draft": false,
       "prerelease": false

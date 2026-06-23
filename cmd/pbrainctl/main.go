@@ -20,55 +20,98 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/spf13/cobra"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/brain"
-	"github.com/neverprepared/mcp-phantom-brain/internal/config"
-	"github.com/neverprepared/mcp-phantom-brain/internal/index"
-	pbmcp "github.com/neverprepared/mcp-phantom-brain/internal/mcp"
-	"github.com/neverprepared/mcp-phantom-brain/internal/ollama"
-	pbserver "github.com/neverprepared/mcp-phantom-brain/internal/server"
-	"github.com/neverprepared/mcp-phantom-brain/internal/vault"
-	"github.com/neverprepared/mcp-phantom-brain/internal/version"
-	"github.com/neverprepared/mcp-phantom-brain/internal/working"
+	"github.com/neverprepared/phantom-brain/internal/brain"
+	"github.com/neverprepared/phantom-brain/internal/config"
+	"github.com/neverprepared/phantom-brain/internal/index"
+	pbmcp "github.com/neverprepared/phantom-brain/internal/mcp"
+	"github.com/neverprepared/phantom-brain/internal/ollama"
+	pbserver "github.com/neverprepared/phantom-brain/internal/server"
+	"github.com/neverprepared/phantom-brain/internal/vault"
+	"github.com/neverprepared/phantom-brain/internal/version"
+	"github.com/neverprepared/phantom-brain/internal/working"
 )
 
 func main() {
 	root := &cobra.Command{
 		Use:   "pbrainctl",
 		Short: "phantom-brain — MCP server, daemon, and operator CLI",
-		Long: `pbrainctl is a single binary serving three modes:
+		Long: `pbrainctl is a single binary with two top-level groups:
 
-  pbrainctl mcp          stdio JSON-RPC MCP server (per agent process)
-  pbrainctl serve        HTTP daemon (per-(profile, vault) reaper + synthesizer)
-  pbrainctl <op>         operator commands (list, snapshot, vault, ...)
+  pbrainctl client <cmd>   agent-side commands (MCP server, brain dirs, ingest)
+  pbrainctl server <cmd>   daemon-side commands (HTTP serve, vault/snapshot/maintenance)
 
-See https://github.com/neverprepared/mcp-phantom-brain for the v5 spec.`,
+v3.0 restructured the previously-flat command tree into these explicit
+groups so a workstation install isn't surfacing daemon-only commands
+under --help, and an operator on a daemon host isn't tab-completing
+agent-only verbs. The old flat names (pbrainctl serve, pbrainctl mcp,
+pbrainctl vault list ...) were removed in v3.0 — update your scripts
+and Claude Code MCP config.
+
+See https://github.com/neverprepared/phantom-brain for the v5 spec.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
 
-	root.AddCommand(versionCmd())
-	root.AddCommand(mcpCmd())
-	root.AddCommand(serveCmd())
-	root.AddCommand(migrateLegacyCmd())
-	root.AddCommand(ingestBulkCmd())
-	root.AddCommand(backfillAttachmentStubsCmd())
-
-	// Operator subcommands (Phase 3). Grouped by domain so the help
-	// text stays scannable.
-	root.AddCommand(vaultCmd())
-	root.AddCommand(snapshotCmd())
-	root.AddCommand(queueCmd())
-	root.AddCommand(maintenanceCmd())
-	root.AddCommand(brainListCmd())
-	root.AddCommand(brainShowCmd())
-	root.AddCommand(brainOrphansCmd())
-	// force-merge retired in Phase 6 — no reaper pass to fire.
-	// force-checkpoint retired in Phase 6 — daemon's SynthWorker drains async.
+	root.AddCommand(clientCmd())
+	root.AddCommand(serverCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "pbrainctl: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// clientCmd groups every command that runs on a workstation / agent
+// host. These talk to a daemon over HTTP (or operate purely on the
+// local agent brain dir); none of them spin up the daemon's HTTP
+// surface, registry, or storage backends.
+func clientCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "client",
+		Short: "Agent-side commands (MCP server, brain dirs, ingest)",
+	}
+	c.AddCommand(mcpCmd())
+	c.AddCommand(ingestBulkCmd())
+	c.AddCommand(migrateLegacyCmd())
+	c.AddCommand(brainCmd())
+	c.AddCommand(gcBrainsCmd())
+	c.AddCommand(versionCmd())
+	return c
+}
+
+// serverCmd groups every command that lives on the daemon host:
+// the daemon itself plus the operator levers that poke its state
+// directly (vault registry, snapshot publisher, maintenance flag,
+// backfill jobs). These commands need PHANTOM_BRAIN_CONFIG_DIR /
+// PHANTOM_BRAIN_DATA_DIR access — they will not work on a
+// workstation that doesn't host the daemon's data dir.
+func serverCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "server",
+		Short: "Daemon-side commands (HTTP serve, vault/snapshot/maintenance)",
+	}
+	c.AddCommand(serveCmd())
+	c.AddCommand(vaultCmd())
+	c.AddCommand(snapshotCmd())
+	c.AddCommand(queueCmd())
+	c.AddCommand(maintenanceCmd())
+	c.AddCommand(backfillAttachmentStubsCmd())
+	c.AddCommand(versionCmd())
+	return c
+}
+
+// brainCmd is the client-side parent for inspecting locally-stored
+// brain dirs (list, show, orphans). Mirrors what `vault` does for the
+// daemon side. Pulled into a parent so `pbrainctl client --help`
+// reads cleanly — the previous flat layout buried three sibling
+// verbs at the top level.
+func brainCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "brain",
+		Short: "Inspect local brain dirs (list, show, orphans)",
+	}
+	c.AddCommand(brainListCmd(), brainShowCmd(), brainOrphansCmd())
+	return c
 }
 
 func versionCmd() *cobra.Command {

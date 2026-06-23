@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/working"
+	"github.com/neverprepared/phantom-brain/internal/working"
 )
 
 // taskIDRE pulls the 16-hex task_id out of task_start's response.

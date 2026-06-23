@@ -13,7 +13,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/index"
+	"github.com/neverprepared/phantom-brain/internal/index"
 )
 
 // nonZeroEmbedding builds a unit-ish vector that varies by seed so

@@ -39,7 +39,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	pbsqlite "github.com/neverprepared/mcp-phantom-brain/internal/sqlite"
+	pbsqlite "github.com/neverprepared/phantom-brain/internal/sqlite"
 )
 
 // Embedder is the minimal interface index needs from any embedding

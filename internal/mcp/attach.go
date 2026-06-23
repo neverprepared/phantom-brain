@@ -13,11 +13,11 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/brain"
-	"github.com/neverprepared/mcp-phantom-brain/internal/canonicalize"
-	"github.com/neverprepared/mcp-phantom-brain/internal/index"
-	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
-	"github.com/neverprepared/mcp-phantom-brain/internal/vault"
+	"github.com/neverprepared/phantom-brain/internal/brain"
+	"github.com/neverprepared/phantom-brain/internal/canonicalize"
+	"github.com/neverprepared/phantom-brain/internal/index"
+	"github.com/neverprepared/phantom-brain/internal/osearch"
+	"github.com/neverprepared/phantom-brain/internal/vault"
 )
 
 // attachTool defines the brain_attach MCP tool schema.

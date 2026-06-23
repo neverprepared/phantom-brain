@@ -7,7 +7,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/index"
+	"github.com/neverprepared/phantom-brain/internal/index"
 )
 
 const defaultRecallLimit = 10

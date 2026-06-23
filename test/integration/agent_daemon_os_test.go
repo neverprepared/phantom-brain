@@ -23,10 +23,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/brain"
-	"github.com/neverprepared/mcp-phantom-brain/internal/index"
-	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
-	pbserver "github.com/neverprepared/mcp-phantom-brain/internal/server"
+	"github.com/neverprepared/phantom-brain/internal/brain"
+	"github.com/neverprepared/phantom-brain/internal/index"
+	"github.com/neverprepared/phantom-brain/internal/osearch"
+	pbserver "github.com/neverprepared/phantom-brain/internal/server"
 )
 
 func requireLiveOS(t *testing.T) string {

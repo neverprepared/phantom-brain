@@ -45,6 +45,7 @@ type Agent struct {
 	OrphanThresholdSecs       int   // CL_BRAIN_ORPHAN_THRESHOLD_SECS (300)
 	MaxPendingMB              int   // CL_BRAIN_MAX_PENDING_MB (5000)
 	DiskPreflightCeilingBytes int64 // CL_BRAIN_DISK_PREFLIGHT_CEILING_BYTES (10 GiB)
+	LocalRetentionHours       int   // CL_BRAIN_LOCAL_RETENTION_HOURS (24; 0 disables local brain GC)
 
 	// dataHome is the resolved XDG_DATA_HOME (or its HOME-based fallback).
 	// Captured at load time so tests can override it deterministically.
@@ -98,6 +99,7 @@ func loadAgentFrom(lookup lookupFunc) (*Agent, error) {
 	a.OrphanThresholdSecs = lookupInt(lookup, "CL_BRAIN_ORPHAN_THRESHOLD_SECS", 300)
 	a.MaxPendingMB = lookupInt(lookup, "CL_BRAIN_MAX_PENDING_MB", 5000)
 	a.DiskPreflightCeilingBytes = lookupInt64(lookup, "CL_BRAIN_DISK_PREFLIGHT_CEILING_BYTES", 10*1024*1024*1024)
+	a.LocalRetentionHours = lookupNonNegInt(lookup, "CL_BRAIN_LOCAL_RETENTION_HOURS", 24)
 
 	// v5.0 invariant: heartbeat threshold must be at least 10x the
 	// interval so a delayed touch doesn't false-orphan a live brain.
@@ -128,6 +130,26 @@ func lookupInt(lookup lookupFunc, key string, def int) int {
 	}
 	return v
 }
+
+// lookupNonNegInt is like lookupInt but distinguishes "absent" (return
+// default) from "explicitly zero or negative" (clamp to 0 — used by
+// knobs where 0 is a meaningful disable signal, e.g. local brain GC
+// retention). A non-integer falls back to the default.
+func lookupNonNegInt(lookup lookupFunc, key string, def int) int {
+	raw := strings.TrimSpace(lookup(key))
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return def
+	}
+	if v < 0 {
+		return 0
+	}
+	return v
+}
+
 
 func lookupInt64(lookup lookupFunc, key string, def int64) int64 {
 	raw := strings.TrimSpace(lookup(key))

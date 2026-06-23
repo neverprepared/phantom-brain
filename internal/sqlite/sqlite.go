@@ -28,7 +28,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3" // base driver — internal/vec registers a vec-enabled variant
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/vec"
+	"github.com/neverprepared/phantom-brain/internal/vec"
 )
 
 func init() {

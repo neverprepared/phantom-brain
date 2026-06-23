@@ -101,4 +101,4 @@ VOLUME ["/config", "/data"]
 USER pbrain
 
 ENTRYPOINT ["/usr/local/bin/pbrainctl"]
-CMD ["serve"]
+CMD ["server", "serve"]

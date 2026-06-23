@@ -81,6 +81,7 @@ func TestLoadAgentTunableDefaults(t *testing.T) {
 		{"OrphanThresholdSecs", a.OrphanThresholdSecs, 300},
 		{"MaxPendingMB", a.MaxPendingMB, 5000},
 		{"DiskPreflightCeilingBytes", a.DiskPreflightCeilingBytes, int64(10 * 1024 * 1024 * 1024)},
+		{"LocalRetentionHours", a.LocalRetentionHours, 24},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -135,6 +136,35 @@ func TestLoadAgentTunableBogusFallsBack(t *testing.T) {
 	}
 	if a.MaxPendingMB != 5000 {
 		t.Errorf("MaxPendingMB = %d, want default 5000", a.MaxPendingMB)
+	}
+}
+
+func TestLocalRetentionHoursParsing(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want int
+	}{
+		{"unset uses default", "", 24},
+		{"explicit zero disables", "0", 0},
+		{"positive override", "48", 48},
+		{"negative clamps to zero", "-5", 0},
+		{"garbage falls back to default", "lol", 24},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			env := baseRequired()
+			if c.raw != "" {
+				env["CL_BRAIN_LOCAL_RETENTION_HOURS"] = c.raw
+			}
+			a, err := loadAgentFrom(env.lookup)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if a.LocalRetentionHours != c.want {
+				t.Errorf("LocalRetentionHours = %d, want %d", a.LocalRetentionHours, c.want)
+			}
+		})
 	}
 }
 

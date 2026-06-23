@@ -18,7 +18,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	osapi "github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/index"
+	"github.com/neverprepared/phantom-brain/internal/index"
 )
 
 // ExportOptions configures one snapshot export from OS to a tar.zst.

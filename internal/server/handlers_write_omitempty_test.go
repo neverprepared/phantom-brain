@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
+	"github.com/neverprepared/phantom-brain/internal/osearch"
 )
 
 // TestCapturedAtOmittedWhenNil guards the wire contract: a nil
