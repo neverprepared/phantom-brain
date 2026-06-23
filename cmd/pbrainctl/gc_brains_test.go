@@ -263,6 +263,143 @@ func TestGCBrains_BrainsRootMissingIsNoop(t *testing.T) {
 	}
 }
 
+// runGCBrainsCmd executes the cobra command end-to-end with the supplied
+// args against a captured stdout buffer. Lets us exercise the binding
+// resolution that lives inside RunE rather than just the interior loop.
+func runGCBrainsCmd(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	c := gcBrainsCmd()
+	buf := &bytes.Buffer{}
+	c.SetOut(buf)
+	c.SetErr(buf)
+	c.SetArgs(args)
+	err := c.Execute()
+	return buf.String(), err
+}
+
+// scrubAgentEnv unsets every CL_BRAIN_* and CL_WORKSPACE_* var so
+// LoadAgent's fast-path fails and we fall into the bindless walk.
+// XDG_DATA_HOME is pointed at the test tempdir.
+func scrubAgentEnv(t *testing.T, dataHome string) {
+	t.Helper()
+	for _, k := range []string{
+		"CL_BRAIN_API", "CL_BRAIN_API_TOKEN", "CL_WORKSPACE_PROFILE", "CL_BRAIN_VAULT",
+		"CL_BRAIN_LOCAL_RETENTION_HOURS", "CL_BRAIN_ID",
+	} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("XDG_DATA_HOME", dataHome)
+}
+
+func TestGCBrains_BindlessWalkDiscoversAllBindings(t *testing.T) {
+	dataHome := t.TempDir()
+	scrubAgentEnv(t, dataHome)
+
+	// Two synthetic bindings, each with one dead, eligible brain.
+	r1 := filepath.Join(dataHome, "phantom-brain", "p1", "v1", "brains")
+	r2 := filepath.Join(dataHome, "phantom-brain", "p2", "v2", "brains")
+	now := time.Now()
+	writeManifestAt(t, r1, "b-1", brain.StatusDead, now.Add(-48*time.Hour), 48*time.Hour, 0)
+	writeManifestAt(t, r2, "b-2", brain.StatusDead, now.Add(-48*time.Hour), 48*time.Hour, 0)
+
+	out, err := runGCBrainsCmd(t, "--dry-run")
+	if err != nil {
+		t.Fatalf("cmd: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "# p1/v1") || !strings.Contains(out, "# p2/v2") {
+		t.Errorf("expected per-binding headers, got:\n%s", out)
+	}
+	if !strings.Contains(out, "b-1") || !strings.Contains(out, "b-2") {
+		t.Errorf("expected both brain rows, got:\n%s", out)
+	}
+}
+
+func TestGCBrains_ProfileVaultFlagsScope(t *testing.T) {
+	dataHome := t.TempDir()
+	scrubAgentEnv(t, dataHome)
+
+	r1 := filepath.Join(dataHome, "phantom-brain", "p1", "v1", "brains")
+	r2 := filepath.Join(dataHome, "phantom-brain", "p2", "v2", "brains")
+	now := time.Now()
+	writeManifestAt(t, r1, "b-1", brain.StatusDead, now.Add(-48*time.Hour), 48*time.Hour, 0)
+	writeManifestAt(t, r2, "b-2", brain.StatusDead, now.Add(-48*time.Hour), 48*time.Hour, 0)
+
+	out, err := runGCBrainsCmd(t, "--dry-run", "--profile", "p1", "--vault", "v1")
+	if err != nil {
+		t.Fatalf("cmd: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "b-1") {
+		t.Errorf("expected b-1 in scoped output, got:\n%s", out)
+	}
+	if strings.Contains(out, "b-2") {
+		t.Errorf("--profile/--vault must not touch other bindings, got:\n%s", out)
+	}
+}
+
+func TestGCBrains_ProfileVaultMustPairUp(t *testing.T) {
+	dataHome := t.TempDir()
+	scrubAgentEnv(t, dataHome)
+
+	_, err := runGCBrainsCmd(t, "--dry-run", "--profile", "p1")
+	if err == nil {
+		t.Fatal("expected error when --profile passed without --vault")
+	}
+	if !strings.Contains(err.Error(), "must be set together") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestGCBrains_RejectsPathTraversalInProfile(t *testing.T) {
+	dataHome := t.TempDir()
+	scrubAgentEnv(t, dataHome)
+
+	_, err := runGCBrainsCmd(t, "--dry-run", "--profile", "../etc", "--vault", "v1")
+	if err == nil {
+		t.Fatal("expected rejection of traversal in --profile")
+	}
+	if !strings.Contains(err.Error(), "path separators") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestGCBrains_BrainsRootFlagWinsOverEverything(t *testing.T) {
+	dataHome := t.TempDir()
+	scrubAgentEnv(t, dataHome)
+
+	// Decoy binding the walk would pick up if --brains-root were ignored.
+	decoy := filepath.Join(dataHome, "phantom-brain", "decoy", "vault", "brains")
+	now := time.Now()
+	writeManifestAt(t, decoy, "b-decoy", brain.StatusDead, now.Add(-48*time.Hour), 48*time.Hour, 0)
+
+	// Explicit root with one brain in it.
+	explicit := t.TempDir()
+	writeManifestAt(t, explicit, "b-explicit", brain.StatusDead, now.Add(-48*time.Hour), 48*time.Hour, 0)
+
+	out, err := runGCBrainsCmd(t, "--dry-run", "--brains-root", explicit)
+	if err != nil {
+		t.Fatalf("cmd: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "b-explicit") {
+		t.Errorf("expected b-explicit, got:\n%s", out)
+	}
+	if strings.Contains(out, "b-decoy") || strings.Contains(out, "# decoy/") {
+		t.Errorf("--brains-root must short-circuit the walk, got:\n%s", out)
+	}
+}
+
+func TestGCBrains_BindlessWalkEmptyIsNoop(t *testing.T) {
+	dataHome := t.TempDir()
+	scrubAgentEnv(t, dataHome)
+
+	out, err := runGCBrainsCmd(t, "--dry-run")
+	if err != nil {
+		t.Fatalf("cmd: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "no bindings found") {
+		t.Errorf("expected no-bindings notice, got:\n%s", out)
+	}
+}
+
 func TestIsGCEligible_RespectsRules(t *testing.T) {
 	now := time.Now()
 	dir := t.TempDir()
