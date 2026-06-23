@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -39,6 +40,8 @@ func gcBrainsCmd() *cobra.Command {
 		dryRun       bool
 		includeAlive bool
 		brainsRoot   string
+		profileFlag  string
+		vaultFlag    string
 	)
 	c := &cobra.Command{
 		Use:   "gc-brains",
@@ -53,44 +56,189 @@ Retention defaults to CL_BRAIN_LOCAL_RETENTION_HOURS (24h). Setting it
 to 0 disables deletion — the subcommand then refuses to run unless
 --dry-run is passed.
 
---brains-root overrides Agent.BrainsRoot() for cleaning up stranded
-vault bindings whose env vars are no longer in scope.`,
+Binding resolution order:
+
+  1. --brains-root <path>            explicit escape hatch, wins outright
+  2. --profile X --vault Y           scopes to that one binding, no env required
+  3. CL_WORKSPACE_PROFILE/CL_BRAIN_VAULT (+ CL_BRAIN_API/_TOKEN) set in env
+  4. neither: walks every <XDG_DATA_HOME>/phantom-brain/*/*/brains discovered
+     on disk and runs GC per binding. Useful from a plain shell where no
+     agent env contract is in scope.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			agent, err := config.LoadAgent()
+			out := cmd.OutOrStdout()
+			retention := olderThan
+			// Path 1: explicit root override. Honor it with no binding resolution.
+			if brainsRoot != "" {
+				root := expandHome(brainsRoot)
+				if retention <= 0 {
+					retention = 24 * time.Hour
+				}
+				if retention <= 0 && !dryRun {
+					return errRetentionDisabled()
+				}
+				return runGCBrains(out, gcBrainsOpts{
+					Root:         root,
+					Retention:    retention,
+					DryRun:       dryRun,
+					IncludeAlive: includeAlive,
+					Now:          time.Now,
+					Platform:     brain.NewPlatform(),
+				})
+			}
+
+			// Path 2: --profile/--vault both set. Resolve directly off
+			// XDG_DATA_HOME without requiring CL_BRAIN_API/_TOKEN.
+			profileSet := strings.TrimSpace(profileFlag) != ""
+			vaultSet := strings.TrimSpace(vaultFlag) != ""
+			if profileSet != vaultSet {
+				return errors.New("--profile and --vault must be set together")
+			}
+			if profileSet && vaultSet {
+				if err := validateBindingSegment("profile", profileFlag); err != nil {
+					return err
+				}
+				if err := validateBindingSegment("vault", vaultFlag); err != nil {
+					return err
+				}
+				dataHome, err := resolveDataHomeFromEnv()
+				if err != nil {
+					return err
+				}
+				root := bindingBrainsRoot(dataHome, profileFlag, vaultFlag)
+				if retention <= 0 {
+					retention = 24 * time.Hour
+				}
+				if retention <= 0 && !dryRun {
+					return errRetentionDisabled()
+				}
+				return runGCBrains(out, gcBrainsOpts{
+					Root:         root,
+					Retention:    retention,
+					DryRun:       dryRun,
+					IncludeAlive: includeAlive,
+					Now:          time.Now,
+					Platform:     brain.NewPlatform(),
+				})
+			}
+
+			// Path 3: full agent env contract present (CL_BRAIN_API etc.).
+			// LoadAgent fails fast if any of the four required vars is missing,
+			// in which case we fall through to Path 4 (bindless walk).
+			if agent, err := config.LoadAgent(); err == nil {
+				eff := retention
+				if eff <= 0 {
+					eff = time.Duration(agent.LocalRetentionHours) * time.Hour
+				}
+				if eff <= 0 && !dryRun {
+					return errRetentionDisabled()
+				}
+				return runGCBrains(out, gcBrainsOpts{
+					Root:           agent.BrainsRoot(),
+					CurrentBrainID: agent.BrainID,
+					Retention:      eff,
+					DryRun:         dryRun,
+					IncludeAlive:   includeAlive,
+					Now:            time.Now,
+					Platform:       brain.NewPlatform(),
+				})
+			}
+
+			// Path 4: bindless walk. Discover every binding on disk.
+			dataHome, err := resolveDataHomeFromEnv()
 			if err != nil {
 				return err
 			}
-			root := brainsRoot
-			if root == "" {
-				root = agent.BrainsRoot()
-			} else {
-				root = expandHome(root)
-			}
-
-			retention := olderThan
 			if retention <= 0 {
-				retention = time.Duration(agent.LocalRetentionHours) * time.Hour
+				retention = 24 * time.Hour
 			}
 			if retention <= 0 && !dryRun {
-				return errors.New("retention disabled (CL_BRAIN_LOCAL_RETENTION_HOURS=0 and no --older-than); pass --older-than to force, or run with --dry-run")
+				return errRetentionDisabled()
 			}
-
-			return runGCBrains(cmd.OutOrStdout(), gcBrainsOpts{
-				Root:           root,
-				CurrentBrainID: agent.BrainID,
-				Retention:      retention,
-				DryRun:         dryRun,
-				IncludeAlive:   includeAlive,
-				Now:            time.Now,
-				Platform:       brain.NewPlatform(),
-			})
+			return walkAllBindings(out, gcBrainsOpts{
+				Retention:    retention,
+				DryRun:       dryRun,
+				IncludeAlive: includeAlive,
+				Now:          time.Now,
+				Platform:     brain.NewPlatform(),
+			}, dataHome)
 		},
 	}
 	c.Flags().DurationVar(&olderThan, "older-than", 0, "minimum age before a dead brain is eligible (overrides CL_BRAIN_LOCAL_RETENTION_HOURS)")
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "print the table without deleting anything")
 	c.Flags().BoolVar(&includeAlive, "include-alive", false, "also consider status=alive brains whose flock is takeable and PID is gone")
-	c.Flags().StringVar(&brainsRoot, "brains-root", "", "override the agent's BrainsRoot (for stranded vault bindings)")
+	c.Flags().StringVar(&brainsRoot, "brains-root", "", "override binding resolution and scan this directory directly")
+	c.Flags().StringVar(&profileFlag, "profile", "", "scope to one binding without requiring CL_WORKSPACE_PROFILE in env (requires --vault)")
+	c.Flags().StringVar(&vaultFlag, "vault", "", "scope to one binding without requiring CL_BRAIN_VAULT in env (requires --profile)")
 	return c
+}
+
+// errRetentionDisabled is the shared message for the three RunE branches
+// that need to bail when retention resolves to 0 outside --dry-run.
+func errRetentionDisabled() error {
+	return errors.New("retention disabled (CL_BRAIN_LOCAL_RETENTION_HOURS=0 and no --older-than); pass --older-than to force, or run with --dry-run")
+}
+
+// validateBindingSegment refuses path traversal in --profile/--vault flag
+// values. The bindless walk uses these as filesystem path segments via
+// filepath.Join; a "../etc" would let an operator escape the data root.
+func validateBindingSegment(name, v string) error {
+	if v == "" {
+		return fmt.Errorf("--%s must not be empty", name)
+	}
+	if strings.ContainsAny(v, "/\\") || v == "." || v == ".." {
+		return fmt.Errorf("--%s %q contains path separators", name, v)
+	}
+	return nil
+}
+
+// resolveDataHomeFromEnv mirrors internal/config.resolveDataHome but
+// reads the process environment directly. Duplicated rather than
+// exporting the unexported helper — four lines, tighter blast radius.
+func resolveDataHomeFromEnv() (string, error) {
+	if xdg := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); xdg != "" {
+		return xdg, nil
+	}
+	home := strings.TrimSpace(os.Getenv("HOME"))
+	if home == "" {
+		return "", errors.New("gc-brains: neither XDG_DATA_HOME nor HOME is set; cannot resolve data dir")
+	}
+	return filepath.Join(home, ".local", "share"), nil
+}
+
+// bindingBrainsRoot mirrors Agent.BrainsRoot()'s layout:
+// <dataHome>/phantom-brain/<profile>/<vault>/brains.
+func bindingBrainsRoot(dataHome, profile, vault string) string {
+	return filepath.Join(dataHome, "phantom-brain", profile, vault, "brains")
+}
+
+// walkAllBindings discovers every brains/ dir beneath dataHome's
+// phantom-brain tree and runs GC against each. Empty discovery prints
+// a single notice and returns nil — that's the right answer for a
+// freshly provisioned host with no brains yet.
+func walkAllBindings(out io.Writer, opts gcBrainsOpts, dataHome string) error {
+	pattern := filepath.Join(dataHome, "phantom-brain", "*", "*", "brains")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return fmt.Errorf("scan %s: %w", pattern, err)
+	}
+	sort.Strings(matches)
+	if len(matches) == 0 {
+		fmt.Fprintf(out, "no bindings found under %s\n", filepath.Join(dataHome, "phantom-brain"))
+		return nil
+	}
+	for _, root := range matches {
+		// Pretty header is "<profile>/<vault>"; recover it from the path.
+		vault := filepath.Base(filepath.Dir(root))
+		profile := filepath.Base(filepath.Dir(filepath.Dir(root)))
+		fmt.Fprintf(out, "# %s/%s\n", profile, vault)
+		// No CurrentBrainID — cross-binding sweep has no notion of "self".
+		bindingOpts := opts
+		bindingOpts.Root = root
+		if err := runGCBrains(out, bindingOpts); err != nil {
+			return fmt.Errorf("%s/%s: %w", profile, vault, err)
+		}
+	}
+	return nil
 }
 
 // gcBrainsOpts is the interior dependency surface for runGCBrains so
