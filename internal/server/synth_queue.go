@@ -53,6 +53,16 @@ type SynthWorker struct {
 	attach  AttachmentStore
 	capture CaptureConfig
 
+	// Resolve returns per-binding views for a job's (profile, vault).
+	// v3.2 per-binding storage overrides: each binding may have its
+	// own OS index prefix + MinIO bucket. processJob looks up the
+	// binding's view here and uses it for every OS/MinIO call rather
+	// than the worker's struct-level shared os/attach fields.
+	//
+	// Nil-safe: when Resolve is nil the worker falls back to the
+	// shared os/attach fields (legacy / test path).
+	Resolve func(profile, vault string) (osWriter, AttachmentStore, bool)
+
 	// pdfExtractor pulls plain text out of PDF attachments at synth
 	// time so they become FTS-searchable. Nil-safe — when the daemon
 	// runs in an environment without poppler-utils, the field stays
@@ -182,12 +192,27 @@ func (w *SynthWorker) run(ctx context.Context) {
 	}
 }
 
+// resolveForJob returns the per-binding views (or the shared fallback
+// fields) for a job. v3.2 per-binding storage overrides: each
+// (profile, vault) may resolve to its own OS index prefix + MinIO
+// bucket. The worker calls this once per job and uses the result
+// instead of the struct-level os/attach fields.
+func (w *SynthWorker) resolveForJob(job synthJob) (osWriter, AttachmentStore) {
+	if w.Resolve != nil {
+		if oc, at, ok := w.Resolve(job.Profile, job.Vault); ok {
+			return oc, at
+		}
+	}
+	return w.os, w.attach
+}
+
 // processJob runs one (profile, vault, sha) item through the
 // pipeline. Returns nil on success; non-nil errors get logged at
 // Warn — the doc stays in raw-only state and a future re-enqueue
 // (operator-driven, e.g. brain_reflect) can retry.
 func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
-	doc, err := w.os.GetSummary(ctx, job.Profile, job.Vault, job.SHA)
+	osc, attach := w.resolveForJob(job)
+	doc, err := osc.GetSummary(ctx, job.Profile, job.Vault, job.SHA)
 	if err != nil {
 		return err
 	}
@@ -195,7 +220,7 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 		// No summary doc — could be a delete race, or this SHA belongs
 		// to an attachment doc instead. Try the attachment path before
 		// silently returning so PDFs get their daemon-side extraction.
-		return w.processAttachmentJob(ctx, job)
+		return w.processAttachmentJob(ctx, job, osc, attach)
 	}
 	if doc.Synthesised {
 		// Idempotent: re-enqueueing an already-synthed doc is fine
@@ -210,7 +235,7 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 	// just the caller's description. Non-fatal — a failure leaves the
 	// stub with description-only RawBody, which is still recall-visible.
 	if doc.Kind == osearch.KindAttachmentStub {
-		if err := w.enrichAttachmentStub(ctx, job, doc); err != nil {
+		if err := w.enrichAttachmentStub(ctx, job, doc, osc, attach); err != nil {
 			w.logger.Warn("phantom-brain: attachment stub enrichment failed (non-fatal)",
 				slog.String("sha", job.SHA), slog.String("err", err.Error()))
 		}
@@ -225,10 +250,10 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 	// has a URL, fetch the page bytes and stash them in MinIO. Best-
 	// effort — fetch failures (URL unreachable, oversize, non-2xx)
 	// are logged and DON'T block gate/distill/index writes.
-	if w.attach != nil && w.capture.Enabled && doc.SourceURL != "" && doc.CaptureMinIOKey == "" {
+	if attach != nil && w.capture.Enabled && doc.SourceURL != "" && doc.CaptureMinIOKey == "" {
 		ua := w.capture.UserAgent
 		timeout := time.Duration(w.capture.TimeoutSecs) * time.Second
-		res, cerr := CaptureURL(ctx, w.attach, job.Profile, job.Vault, job.SHA,
+		res, cerr := CaptureURL(ctx, attach, job.Profile, job.Vault, job.SHA,
 			doc.SourceURL, w.capture.MaxBytes, ua, timeout)
 		if cerr != nil {
 			w.logger.Warn("phantom-brain: capture failed (non-fatal)",
@@ -292,7 +317,7 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 	entities := extractEntitiesBest(ctx, doc.Title, content, w.cliAvailable, w.logger)
 	entitySlugs := make([]string, 0, len(entities))
 	for _, ent := range entities {
-		slug, err := w.upsertEntity(ctx, job, doc, ent, content, verdict)
+		slug, err := w.upsertEntity(ctx, job, doc, ent, content, verdict, osc)
 		if err != nil {
 			w.logger.Warn("phantom-brain: entity upsert failed (continuing)",
 				slog.String("entity", ent), slog.String("err", err.Error()))
@@ -309,7 +334,7 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 	doc.Topic = string(verdict.Topic)
 	doc.GateReason = verdict.Reason
 	doc.Entities = entitySlugs
-	return w.os.UpsertSummary(ctx, *doc, false)
+	return osc.UpsertSummary(ctx, *doc, false)
 }
 
 // gateSourceType maps the SummaryDoc shape onto the v5.0 GateOpts
@@ -326,13 +351,13 @@ func gateSourceType(doc *osearch.SummaryDoc) string {
 // entity doc. Read-modify-write under the daemon's single-worker
 // constraint; with multiple workers we'd need OS's painless update
 // script for atomicity, which can land in Phase 7 if it ever matters.
-func (w *SynthWorker) upsertEntity(ctx context.Context, job synthJob, src *osearch.SummaryDoc, name, body string, v GateVerdict) (string, error) {
+func (w *SynthWorker) upsertEntity(ctx context.Context, job synthJob, src *osearch.SummaryDoc, name, body string, v GateVerdict, osc osWriter) (string, error) {
 	slug := osearch.EntitySlug(name)
 	if slug == "" {
 		return "", nil
 	}
 	now := time.Now().UTC()
-	existing, err := w.os.GetEntity(ctx, job.Profile, job.Vault, slug)
+	existing, err := osc.GetEntity(ctx, job.Profile, job.Vault, slug)
 	if err != nil {
 		return "", err
 	}
@@ -361,7 +386,7 @@ func (w *SynthWorker) upsertEntity(ctx context.Context, job synthJob, src *osear
 			UpdatedAt:   now,
 		}
 	}
-	if err := w.os.UpsertEntity(ctx, doc, false); err != nil {
+	if err := osc.UpsertEntity(ctx, doc, false); err != nil {
 		return "", err
 	}
 	return slug, nil
@@ -375,8 +400,8 @@ func (w *SynthWorker) upsertEntity(ctx context.Context, job synthJob, src *osear
 //
 // Mutates `summary` in place — caller continues with the standard
 // pipeline using the updated RawBody.
-func (w *SynthWorker) enrichAttachmentStub(ctx context.Context, job synthJob, summary *osearch.SummaryDoc) error {
-	att, err := w.os.GetAttachment(ctx, job.Profile, job.Vault, job.SHA)
+func (w *SynthWorker) enrichAttachmentStub(ctx context.Context, job synthJob, summary *osearch.SummaryDoc, osc osWriter, attach AttachmentStore) error {
+	att, err := osc.GetAttachment(ctx, job.Profile, job.Vault, job.SHA)
 	if err != nil {
 		return err
 	}
@@ -390,8 +415,8 @@ func (w *SynthWorker) enrichAttachmentStub(ctx context.Context, job synthJob, su
 	// Run pdftotext when text is absent and the mime is something we
 	// can handle. Failures here are soft — the stub falls back to
 	// description-only RawBody.
-	if att.ExtractedText == "" && att.MIMEType == "application/pdf" && w.attach != nil && w.pdfExtractor != nil {
-		body, ferr := w.attach.GetAttachmentBytes(ctx, "", att.MinIOKey, 0)
+	if att.ExtractedText == "" && att.MIMEType == "application/pdf" && attach != nil && w.pdfExtractor != nil {
+		body, ferr := attach.GetAttachmentBytes(ctx, att.MinIOKey, 0)
 		if ferr != nil {
 			w.logger.Warn("phantom-brain: pdf fetch failed (non-fatal)",
 				slog.String("sha", job.SHA), slog.String("key", att.MinIOKey),
@@ -417,7 +442,7 @@ func (w *SynthWorker) enrichAttachmentStub(ctx context.Context, job synthJob, su
 		dirty = true // persist newly-extracted text
 	}
 	if dirty {
-		if err := w.os.UpsertAttachment(ctx, *att, false); err != nil {
+		if err := osc.UpsertAttachment(ctx, *att, false); err != nil {
 			return err
 		}
 	}
@@ -447,8 +472,8 @@ func (w *SynthWorker) enrichAttachmentStub(ctx context.Context, job synthJob, su
 // attachment with no extracted text is still a valid recall hit on
 // title/filename and re-enqueue via brain_reflect is the operator
 // escape hatch.
-func (w *SynthWorker) processAttachmentJob(ctx context.Context, job synthJob) error {
-	doc, err := w.os.GetAttachment(ctx, job.Profile, job.Vault, job.SHA)
+func (w *SynthWorker) processAttachmentJob(ctx context.Context, job synthJob, osc osWriter, attach AttachmentStore) error {
+	doc, err := osc.GetAttachment(ctx, job.Profile, job.Vault, job.SHA)
 	if err != nil {
 		return err
 	}
@@ -465,14 +490,14 @@ func (w *SynthWorker) processAttachmentJob(ctx context.Context, job synthJob) er
 		// Other mime types: out of scope for this pass.
 		return nil
 	}
-	if w.attach == nil || w.pdfExtractor == nil {
+	if attach == nil || w.pdfExtractor == nil {
 		w.logger.Info("phantom-brain: skipping PDF extraction (no store or pdftotext)",
 			slog.String("sha", job.SHA),
-			slog.Bool("have_store", w.attach != nil),
+			slog.Bool("have_store", attach != nil),
 			slog.Bool("have_extractor", w.pdfExtractor != nil))
 		return nil
 	}
-	body, err := w.attach.GetAttachmentBytes(ctx, "", doc.MinIOKey, 0)
+	body, err := attach.GetAttachmentBytes(ctx, doc.MinIOKey, 0)
 	if err != nil {
 		w.logger.Warn("phantom-brain: pdf fetch failed (non-fatal)",
 			slog.String("sha", job.SHA), slog.String("key", doc.MinIOKey),
@@ -492,7 +517,7 @@ func (w *SynthWorker) processAttachmentJob(ctx context.Context, job synthJob) er
 		return nil
 	}
 	doc.ExtractedText = text
-	return w.os.UpsertAttachment(ctx, *doc, false)
+	return osc.UpsertAttachment(ctx, *doc, false)
 }
 
 func containsString(xs []string, s string) bool {

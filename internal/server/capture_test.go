@@ -25,11 +25,11 @@ func newCaptureStore() *captureStore {
 	return &captureStore{puts: map[string][]byte{}, puttCT: map[string]string{}}
 }
 
-func (s *captureStore) PutAttachment(ctx context.Context, bucket, profile, vault, sha, ext string, body []byte, ct string) (string, error) {
-	return s.PutAttachmentWithTags(ctx, bucket, profile, vault, sha, ext, body, ct, nil)
+func (s *captureStore) PutAttachment(ctx context.Context, profile, vault, sha, ext string, body []byte, ct string) (string, error) {
+	return s.PutAttachmentWithTags(ctx, profile, vault, sha, ext, body, ct, nil)
 }
 
-func (s *captureStore) PutAttachmentWithTags(_ context.Context, _ string, profile, vault, sha, ext string, body []byte, ct string, _ []string) (string, error) {
+func (s *captureStore) PutAttachmentWithTags(_ context.Context, profile, vault, sha, ext string, body []byte, ct string, _ []string) (string, error) {
 	if s.failPut {
 		return "", errors.New("fake put fail")
 	}
@@ -41,11 +41,11 @@ func (s *captureStore) PutAttachmentWithTags(_ context.Context, _ string, profil
 	return key, nil
 }
 
-func (s *captureStore) PresignGet(_ context.Context, _ string, key string, _ time.Duration) (string, error) {
+func (s *captureStore) PresignGet(_ context.Context, key string, _ time.Duration) (string, error) {
 	return "https://example.test/" + key + "?sig=fake", nil
 }
 
-func (s *captureStore) GetAttachmentBytes(_ context.Context, _ string, key string, _ int64) ([]byte, error) {
+func (s *captureStore) GetAttachmentBytes(_ context.Context, key string, _ int64) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, ok := s.puts[key]

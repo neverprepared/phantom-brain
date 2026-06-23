@@ -86,8 +86,20 @@ func vaultListCmd() *cobra.Command {
 				return err
 			}
 			for _, b := range r.Vaults() {
-				fmt.Fprintf(cmd.OutOrStdout(), "%s\t%d retention_gens\n",
-					b.Key, b.Defaults.RetentionGens)
+				// v3.2: surface the resolved (index_prefix, bucket) so
+				// operators debugging "where did my data land" can see
+				// the binding's physical targets at a glance.
+				prefix := b.Storage.IndexPrefix
+				if prefix == "" {
+					prefix = "(default)"
+				}
+				bucket := b.Storage.Bucket
+				if bucket == "" {
+					bucket = "(default)"
+				}
+				fmt.Fprintf(cmd.OutOrStdout(),
+					"%s\t%d retention_gens\tindex_prefix=%s\tbucket=%s\n",
+					b.Key, b.Defaults.RetentionGens, prefix, bucket)
 			}
 			return nil
 		},

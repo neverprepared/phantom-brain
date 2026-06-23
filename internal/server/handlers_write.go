@@ -17,6 +17,30 @@ import (
 	"github.com/neverprepared/phantom-brain/internal/osearch"
 )
 
+// resolveOS returns the per-binding osWriter view (v3.2 per-binding
+// storage overrides). Falls back to d.osClient when no per-binding
+// view is registered — preserves the legacy/test path where a Daemon
+// is wired by hand without going through buildBindingDeps.
+func (d *Daemon) resolveOS(b VaultBinding) osWriter {
+	if d.bindings != nil {
+		if deps, ok := d.bindings.Get(b.Key); ok && deps != nil && deps.OS != nil {
+			return deps.OS
+		}
+	}
+	return d.osClient
+}
+
+// resolveAttach returns the per-binding AttachmentStore (v3.2). Same
+// fallback semantics as resolveOS.
+func (d *Daemon) resolveAttach(b VaultBinding) AttachmentStore {
+	if d.bindings != nil {
+		if deps, ok := d.bindings.Get(b.Key); ok && deps != nil && deps.Attach != nil {
+			return deps.Attach
+		}
+	}
+	return d.attach
+}
+
 // appendLogLine writes one newline-terminated record to the
 // audit-log file, creating parent dirs as needed. Open/write/close
 // per call — _log.md writes are infrequent and locking overhead
@@ -86,32 +110,34 @@ func (noopSynthQueue) Enqueue(string, string, string) {}
 // the real impl; tests use an in-memory map. The store is the only
 // place that knows where bytes live — Day 8's tear-out of the v5.0
 // StorageBackend won't touch it.
-// v3.2 Level 2: every method takes a per-call bucket. The store keeps
-// one underlying client (one MinIO credential / endpoint) but routes
-// each request to the binding-resolved bucket. Pass "" to fall back to
-// the store's construction-time default bucket — keeps single-bucket
-// daemons working unchanged while Stream D threads real per-binding
-// values from VaultBinding.Storage.Bucket through every call site.
+// v3.2 Level 2: the store is bound to a single bucket. Production
+// callers obtain a per-binding view via Daemon.resolveAttach(binding)
+// — a thin wrapper over the shared *MinIOBackend that pins the
+// binding's resolved bucket. The shared backend keeps ONE client (one
+// credential / endpoint) and the per-binding view routes each call to
+// the right bucket without per-request allocation beyond the cache
+// lookup. The interface itself does NOT take a per-call bucket —
+// callers that need a different bucket get a new view.
 type AttachmentStore interface {
 	// PutAttachment stores body at the canonical attachment key for
-	// (profile, vault, sha, ext) inside bucket. Idempotent — repeated
-	// puts with identical content are no-ops. Returns the resolved
-	// object key.
-	PutAttachment(ctx context.Context, bucket, profile, vault, sha, ext string, body []byte, contentType string) (key string, err error)
+	// (profile, vault, sha, ext) in the view's bucket. Idempotent —
+	// repeated puts with identical content are no-ops. Returns the
+	// resolved object key.
+	PutAttachment(ctx context.Context, profile, vault, sha, ext string, body []byte, contentType string) (key string, err error)
 	// PutAttachmentWithTags is PutAttachment plus an index-side tag
 	// slice the store mirrors onto the blob (S3 object tags on MinIO).
 	// v2.5.1: keeps blob and pb_attachments index in sync at attach
 	// time so lifecycle policies + tag-based access can use the same
 	// shape brain_recall sees.
-	PutAttachmentWithTags(ctx context.Context, bucket, profile, vault, sha, ext string, body []byte, contentType string, indexTags []string) (key string, err error)
+	PutAttachmentWithTags(ctx context.Context, profile, vault, sha, ext string, body []byte, contentType string, indexTags []string) (key string, err error)
 	// PresignGet returns a short-lived URL the agent can GET to
-	// retrieve the blob at key inside bucket. ttl bounds validity.
-	PresignGet(ctx context.Context, bucket, key string, ttl time.Duration) (url string, err error)
-	// GetAttachmentBytes returns the raw blob at key inside bucket.
-	// Used by the SynthWorker to pull PDFs back out of MinIO for
-	// pdftotext at synth time. maxBytes caps the read defensively —
-	// pass 0 for the impl's default ceiling.
-	GetAttachmentBytes(ctx context.Context, bucket, key string, maxBytes int64) ([]byte, error)
+	// retrieve the blob at key. ttl bounds validity.
+	PresignGet(ctx context.Context, key string, ttl time.Duration) (url string, err error)
+	// GetAttachmentBytes returns the raw blob at key. Used by the
+	// SynthWorker to pull PDFs back out of MinIO for pdftotext at
+	// synth time. maxBytes caps the read defensively — pass 0 for
+	// the impl's default ceiling.
+	GetAttachmentBytes(ctx context.Context, key string, maxBytes int64) ([]byte, error)
 }
 
 // ErrAttachmentStoreUnavailable signals that no AttachmentStore is
@@ -230,6 +256,7 @@ func (d *Daemon) handlePerceive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, _ := BindingFromContext(r.Context())
+	osc := d.resolveOS(binding)
 
 	var req PerceiveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -265,7 +292,7 @@ func (d *Daemon) handlePerceive(w http.ResponseWriter, r *http.Request) {
 		Embedding:   req.Embedding,
 	}
 	applyMemoryFields(&doc, req.MemoryFields)
-	if err := d.osClient.UpsertSummary(r.Context(), doc, false); err != nil {
+	if err := osc.UpsertSummary(r.Context(), doc, false); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch upsert failed: "+err.Error(), nil)
 		return
@@ -282,6 +309,7 @@ func (d *Daemon) handleLearn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, _ := BindingFromContext(r.Context())
+	osc := d.resolveOS(binding)
 
 	var req LearnRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -321,7 +349,7 @@ func (d *Daemon) handleLearn(w http.ResponseWriter, r *http.Request) {
 		Embedding:   req.Embedding,
 	}
 	applyMemoryFields(&doc, req.MemoryFields)
-	if err := d.osClient.UpsertSummary(r.Context(), doc, false); err != nil {
+	if err := osc.UpsertSummary(r.Context(), doc, false); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch upsert failed: "+err.Error(), nil)
 		return
@@ -343,6 +371,8 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, _ := BindingFromContext(r.Context())
+	osc := d.resolveOS(binding)
+	attach := d.resolveAttach(binding)
 
 	var req AttachRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -381,7 +411,7 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ext := extFromFilename(req.OriginalFilename)
-	key, err := d.attach.PutAttachmentWithTags(r.Context(), "", binding.Key.Profile, binding.Key.Vault, req.SHA, ext, bytes, req.MIMEType, req.Tags)
+	key, err := attach.PutAttachmentWithTags(r.Context(), binding.Key.Profile, binding.Key.Vault, req.SHA, ext, bytes, req.MIMEType, req.Tags)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"attachment put failed: "+err.Error(), nil)
@@ -421,11 +451,11 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 	// every re-attach (same SHA, same bytes) blows away the synth pass's
 	// ExtractedText until the next synth pass re-runs pdftotext.
 	if req.ExtractedText == "" {
-		if existing, _ := d.osClient.GetAttachment(r.Context(), binding.Key.Profile, binding.Key.Vault, req.SHA); existing != nil && existing.ExtractedText != "" {
+		if existing, _ := osc.GetAttachment(r.Context(), binding.Key.Profile, binding.Key.Vault, req.SHA); existing != nil && existing.ExtractedText != "" {
 			doc.ExtractedText = existing.ExtractedText
 		}
 	}
-	if err := d.osClient.UpsertAttachment(r.Context(), doc, false); err != nil {
+	if err := osc.UpsertAttachment(r.Context(), doc, false); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch upsert failed: "+err.Error(), nil)
 		return
@@ -465,7 +495,7 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 		Synthesised: false,
 		Embedding:   req.Embedding,
 	}
-	if err := d.osClient.UpsertSummary(r.Context(), stub, false); err != nil {
+	if err := osc.UpsertSummary(r.Context(), stub, false); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch summary stub upsert failed: "+err.Error(), nil)
 		return
@@ -520,13 +550,15 @@ func (d *Daemon) handleAttachGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, _ := BindingFromContext(r.Context())
+	osc := d.resolveOS(binding)
+	attach := d.resolveAttach(binding)
 	sha := chi.URLParam(r, "sha")
 	if err := validateSHA(sha); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error(), nil)
 		return
 	}
 
-	doc, err := d.osClient.GetAttachment(r.Context(), binding.Key.Profile, binding.Key.Vault, sha)
+	doc, err := osc.GetAttachment(r.Context(), binding.Key.Profile, binding.Key.Vault, sha)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch get failed: "+err.Error(), nil)
@@ -536,7 +568,7 @@ func (d *Daemon) handleAttachGet(w http.ResponseWriter, r *http.Request) {
 		WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound, "attachment not found", nil)
 		return
 	}
-	url, err := d.attach.PresignGet(r.Context(), "", doc.MinIOKey, 10*time.Minute)
+	url, err := attach.PresignGet(r.Context(), doc.MinIOKey, 10*time.Minute)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"presign failed: "+err.Error(), nil)
@@ -564,12 +596,14 @@ func (d *Daemon) handleCaptureGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, _ := BindingFromContext(r.Context())
+	osc := d.resolveOS(binding)
+	attach := d.resolveAttach(binding)
 	sha := chi.URLParam(r, "sha")
 	if err := validateSHA(sha); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error(), nil)
 		return
 	}
-	doc, err := d.osClient.GetSummary(r.Context(), binding.Key.Profile, binding.Key.Vault, sha)
+	doc, err := osc.GetSummary(r.Context(), binding.Key.Profile, binding.Key.Vault, sha)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch get failed: "+err.Error(), nil)
@@ -584,7 +618,7 @@ func (d *Daemon) handleCaptureGet(w http.ResponseWriter, r *http.Request) {
 			"no capture stored for this doc (capture disabled, URL absent, or fetch failed)", nil)
 		return
 	}
-	url, err := d.attach.PresignGet(r.Context(), "", doc.CaptureMinIOKey, 10*time.Minute)
+	url, err := attach.PresignGet(r.Context(), doc.CaptureMinIOKey, 10*time.Minute)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"presign failed: "+err.Error(), nil)

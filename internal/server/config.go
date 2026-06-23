@@ -170,6 +170,10 @@ type VaultOverrides struct {
 	MaxUncompressedBytes         int64 `toml:"max_uncompressed_bytes"`
 	ContributorQuotaBytesPerHour int64 `toml:"contributor_quota_bytes_per_hour"`
 
+	// StorageOverrides optionally re-routes this binding to its own
+	// OS index set and/or MinIO bucket. Both fields optional; missing
+	// fields fall through to the daemon-global defaults. See
+	// StorageOverrides for the per-field contract.
 	StorageOverrides StorageOverrides `toml:"storage_overrides"`
 }
 

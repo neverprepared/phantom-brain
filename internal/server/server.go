@@ -43,11 +43,20 @@ type Daemon struct {
 	// Stored as an interface so tests can inject an in-memory fake.
 	// synth defaults to a no-op queue; Day 5 swaps in the real worker.
 	// attach is non-nil when storage backend = minio (or test fake).
+	//
+	// v3.2 per-binding storage overrides: osClient/attach above are
+	// the SHARED daemon-default views (no override applied). For
+	// each binding the daemon caches a per-binding view in bindings
+	// (built at Start + on reload). Handlers / synth resolve through
+	// depsForBinding which falls back to the shared views.
 	osClient   osWriter
 	osExport   osExporter // same underlying *osearch.Client when wired
+	osBase     *osearch.Client // raw client, used to derive WithPrefix views
+	minioBase  *MinIOBackend   // raw MinIO backend, used to derive per-bucket views
 	synth      SynthQueue
 	attach     AttachmentStore
 	debouncer  *SnapshotDebouncer
+	bindings   *bindingDepCache
 
 	parentCtx context.Context
 	parentCancel context.CancelFunc
@@ -159,6 +168,7 @@ func Start(opts StartOpts) (*Daemon, error) {
 		parentCtx:    parentCtx,
 		parentCancel: parentCancel,
 		synth:        noopSynthQueue{}, // Day 5 swaps in the real worker
+		bindings:     newBindingDepCache(),
 	}
 
 	// Phase 6: the MinIO backend doubles as the AttachmentStore for
@@ -166,6 +176,7 @@ func Start(opts StartOpts) (*Daemon, error) {
 	// stays 503 in local-mode deploys (operator should use minio).
 	if mb, ok := backend.(*MinIOBackend); ok {
 		d.attach = mb
+		d.minioBase = mb
 	}
 
 	// Phase 6: optional OS client. Daemon still starts without it —
@@ -184,53 +195,20 @@ func Start(opts StartOpts) (*Daemon, error) {
 			parentCancel()
 			return nil, fmt.Errorf("server: opensearch open: %w", oerr)
 		}
-		if eerr := oc.EnsureIndices(parentCtx); eerr != nil {
-			_ = lk.Unlock()
-			parentCancel()
-			return nil, fmt.Errorf("server: opensearch ensure indices: %w", eerr)
-		}
 		d.osClient = oc
 		d.osExport = oc
+		d.osBase = oc
 		opts.Logger.Info("phantom-brain: opensearch wired",
 			slog.Int("addresses", len(cfg.OpenSearch.Addresses)),
 			slog.String("index_prefix", cfg.OpenSearch.IndexPrefix),
 		)
-
-		// Day 6: debounced snapshot rebuild. Each successful synth
-		// completion triggers Trigger; the debouncer collapses
-		// bursts into one rebuild per vault per delay window.
-		debounce := time.Duration(d.Config.Defaults.SnapshotRebuildDebounceSecs) * time.Second
-		d.debouncer = NewSnapshotDebouncer(
-			func(ctx context.Context, profile, vaultName string) error {
-				b, ok := d.registry.LookupByVault(VaultKey{Profile: profile, Vault: vaultName})
-				if !ok {
-					return fmt.Errorf("snapshot rebuild: unknown vault %s/%s", profile, vaultName)
-				}
-				_, err := BuildSnapshotFromOS(ctx, d.DataDir, d.osExport, profile, vaultName, b.Defaults.RetentionGens)
-				return err
-			},
-			debounce,
-			opts.Logger,
-		)
-		d.debouncer.Start(parentCtx)
-
-		// Day 5: spawn the synth worker now that OS is reachable.
-		// Wire OnComplete → debouncer so each enriched doc kicks the
-		// rebuild timer. Attach + Capture are wired through so the
-		// worker can pull raw-source captures into MinIO before gate.
-		w := NewSynthWorker(SynthWorkerOpts{
-			OSClient: d.osClient,
-			Logger:   opts.Logger,
-			Attach:   d.attach,
-			Capture:  cfg.Capture,
-		})
-		w.OnComplete = func(profile, vaultName, _ string) {
-			d.debouncer.Trigger(profile, vaultName)
-		}
-		w.Start(parentCtx)
-		d.synth = w
 	}
 
+	// Load the registry BEFORE eager-ensure so we know which prefixes
+	// + buckets every binding resolves to. v3.2: per-binding storage
+	// overrides mean shared "pb_*" + default bucket are no longer the
+	// only physical targets — every (profile, vault) may carve out
+	// its own.
 	n, err := d.registry.Load(LoadOpts{
 		ConfigDir:          opts.ConfigDir,
 		Defaults:           cfg.Defaults,
@@ -248,6 +226,114 @@ func Start(opts StartOpts) (*Daemon, error) {
 		slog.Int("vaults", n),
 		slog.String("config_dir", opts.ConfigDir),
 	)
+
+	// v3.2 eager-ensure: walk every binding, collect distinct OS
+	// index prefixes + MinIO buckets, and ensure each one exists
+	// BEFORE the HTTP listener opens. Failure aborts startup — the
+	// daemon would otherwise return 503/500 on first write to an
+	// overridden binding, masking a config error operators want to
+	// catch at boot.
+	if d.osBase != nil {
+		prefixes := []string{cfg.OpenSearch.IndexPrefix}
+		for _, b := range d.registry.Vaults() {
+			prefixes = append(prefixes, b.Storage.IndexPrefix)
+		}
+		if eerr := d.osBase.EnsurePrefixes(parentCtx, prefixes); eerr != nil {
+			_ = lk.Unlock()
+			parentCancel()
+			return nil, fmt.Errorf("server: opensearch ensure indices: %w", eerr)
+		}
+	}
+	if d.minioBase != nil {
+		seenBucket := map[string]struct{}{}
+		buckets := []string{cfg.Storage.MinIOBucket}
+		for _, b := range d.registry.Vaults() {
+			if b.Storage.Bucket != "" {
+				buckets = append(buckets, b.Storage.Bucket)
+			}
+		}
+		for _, bk := range buckets {
+			if bk == "" {
+				continue
+			}
+			if _, dup := seenBucket[bk]; dup {
+				continue
+			}
+			seenBucket[bk] = struct{}{}
+			if berr := d.minioBase.EnsureBucketExists(parentCtx, bk); berr != nil {
+				_ = lk.Unlock()
+				parentCancel()
+				return nil, berr
+			}
+		}
+	}
+
+	// v3.2 operator-footgun detector. After indices exist (so
+	// CountByVault against the new prefixed index returns a real 0,
+	// not 404), refuse to start when a binding's override would
+	// silently strand existing data on the shared indices.
+	if d.osBase != nil {
+		if verr := VerifyStorageOverrides(parentCtx, d.osBase, cfg.OpenSearch.IndexPrefix, d.registry.Vaults()); verr != nil {
+			_ = lk.Unlock()
+			parentCancel()
+			return nil, verr
+		}
+	}
+
+	// Build per-binding views now that the registry + eager-ensure
+	// passed. Handlers + synth resolve through d.depsForBinding —
+	// reload() re-runs buildBindingDeps for added bindings.
+	d.buildBindingDeps()
+
+	if d.osBase != nil {
+		// Day 6: debounced snapshot rebuild. Each successful synth
+		// completion triggers Trigger; the debouncer collapses
+		// bursts into one rebuild per vault per delay window.
+		debounce := time.Duration(d.Config.Defaults.SnapshotRebuildDebounceSecs) * time.Second
+		d.debouncer = NewSnapshotDebouncer(
+			func(ctx context.Context, profile, vaultName string) error {
+				b, ok := d.registry.LookupByVault(VaultKey{Profile: profile, Vault: vaultName})
+				if !ok {
+					return fmt.Errorf("snapshot rebuild: unknown vault %s/%s", profile, vaultName)
+				}
+				exp := d.exporterForBinding(b)
+				_, err := BuildSnapshotFromOS(ctx, d.DataDir, exp, profile, vaultName, b.Defaults.RetentionGens)
+				return err
+			},
+			debounce,
+			opts.Logger,
+		)
+		d.debouncer.Start(parentCtx)
+
+		// Day 5: spawn the synth worker now that OS is reachable.
+		// Wire OnComplete → debouncer so each enriched doc kicks the
+		// rebuild timer. Attach + Capture are wired through so the
+		// worker can pull raw-source captures into MinIO before gate.
+		// v3.2: Resolve threads the per-binding views in so processJob
+		// reads/writes against the binding's prefixed indices + bucket.
+		w := NewSynthWorker(SynthWorkerOpts{
+			OSClient: d.osClient,
+			Logger:   opts.Logger,
+			Attach:   d.attach,
+			Capture:  cfg.Capture,
+		})
+		w.Resolve = func(profile, vaultName string) (osWriter, AttachmentStore, bool) {
+			deps, ok := d.bindings.Get(VaultKey{Profile: profile, Vault: vaultName})
+			if !ok || deps == nil {
+				return nil, nil, false
+			}
+			var osc osWriter
+			if deps.OS != nil {
+				osc = deps.OS
+			}
+			return osc, deps.Attach, true
+		}
+		w.OnComplete = func(profile, vaultName, _ string) {
+			d.debouncer.Trigger(profile, vaultName)
+		}
+		w.Start(parentCtx)
+		d.synth = w
+	}
 
 	// Spawn per-vault runners (no-op stubs in day 1; real loops in
 	// days 3-4). EnsureCollectiveSkeleton is called for each so the
@@ -390,11 +476,41 @@ func (d *Daemon) reload() error {
 	for _, k := range removed {
 		d.Logger.Info("phantom-brain: SIGHUP draining vault", slog.String("vault", k.String()))
 		d.runners.Remove(k)
+		d.bindings.Delete(k)
 	}
+	// v3.2: ensure per-binding storage targets for any added bindings
+	// before they start serving. Failure logs + skips that binding —
+	// preserves the prior behavior of "partial reload tolerated, log
+	// errors on the offenders".
 	for _, k := range added {
 		b, ok := d.registry.LookupByVault(k)
 		if !ok {
 			continue // racing remove — skip
+		}
+		if d.osBase != nil {
+			if err := d.osBase.EnsurePrefixes(d.parentCtx, []string{b.Storage.IndexPrefix}); err != nil {
+				d.Logger.Warn("phantom-brain: SIGHUP ensure-indices failed",
+					slog.String("vault", k.String()),
+					slog.String("prefix", b.Storage.IndexPrefix),
+					slog.String("err", err.Error()))
+				continue
+			}
+		}
+		if d.minioBase != nil && b.Storage.Bucket != "" {
+			if err := d.minioBase.EnsureBucketExists(d.parentCtx, b.Storage.Bucket); err != nil {
+				d.Logger.Warn("phantom-brain: SIGHUP ensure-bucket failed",
+					slog.String("vault", k.String()),
+					slog.String("bucket", b.Storage.Bucket),
+					slog.String("err", err.Error()))
+				continue
+			}
+		}
+		if d.osBase != nil {
+			if err := VerifyStorageOverrides(d.parentCtx, d.osBase, d.Config.OpenSearch.IndexPrefix, []VaultBinding{b}); err != nil {
+				d.Logger.Warn("phantom-brain: SIGHUP storage-overrides verify failed (binding not started)",
+					slog.String("vault", k.String()), slog.String("err", err.Error()))
+				continue
+			}
 		}
 		if err := EnsureCollectiveSkeleton(d.DataDir, k.Profile, k.Vault); err != nil {
 			d.Logger.Warn("phantom-brain: SIGHUP collective-skeleton failed", slog.String("vault", k.String()), slog.String("err", err.Error()))
@@ -403,6 +519,11 @@ func (d *Daemon) reload() error {
 		d.Logger.Info("phantom-brain: SIGHUP starting vault", slog.String("vault", k.String()))
 		d.runners.Add(newVaultRunner(d.parentCtx, b, d.DataDir, d.Logger))
 	}
+	// Rebuild deps for every binding (added + existing) so any
+	// operator-edited config.toml (e.g. switched buckets) takes
+	// effect. Existing runners are NOT restarted per the documented
+	// reload semantics.
+	d.buildBindingDeps()
 	return nil
 }
 
@@ -451,6 +572,70 @@ func (d *Daemon) Router() chi.Router { return d.router }
 func (d *Daemon) LocalBackendForTest() (*LocalBackend, bool) {
 	lb, ok := d.storage.(*LocalBackend)
 	return lb, ok
+}
+
+// buildBindingDeps walks the registry and refreshes the per-binding
+// view cache. v3.2: each VaultBinding resolves to its own
+// ResolvedStorage{IndexPrefix, Bucket}; we derive a per-binding
+// *osearch.Client (via WithPrefix) and a per-binding AttachmentStore
+// (minioBindingView) once at startup / reload so the request path is
+// a cache lookup, not a clone.
+func (d *Daemon) buildBindingDeps() {
+	for _, b := range d.registry.Vaults() {
+		deps := &bindingDeps{}
+		if d.osBase != nil {
+			view := newOSBindingView(d.osBase, b.Storage.IndexPrefix)
+			deps.OS = view
+			deps.Exporter = view
+		}
+		if d.minioBase != nil {
+			deps.Attach = newMinIOBindingView(d.minioBase, b.Storage.Bucket)
+		} else if d.attach != nil {
+			// LocalBackend / test fake — share the daemon-default
+			// AttachmentStore. StorageOverrides.Bucket is meaningless
+			// in local-backend mode; log a warn at reload if set.
+			deps.Attach = d.attach
+		}
+		d.bindings.Set(b.Key, deps)
+	}
+}
+
+// depsForBinding returns the per-binding view bundle. Handlers call
+// this once per request. Falls back to a synthesised view using the
+// daemon-default fields when the binding isn't cached (shouldn't
+// happen in normal operation — buildBindingDeps populates every
+// binding the registry knows about — but the fallback keeps tests
+// that construct a Daemon by hand from panicking).
+func (d *Daemon) depsForBinding(b VaultBinding) *bindingDeps {
+	if deps, ok := d.bindings.Get(b.Key); ok && deps != nil {
+		return deps
+	}
+	deps := &bindingDeps{}
+	if d.osBase != nil {
+		view := newOSBindingView(d.osBase, b.Storage.IndexPrefix)
+		deps.OS = view
+		deps.Exporter = view
+	}
+	if d.minioBase != nil {
+		deps.Attach = newMinIOBindingView(d.minioBase, b.Storage.Bucket)
+	} else if d.attach != nil {
+		deps.Attach = d.attach
+	}
+	return deps
+}
+
+// exporterForBinding returns the osExporter targeting this binding's
+// resolved OS index prefix. Snapshot rebuilds need the prefixed pb_
+// indices, not the daemon-default ones.
+func (d *Daemon) exporterForBinding(b VaultBinding) osExporter {
+	if d.osBase == nil {
+		return d.osExport
+	}
+	deps := d.depsForBinding(b)
+	if deps != nil && deps.Exporter != nil {
+		return deps.Exporter
+	}
+	return d.osExport
 }
 
 // LookupBindingForTest exposes the registry's vault-keyed lookup so

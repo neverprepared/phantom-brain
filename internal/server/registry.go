@@ -113,8 +113,13 @@ func (r *Registry) Vaults() []VaultBinding {
 // [storage_overrides] block. Empty values are valid (shared-mode
 // daemon with no global prefix / no MinIO bucket configured).
 type LoadOpts struct {
-	ConfigDir          string
-	Defaults           VaultDefaults
+	ConfigDir string
+	Defaults  VaultDefaults
+
+	// DefaultIndexPrefix + DefaultBucket are the daemon-global
+	// storage targets. Bindings with no [storage_overrides] inherit
+	// these; bindings with an override block APPEND IndexPrefix and
+	// REPLACE Bucket. Both may be empty (shared OS prefix / no MinIO).
 	DefaultIndexPrefix string
 	DefaultBucket      string
 }

@@ -364,14 +364,25 @@ func (m *MinIOBackend) resolveBucket(bucket string) string {
 }
 
 // PutAttachment stores body at the canonical attachment key for
-// (profile, vault, sha, ext) inside bucket. Implements AttachmentStore
-// (Phase 6). Idempotent — re-puts of the same content overwrite the
-// same key since MinIO PutObject is last-write-wins on a content-
-// addressed path. Pass bucket="" to fall back to the construction-time
-// default. Returns the resolved object key the daemon writes into the
-// OS attachment doc's MinIOKey field.
-func (m *MinIOBackend) PutAttachment(ctx context.Context, bucket, profile, vault, sha, ext string, body []byte, contentType string) (string, error) {
-	return m.PutAttachmentWithTags(ctx, bucket, profile, vault, sha, ext, body, contentType, nil)
+// (profile, vault, sha, ext) using the construction-time default
+// bucket. Implements AttachmentStore (Phase 6). Idempotent — re-puts
+// of the same content overwrite the same key since MinIO PutObject
+// is last-write-wins on a content-addressed path. Returns the resolved
+// object key the daemon writes into the OS attachment doc's MinIOKey
+// field. v3.2 callers wanting a per-binding bucket use
+// PutAttachmentInBucket (or the minioBindingView wrapper).
+func (m *MinIOBackend) PutAttachment(ctx context.Context, profile, vault, sha, ext string, body []byte, contentType string) (string, error) {
+	return m.PutAttachmentWithTagsInBucket(ctx, m.bucket, profile, vault, sha, ext, body, contentType, nil)
+}
+
+// PutAttachmentInBucket is PutAttachment targeted at an explicit
+// bucket. v3.2 per-binding storage overrides: each binding's
+// minioBindingView holds its resolved bucket and calls this directly
+// rather than relying on the backend's struct-level bucket. The
+// default-bucket convenience method above is preserved so callers
+// without a per-binding view (legacy / tests) keep working.
+func (m *MinIOBackend) PutAttachmentInBucket(ctx context.Context, bucket, profile, vault, sha, ext string, body []byte, contentType string) (string, error) {
+	return m.PutAttachmentWithTagsInBucket(ctx, bucket, profile, vault, sha, ext, body, contentType, nil)
 }
 
 // PutAttachmentWithTags is PutAttachment with index-side tags mirrored
@@ -385,7 +396,14 @@ func (m *MinIOBackend) PutAttachment(ctx context.Context, bucket, profile, vault
 // splits "key:value" pairs and packs bare tags under tag1..tagN.
 // S3 caps at 10 object tags; extras are dropped with no error so a
 // well-tagged ingest doesn't break.
-func (m *MinIOBackend) PutAttachmentWithTags(ctx context.Context, bucket, profile, vault, sha, ext string, body []byte, contentType string, indexTags []string) (string, error) {
+func (m *MinIOBackend) PutAttachmentWithTags(ctx context.Context, profile, vault, sha, ext string, body []byte, contentType string, indexTags []string) (string, error) {
+	return m.PutAttachmentWithTagsInBucket(ctx, m.bucket, profile, vault, sha, ext, body, contentType, indexTags)
+}
+
+// PutAttachmentWithTagsInBucket is PutAttachmentWithTags scoped to an
+// explicit bucket (v3.2 per-binding storage). Default-bucket variant
+// above delegates here. Empty bucket falls back to the backend default.
+func (m *MinIOBackend) PutAttachmentWithTagsInBucket(ctx context.Context, bucket, profile, vault, sha, ext string, body []byte, contentType string, indexTags []string) (string, error) {
 	b := m.resolveBucket(bucket)
 	key := fmt.Sprintf("%s/%s/attachments/%s%s", profile, vault, sha, ext)
 	if contentType == "" {
@@ -464,7 +482,14 @@ func minioTagValid(s string) bool {
 // Returning the body in-memory matches the input shape of the PDF
 // extractor (pdftotext reads stdin); the SynthWorker holds one of
 // these at a time.
-func (m *MinIOBackend) GetAttachmentBytes(ctx context.Context, bucket, key string, maxBytes int64) ([]byte, error) {
+func (m *MinIOBackend) GetAttachmentBytes(ctx context.Context, key string, maxBytes int64) ([]byte, error) {
+	return m.GetAttachmentBytesInBucket(ctx, m.bucket, key, maxBytes)
+}
+
+// GetAttachmentBytesInBucket is GetAttachmentBytes scoped to an
+// explicit bucket (v3.2 per-binding storage). Empty bucket falls back
+// to the backend default.
+func (m *MinIOBackend) GetAttachmentBytesInBucket(ctx context.Context, bucket, key string, maxBytes int64) ([]byte, error) {
 	if maxBytes <= 0 {
 		maxBytes = 256 << 20
 	}
@@ -489,13 +514,38 @@ func (m *MinIOBackend) GetAttachmentBytes(ctx context.Context, bucket, key strin
 // the daemon's /api/brain/attach/{sha} handler typically passes
 // 10 minutes — long enough for an agent to follow the redirect, short
 // enough that a leaked URL expires fast.
-func (m *MinIOBackend) PresignGet(ctx context.Context, bucket, key string, ttl time.Duration) (string, error) {
+func (m *MinIOBackend) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error) {
+	return m.PresignGetInBucket(ctx, m.bucket, key, ttl)
+}
+
+// PresignGetInBucket is PresignGet scoped to an explicit bucket
+// (v3.2 per-binding storage). Empty bucket falls back to the
+// backend default.
+func (m *MinIOBackend) PresignGetInBucket(ctx context.Context, bucket, key string, ttl time.Duration) (string, error) {
 	b := m.resolveBucket(bucket)
 	u, err := m.client.PresignedGetObject(ctx, b, key, ttl, nil)
 	if err != nil {
 		return "", fmt.Errorf("server: minio presign get %s in bucket %s: %w", key, b, err)
 	}
 	return u.String(), nil
+}
+
+// EnsureBucketExists returns nil when the bucket exists, an error
+// when it doesn't. Does NOT create — per the Level 2 contract the
+// operator runs `mc mb` first. Idempotent — called once per distinct
+// bucket at startup.
+func (m *MinIOBackend) EnsureBucketExists(ctx context.Context, bucket string) error {
+	if bucket == "" {
+		return errors.New("server: EnsureBucketExists requires a bucket")
+	}
+	ok, err := m.client.BucketExists(ctx, bucket)
+	if err != nil {
+		return fmt.Errorf("server: minio bucket exists probe %q: %w", bucket, err)
+	}
+	if !ok {
+		return fmt.Errorf("server: minio bucket %q does not exist — create it (mc mb) before starting the daemon", bucket)
+	}
+	return nil
 }
 
 // RegisterUpload pre-records the (profile, vault) binding for an
@@ -638,27 +688,6 @@ func (m *MinIOBackend) CompleteUpload(profile, vault, brainID, uploadID string) 
 // local backend only, so this method is effectively unreachable.
 func (m *MinIOBackend) VerifyToken(string, string) (string, error) {
 	return "", errors.New("server: VerifyToken is local-backend only — MinIO auth is in the presigned URL")
-}
-
-// EnsureBucketExists probes the given bucket and returns nil when it
-// exists, an error when it does not. v3.2 Level 2: the daemon calls
-// this once per distinct binding-resolved bucket at startup before
-// HTTP serves. Does NOT create — operators run `mc mb` first so a
-// typo'd config doesn't silently scatter data into a fresh bucket.
-// Idempotent; safe to call across the same bucket name N times.
-func (m *MinIOBackend) EnsureBucketExists(ctx context.Context, bucket string) error {
-	b := m.resolveBucket(bucket)
-	if b == "" {
-		return errors.New("server: EnsureBucketExists requires a bucket (no default configured)")
-	}
-	ok, err := m.client.BucketExists(ctx, b)
-	if err != nil {
-		return fmt.Errorf("server: minio bucket exists probe %q: %w", b, err)
-	}
-	if !ok {
-		return fmt.Errorf("server: minio bucket %q does not exist — create it (mc mb) before starting the daemon", b)
-	}
-	return nil
 }
 
 // lookupUpload mirrors LocalBackend.LookupUpload. Returns the
