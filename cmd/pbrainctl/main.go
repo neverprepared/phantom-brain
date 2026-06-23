@@ -98,6 +98,7 @@ func serverCmd() *cobra.Command {
 	c.AddCommand(maintenanceCmd())
 	c.AddCommand(backfillAttachmentStubsCmd())
 	c.AddCommand(bucketCmd())
+	c.AddCommand(bindingCmd())
 	c.AddCommand(versionCmd())
 	return c
 }

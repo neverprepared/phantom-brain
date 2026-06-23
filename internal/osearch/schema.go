@@ -126,6 +126,27 @@ func (c *Client) ensureIndex(ctx context.Context, prefix, logical string, mappin
 	return nil
 }
 
+// DeleteIndex drops the physical index resolved from this client's
+// prefix + the supplied logical name. Used by the operator CLI
+// (`pbrainctl server binding delete --purge-data`) to tear down a
+// binding's prefixed indices. Treats 404 as success so re-runs are
+// idempotent.
+func (c *Client) DeleteIndex(ctx context.Context, logical string) error {
+	name := c.IndexName(logical)
+	resp, err := c.api.Indices.Delete(ctx, osapi.IndicesDeleteReq{Indices: []string{name}})
+	if err != nil {
+		if statusFromErr(err) == http.StatusNotFound {
+			return nil
+		}
+		if resp != nil && resp.Inspect().Response != nil &&
+			resp.Inspect().Response.StatusCode == http.StatusNotFound {
+			return nil
+		}
+		return fmt.Errorf("delete %s: %w", name, err)
+	}
+	return nil
+}
+
 func isAlreadyExists(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "resource_already_exists_exception")
 }

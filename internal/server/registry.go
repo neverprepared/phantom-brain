@@ -236,6 +236,14 @@ func (r *Registry) Diff(prior []VaultKey) (added, removed []VaultKey) {
 	return added, removed
 }
 
+// ValidateStorageOverridePrefix is the exported alias of the internal
+// validator. The CLI (`pbrainctl server binding create --index-prefix`)
+// calls this so the CLI and the daemon's registry agree on what's a
+// legal prefix.
+func ValidateStorageOverridePrefix(p string) error {
+	return validateStorageOverridePrefix(p)
+}
+
 // validateStorageOverridePrefix enforces the allowed character set for
 // per-binding index_prefix. Empty is fine (means "no override"). Else
 // only lowercase ASCII letters, digits, and underscore are permitted —
