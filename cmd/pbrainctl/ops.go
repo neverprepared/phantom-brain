@@ -17,6 +17,7 @@ import (
 
 	"github.com/neverprepared/mcp-phantom-brain/internal/brain"
 	"github.com/neverprepared/mcp-phantom-brain/internal/config"
+	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
 	pbserver "github.com/neverprepared/mcp-phantom-brain/internal/server"
 )
 
@@ -217,14 +218,30 @@ func snapshotStatusCmd() *cobra.Command {
 func snapshotRebuildCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "rebuild [profile/vault]",
-		Short: "Force a fresh snapshot build (bumps gen, runs retention)",
-		Args:  cobra.ExactArgs(1),
+		Short: "Force a fresh snapshot build from OpenSearch (bumps gen, runs retention)",
+		Long: `Builds a new snapshot tarball for the named vault by exporting the
+current OpenSearch state (pb_summaries + pb_entities + pb_attachments)
+into a fresh sqlite-vec + FTS5 database, then publishes it as the next
+gen. Matches the daemon's auto-trigger path (SnapshotDebouncer ->
+BuildSnapshotFromOS).
+
+Requires server.toml to have an [opensearch] block - the subcommand
+talks to OS directly using the same credentials the daemon uses.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key, err := vaultArgFromArgs(args)
 			if err != nil {
 				return err
 			}
-			r, err := loadRegistryForOps(resolveConfigDir(cmd))
+			configDir := resolveConfigDir(cmd)
+			cfg, err := pbserver.LoadServerConfig(configDir)
+			if err != nil {
+				return fmt.Errorf("load server config: %w", err)
+			}
+			if !cfg.OpenSearch.Enabled() {
+				return errors.New("server.toml has no [opensearch] block - snapshot rebuild needs OS access")
+			}
+			r, err := loadRegistryForOps(configDir)
 			if err != nil {
 				return err
 			}
@@ -232,7 +249,23 @@ func snapshotRebuildCmd() *cobra.Command {
 			if !ok {
 				return fmt.Errorf("vault %s not registered", key)
 			}
-			info, err := pbserver.BuildSnapshot(resolveDataDir(cmd), key.Profile, key.Vault, b.Defaults.RetentionGens)
+
+			ctx, cancel := signalCancel(cmd.Context())
+			defer cancel()
+
+			oc, err := osearch.Open(ctx, osearch.Config{
+				Addresses:          cfg.OpenSearch.Addresses,
+				Username:           cfg.OpenSearch.Username,
+				Password:           cfg.OpenSearch.Password,
+				InsecureSkipVerify: cfg.OpenSearch.InsecureSkipVerify,
+				IndexPrefix:        cfg.OpenSearch.IndexPrefix,
+				RequestTimeout:     time.Duration(cfg.OpenSearch.RequestTimeoutSecs) * time.Second,
+			})
+			if err != nil {
+				return fmt.Errorf("opensearch open: %w", err)
+			}
+
+			info, err := pbserver.BuildSnapshotFromOS(ctx, resolveDataDir(cmd), oc, key.Profile, key.Vault, b.Defaults.RetentionGens)
 			if err != nil {
 				return err
 			}
