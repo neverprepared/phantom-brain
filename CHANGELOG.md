@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.1](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.6.0...v2.6.1) (2026-06-23)
+
+
+### Bug Fixes
+
+* **snapshot:** use OS-based rebuild path, not legacy local-fs walk ([#56](https://github.com/neverprepared/mcp-phantom-brain/issues/56)) ([0c9469c](https://github.com/neverprepared/mcp-phantom-brain/commit/0c9469c4c9bfbf978f1300b20d0c74c4c4f871ba))
+
 ## [2.6.0](https://github.com/neverprepared/mcp-phantom-brain/compare/v2.5.1...v2.6.0) (2026-06-23)
 
 
