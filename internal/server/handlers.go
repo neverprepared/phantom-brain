@@ -68,13 +68,15 @@ func (d *Daemon) handleMergeInit(w http.ResponseWriter, r *http.Request) {
 	case *LocalBackend:
 		b.RegisterUpload(handle.UploadID, req.BrainID, binding.Key.Profile, binding.Key.Vault, handle.Expires)
 	case *MinIOBackend:
-		presigned, objKey, perr := b.PresignedPutForUpload(r.Context(), binding.Key.Profile, binding.Key.Vault, handle.UploadID, ttl)
+		// v3.2 Level 2: Stream D will thread binding.Storage.Bucket
+		// here. For now pass "" so the backend uses its default bucket.
+		presigned, objKey, perr := b.PresignedPutForUpload(r.Context(), "", binding.Key.Profile, binding.Key.Vault, handle.UploadID, ttl)
 		if perr != nil {
 			WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, perr.Error(), nil)
 			return
 		}
 		handle.URL = presigned
-		b.RegisterUpload(handle.UploadID, req.BrainID, binding.Key.Profile, binding.Key.Vault, objKey, handle.Expires)
+		b.RegisterUpload(handle.UploadID, req.BrainID, binding.Key.Profile, binding.Key.Vault, "", objKey, handle.Expires)
 	}
 	writeJSON(w, http.StatusOK, mergeInitResponse{
 		UploadID: handle.UploadID,

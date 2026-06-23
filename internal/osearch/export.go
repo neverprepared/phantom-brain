@@ -23,6 +23,12 @@ import (
 
 // ExportOptions configures one snapshot export from OS to a tar.zst.
 type ExportOptions struct {
+	// Prefix is the per-binding index prefix resolved by the caller
+	// (binding.Storage.IndexPrefix in Stream B/D terms). Empty falls
+	// back to the client's default prefix so legacy callers that have
+	// not yet been threaded keep working.
+	Prefix string
+
 	// Profile and Vault scope the export — only docs matching this
 	// pair are included. Mandatory; cross-vault snapshots are not
 	// supported (and would violate the auth boundary anyway).
@@ -152,8 +158,12 @@ func (c *Client) scrollSummariesIntoIndex(ctx context.Context, opts ExportOption
 		return 0, 0, fmt.Errorf("marshal initial query: %w", err)
 	}
 
+	prefix := opts.Prefix
+	if prefix == "" {
+		prefix = c.prefix
+	}
 	resp, err := c.api.Search(ctx, &osapi.SearchReq{
-		Indices: []string{c.IndexName(IndexSummaries)},
+		Indices: []string{IndexNameWithPrefix(prefix, IndexSummaries)},
 		Body:    bytes.NewReader(body),
 		Params:  osapi.SearchParams{Scroll: opts.ScrollKeepAlive},
 	})

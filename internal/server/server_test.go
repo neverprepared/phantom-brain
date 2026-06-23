@@ -164,6 +164,101 @@ func TestRegistry_LoadAndLookup(t *testing.T) {
 	}
 }
 
+func TestRegistry_StorageOverrides_FallbackToDefaults(t *testing.T) {
+	dir := t.TempDir()
+	_ = seedVault(t, dir, "personal", "memory", "") // no [storage_overrides]
+	r := NewRegistry()
+	if _, err := r.Load(LoadOpts{
+		ConfigDir:          dir,
+		DefaultIndexPrefix: "pb_",
+		DefaultBucket:      "default-bucket",
+	}); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	b, ok := r.LookupByVault(VaultKey{Profile: "personal", Vault: "memory"})
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	if b.Storage.IndexPrefix != "pb_" {
+		t.Errorf("IndexPrefix = %q, want %q", b.Storage.IndexPrefix, "pb_")
+	}
+	if b.Storage.Bucket != "default-bucket" {
+		t.Errorf("Bucket = %q, want %q", b.Storage.Bucket, "default-bucket")
+	}
+}
+
+func TestRegistry_StorageOverrides_Applied(t *testing.T) {
+	dir := t.TempDir()
+	_ = seedVault(t, dir, "client", "x", `
+[storage_overrides]
+index_prefix = "client_x_"
+bucket = "client-x-bucket"
+`)
+	r := NewRegistry()
+	if _, err := r.Load(LoadOpts{
+		ConfigDir:          dir,
+		DefaultIndexPrefix: "pb_",
+		DefaultBucket:      "default-bucket",
+	}); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	b, ok := r.LookupByVault(VaultKey{Profile: "client", Vault: "x"})
+	if !ok {
+		t.Fatal("binding missing")
+	}
+	// Global prefix stays first, override appended.
+	if b.Storage.IndexPrefix != "pb_client_x_" {
+		t.Errorf("IndexPrefix = %q, want %q", b.Storage.IndexPrefix, "pb_client_x_")
+	}
+	if b.Storage.Bucket != "client-x-bucket" {
+		t.Errorf("Bucket = %q, want %q", b.Storage.Bucket, "client-x-bucket")
+	}
+}
+
+func TestRegistry_StorageOverrides_PrefixOnly(t *testing.T) {
+	dir := t.TempDir()
+	_ = seedVault(t, dir, "c", "v", `
+[storage_overrides]
+index_prefix = "scoped_"
+`)
+	r := NewRegistry()
+	if _, err := r.Load(LoadOpts{
+		ConfigDir:          dir,
+		DefaultIndexPrefix: "",
+		DefaultBucket:      "shared-bucket",
+	}); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	b, _ := r.LookupByVault(VaultKey{Profile: "c", Vault: "v"})
+	if b.Storage.IndexPrefix != "scoped_" {
+		t.Errorf("IndexPrefix = %q", b.Storage.IndexPrefix)
+	}
+	if b.Storage.Bucket != "shared-bucket" {
+		t.Errorf("Bucket = %q, want fallback", b.Storage.Bucket)
+	}
+}
+
+func TestRegistry_StorageOverrides_InvalidPrefixRejected(t *testing.T) {
+	cases := []string{
+		"Bad_Caps",
+		"has space",
+		"dash-not-ok",
+		"slash/here",
+		"dot.here",
+	}
+	for _, p := range cases {
+		t.Run(p, func(t *testing.T) {
+			dir := t.TempDir()
+			_ = seedVault(t, dir, "c", "v", "[storage_overrides]\nindex_prefix = \""+p+"\"\n")
+			r := NewRegistry()
+			_, err := r.Load(LoadOpts{ConfigDir: dir})
+			if err == nil || !strings.Contains(err.Error(), "index_prefix") {
+				t.Fatalf("expected index_prefix validation error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestRegistry_DuplicateTokenRejected(t *testing.T) {
 	dir := t.TempDir()
 	// Two vaults with the same bearer_token — hand-craft so we

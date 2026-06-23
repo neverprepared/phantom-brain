@@ -29,6 +29,16 @@ import (
 //   - created_at/updated_at: date
 //   - size_bytes: long
 func (c *Client) EnsureIndices(ctx context.Context) error {
+	return c.EnsureIndicesWithPrefix(ctx, c.prefix)
+}
+
+// EnsureIndicesWithPrefix runs the same idempotent create-if-missing
+// pass as EnsureIndices, but resolves index names against the
+// supplied prefix instead of the client's stored default. Daemon
+// startup calls this once per distinct binding prefix so every
+// (profile, vault) backed by an override gets its own physical
+// indices created before HTTP serves.
+func (c *Client) EnsureIndicesWithPrefix(ctx context.Context, prefix string) error {
 	for _, idx := range []struct {
 		logical string
 		mapping map[string]any
@@ -37,15 +47,33 @@ func (c *Client) EnsureIndices(ctx context.Context) error {
 		{IndexEntities, entitiesMapping()},
 		{IndexAttachments, attachmentsMapping()},
 	} {
-		if err := c.ensureIndex(ctx, idx.logical, idx.mapping); err != nil {
+		if err := c.ensureIndex(ctx, prefix, idx.logical, idx.mapping); err != nil {
 			return fmt.Errorf("ensure %s: %w", idx.logical, err)
 		}
 	}
 	return nil
 }
 
-func (c *Client) ensureIndex(ctx context.Context, logical string, mapping map[string]any) error {
-	name := c.IndexName(logical)
+// EnsurePrefixes ensures the index set exists for every distinct
+// prefix in the supplied slice. Duplicates are dropped; order is
+// irrelevant. Used by daemon startup once the binding registry is
+// loaded.
+func (c *Client) EnsurePrefixes(ctx context.Context, prefixes []string) error {
+	seen := make(map[string]struct{}, len(prefixes))
+	for _, p := range prefixes {
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		if err := c.EnsureIndicesWithPrefix(ctx, p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) ensureIndex(ctx context.Context, prefix, logical string, mapping map[string]any) error {
+	name := IndexNameWithPrefix(prefix, logical)
 
 	existsReq := osapi.IndicesExistsReq{Indices: []string{name}}
 	resp, err := c.api.Indices.Exists(ctx, existsReq)

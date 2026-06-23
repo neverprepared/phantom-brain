@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,6 +17,43 @@ import (
 
 	"github.com/neverprepared/phantom-brain/internal/osearch"
 )
+
+// resolveOS returns the per-binding osWriter view (v3.2 per-binding
+// storage overrides). On binding-cache miss returns an error rather
+// than silently falling back to the shared d.osClient — a cache miss
+// means buildBindingDeps never ran for this binding (configuration
+// error / SIGHUP race) and serving the shared infrastructure for a
+// binding that has its own [storage_overrides] would write to the
+// wrong tenant. Fail loud, log, return 500.
+//
+// The legacy test path that wires a Daemon by hand without
+// buildBindingDeps must call useSharedFallback to opt in explicitly.
+func (d *Daemon) resolveOS(b VaultBinding) (osWriter, error) {
+	if d.bindings != nil {
+		if deps, ok := d.bindings.Get(b.Key); ok && deps != nil && deps.OS != nil {
+			return deps.OS, nil
+		}
+	}
+	if d.allowSharedFallback {
+		return d.osClient, nil
+	}
+	return nil, fmt.Errorf("server: no binding view registered for %s — silent fallback to shared infra refused (would leak across tenants)", b.Key)
+}
+
+// resolveAttach returns the per-binding AttachmentStore (v3.2). Same
+// fail-loud semantics as resolveOS — a cache miss is a configuration
+// bug, not a thing to paper over with shared infrastructure.
+func (d *Daemon) resolveAttach(b VaultBinding) (AttachmentStore, error) {
+	if d.bindings != nil {
+		if deps, ok := d.bindings.Get(b.Key); ok && deps != nil && deps.Attach != nil {
+			return deps.Attach, nil
+		}
+	}
+	if d.allowSharedFallback {
+		return d.attach, nil
+	}
+	return nil, fmt.Errorf("server: no binding view registered for %s — silent fallback to shared infra refused (would leak across tenants)", b.Key)
+}
 
 // appendLogLine writes one newline-terminated record to the
 // audit-log file, creating parent dirs as needed. Open/write/close
@@ -86,10 +124,19 @@ func (noopSynthQueue) Enqueue(string, string, string) {}
 // the real impl; tests use an in-memory map. The store is the only
 // place that knows where bytes live — Day 8's tear-out of the v5.0
 // StorageBackend won't touch it.
+// v3.2 Level 2: the store is bound to a single bucket. Production
+// callers obtain a per-binding view via Daemon.resolveAttach(binding)
+// — a thin wrapper over the shared *MinIOBackend that pins the
+// binding's resolved bucket. The shared backend keeps ONE client (one
+// credential / endpoint) and the per-binding view routes each call to
+// the right bucket without per-request allocation beyond the cache
+// lookup. The interface itself does NOT take a per-call bucket —
+// callers that need a different bucket get a new view.
 type AttachmentStore interface {
 	// PutAttachment stores body at the canonical attachment key for
-	// (profile, vault, sha, ext). Idempotent — repeated puts with
-	// identical content are no-ops. Returns the resolved object key.
+	// (profile, vault, sha, ext) in the view's bucket. Idempotent —
+	// repeated puts with identical content are no-ops. Returns the
+	// resolved object key.
 	PutAttachment(ctx context.Context, profile, vault, sha, ext string, body []byte, contentType string) (key string, err error)
 	// PutAttachmentWithTags is PutAttachment plus an index-side tag
 	// slice the store mirrors onto the blob (S3 object tags on MinIO).
@@ -98,7 +145,7 @@ type AttachmentStore interface {
 	// shape brain_recall sees.
 	PutAttachmentWithTags(ctx context.Context, profile, vault, sha, ext string, body []byte, contentType string, indexTags []string) (key string, err error)
 	// PresignGet returns a short-lived URL the agent can GET to
-	// retrieve the blob. ttl bounds validity.
+	// retrieve the blob at key. ttl bounds validity.
 	PresignGet(ctx context.Context, key string, ttl time.Duration) (url string, err error)
 	// GetAttachmentBytes returns the raw blob at key. Used by the
 	// SynthWorker to pull PDFs back out of MinIO for pdftotext at
@@ -223,6 +270,12 @@ func (d *Daemon) handlePerceive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, _ := BindingFromContext(r.Context())
+	osc, err := d.resolveOS(binding)
+	if err != nil {
+		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
+		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
+		return
+	}
 
 	var req PerceiveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -258,7 +311,7 @@ func (d *Daemon) handlePerceive(w http.ResponseWriter, r *http.Request) {
 		Embedding:   req.Embedding,
 	}
 	applyMemoryFields(&doc, req.MemoryFields)
-	if err := d.osClient.UpsertSummary(r.Context(), doc, false); err != nil {
+	if err := osc.UpsertSummary(r.Context(), doc, false); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch upsert failed: "+err.Error(), nil)
 		return
@@ -275,6 +328,12 @@ func (d *Daemon) handleLearn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, _ := BindingFromContext(r.Context())
+	osc, err := d.resolveOS(binding)
+	if err != nil {
+		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
+		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
+		return
+	}
 
 	var req LearnRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -314,7 +373,7 @@ func (d *Daemon) handleLearn(w http.ResponseWriter, r *http.Request) {
 		Embedding:   req.Embedding,
 	}
 	applyMemoryFields(&doc, req.MemoryFields)
-	if err := d.osClient.UpsertSummary(r.Context(), doc, false); err != nil {
+	if err := osc.UpsertSummary(r.Context(), doc, false); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch upsert failed: "+err.Error(), nil)
 		return
@@ -336,6 +395,18 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, _ := BindingFromContext(r.Context())
+	osc, err := d.resolveOS(binding)
+	if err != nil {
+		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
+		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
+		return
+	}
+	attach, err := d.resolveAttach(binding)
+	if err != nil {
+		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
+		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
+		return
+	}
 
 	var req AttachRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -374,7 +445,7 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ext := extFromFilename(req.OriginalFilename)
-	key, err := d.attach.PutAttachmentWithTags(r.Context(), binding.Key.Profile, binding.Key.Vault, req.SHA, ext, bytes, req.MIMEType, req.Tags)
+	key, err := attach.PutAttachmentWithTags(r.Context(), binding.Key.Profile, binding.Key.Vault, req.SHA, ext, bytes, req.MIMEType, req.Tags)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"attachment put failed: "+err.Error(), nil)
@@ -414,11 +485,11 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 	// every re-attach (same SHA, same bytes) blows away the synth pass's
 	// ExtractedText until the next synth pass re-runs pdftotext.
 	if req.ExtractedText == "" {
-		if existing, _ := d.osClient.GetAttachment(r.Context(), binding.Key.Profile, binding.Key.Vault, req.SHA); existing != nil && existing.ExtractedText != "" {
+		if existing, _ := osc.GetAttachment(r.Context(), binding.Key.Profile, binding.Key.Vault, req.SHA); existing != nil && existing.ExtractedText != "" {
 			doc.ExtractedText = existing.ExtractedText
 		}
 	}
-	if err := d.osClient.UpsertAttachment(r.Context(), doc, false); err != nil {
+	if err := osc.UpsertAttachment(r.Context(), doc, false); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch upsert failed: "+err.Error(), nil)
 		return
@@ -458,7 +529,7 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 		Synthesised: false,
 		Embedding:   req.Embedding,
 	}
-	if err := d.osClient.UpsertSummary(r.Context(), stub, false); err != nil {
+	if err := osc.UpsertSummary(r.Context(), stub, false); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch summary stub upsert failed: "+err.Error(), nil)
 		return
@@ -513,13 +584,25 @@ func (d *Daemon) handleAttachGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, _ := BindingFromContext(r.Context())
+	osc, err := d.resolveOS(binding)
+	if err != nil {
+		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
+		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
+		return
+	}
+	attach, err := d.resolveAttach(binding)
+	if err != nil {
+		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
+		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
+		return
+	}
 	sha := chi.URLParam(r, "sha")
 	if err := validateSHA(sha); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error(), nil)
 		return
 	}
 
-	doc, err := d.osClient.GetAttachment(r.Context(), binding.Key.Profile, binding.Key.Vault, sha)
+	doc, err := osc.GetAttachment(r.Context(), binding.Key.Profile, binding.Key.Vault, sha)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch get failed: "+err.Error(), nil)
@@ -529,7 +612,7 @@ func (d *Daemon) handleAttachGet(w http.ResponseWriter, r *http.Request) {
 		WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound, "attachment not found", nil)
 		return
 	}
-	url, err := d.attach.PresignGet(r.Context(), doc.MinIOKey, 10*time.Minute)
+	url, err := attach.PresignGet(r.Context(), doc.MinIOKey, 10*time.Minute)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"presign failed: "+err.Error(), nil)
@@ -557,12 +640,24 @@ func (d *Daemon) handleCaptureGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	binding, _ := BindingFromContext(r.Context())
+	osc, err := d.resolveOS(binding)
+	if err != nil {
+		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
+		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
+		return
+	}
+	attach, err := d.resolveAttach(binding)
+	if err != nil {
+		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
+		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
+		return
+	}
 	sha := chi.URLParam(r, "sha")
 	if err := validateSHA(sha); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error(), nil)
 		return
 	}
-	doc, err := d.osClient.GetSummary(r.Context(), binding.Key.Profile, binding.Key.Vault, sha)
+	doc, err := osc.GetSummary(r.Context(), binding.Key.Profile, binding.Key.Vault, sha)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"opensearch get failed: "+err.Error(), nil)
@@ -577,7 +672,7 @@ func (d *Daemon) handleCaptureGet(w http.ResponseWriter, r *http.Request) {
 			"no capture stored for this doc (capture disabled, URL absent, or fetch failed)", nil)
 		return
 	}
-	url, err := d.attach.PresignGet(r.Context(), doc.CaptureMinIOKey, 10*time.Minute)
+	url, err := attach.PresignGet(r.Context(), doc.CaptureMinIOKey, 10*time.Minute)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"presign failed: "+err.Error(), nil)

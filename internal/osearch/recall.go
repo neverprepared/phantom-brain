@@ -29,6 +29,11 @@ const rrfK = 60.0
 
 // RecallOptions configures a hybrid recall query.
 type RecallOptions struct {
+	// Prefix is the per-binding index prefix resolved by the caller
+	// (binding.Storage.IndexPrefix in Stream B/D terms). Empty falls
+	// back to the client's default prefix.
+	Prefix string
+
 	// Profile and Vault are required — every recall is scoped to a
 	// single vault binding to prevent cross-vault data bleed.
 	Profile string
@@ -182,7 +187,7 @@ func (c *Client) searchBM25(ctx context.Context, opts RecallOptions, size int) (
 			},
 		},
 	}
-	return c.runSearch(ctx, opts.Index, body, false)
+	return c.runSearch(ctx, opts.Prefix, opts.Index, body, false)
 }
 
 func (c *Client) searchKNN(ctx context.Context, opts RecallOptions, size int) ([]Hit, error) {
@@ -205,16 +210,19 @@ func (c *Client) searchKNN(ctx context.Context, opts RecallOptions, size int) ([
 			},
 		},
 	}
-	return c.runSearch(ctx, opts.Index, body, true)
+	return c.runSearch(ctx, opts.Prefix, opts.Index, body, true)
 }
 
-func (c *Client) runSearch(ctx context.Context, logical string, query map[string]any, vector bool) ([]Hit, error) {
+func (c *Client) runSearch(ctx context.Context, prefix, logical string, query map[string]any, vector bool) ([]Hit, error) {
+	if prefix == "" {
+		prefix = c.prefix
+	}
 	body, err := json.Marshal(query)
 	if err != nil {
 		return nil, fmt.Errorf("marshal query: %w", err)
 	}
 	resp, err := c.api.Search(ctx, &osapi.SearchReq{
-		Indices: []string{c.IndexName(logical)},
+		Indices: []string{IndexNameWithPrefix(prefix, logical)},
 		Body:    bytes.NewReader(body),
 	})
 	if err != nil {

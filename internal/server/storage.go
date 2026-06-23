@@ -299,6 +299,7 @@ type minioUploadState struct {
 	BrainID string
 	Profile string
 	Vault   string
+	Bucket  string // v3.2: bucket resolved at presign; CompleteUpload reads from this
 	Expires time.Time
 	ObjKey  string
 }
@@ -349,14 +350,39 @@ func NewMinIOBackend(opts MinIOOptions) (*MinIOBackend, error) {
 	}, nil
 }
 
+// resolveBucket picks the per-call bucket when set, otherwise falls
+// back to the construction-time default. v3.2 Level 2: callers that
+// already know the binding-resolved bucket pass it explicitly; legacy
+// single-bucket callers pass "" and get the default. Empty string
+// after fallback is a programmer error caught at construction time
+// by NewMinIOBackend's bucket-required check.
+func (m *MinIOBackend) resolveBucket(bucket string) string {
+	if bucket != "" {
+		return bucket
+	}
+	return m.bucket
+}
+
 // PutAttachment stores body at the canonical attachment key for
-// (profile, vault, sha, ext). Implements AttachmentStore (Phase 6).
-// Idempotent — re-puts of the same content overwrite the same key
-// since MinIO PutObject is last-write-wins on a content-addressed
-// path. Returns the resolved object key the daemon writes into the
-// OS attachment doc's MinIOKey field.
+// (profile, vault, sha, ext) using the construction-time default
+// bucket. Implements AttachmentStore (Phase 6). Idempotent — re-puts
+// of the same content overwrite the same key since MinIO PutObject
+// is last-write-wins on a content-addressed path. Returns the resolved
+// object key the daemon writes into the OS attachment doc's MinIOKey
+// field. v3.2 callers wanting a per-binding bucket use
+// PutAttachmentInBucket (or the minioBindingView wrapper).
 func (m *MinIOBackend) PutAttachment(ctx context.Context, profile, vault, sha, ext string, body []byte, contentType string) (string, error) {
-	return m.PutAttachmentWithTags(ctx, profile, vault, sha, ext, body, contentType, nil)
+	return m.PutAttachmentWithTagsInBucket(ctx, m.bucket, profile, vault, sha, ext, body, contentType, nil)
+}
+
+// PutAttachmentInBucket is PutAttachment targeted at an explicit
+// bucket. v3.2 per-binding storage overrides: each binding's
+// minioBindingView holds its resolved bucket and calls this directly
+// rather than relying on the backend's struct-level bucket. The
+// default-bucket convenience method above is preserved so callers
+// without a per-binding view (legacy / tests) keep working.
+func (m *MinIOBackend) PutAttachmentInBucket(ctx context.Context, bucket, profile, vault, sha, ext string, body []byte, contentType string) (string, error) {
+	return m.PutAttachmentWithTagsInBucket(ctx, bucket, profile, vault, sha, ext, body, contentType, nil)
 }
 
 // PutAttachmentWithTags is PutAttachment with index-side tags mirrored
@@ -371,6 +397,14 @@ func (m *MinIOBackend) PutAttachment(ctx context.Context, profile, vault, sha, e
 // S3 caps at 10 object tags; extras are dropped with no error so a
 // well-tagged ingest doesn't break.
 func (m *MinIOBackend) PutAttachmentWithTags(ctx context.Context, profile, vault, sha, ext string, body []byte, contentType string, indexTags []string) (string, error) {
+	return m.PutAttachmentWithTagsInBucket(ctx, m.bucket, profile, vault, sha, ext, body, contentType, indexTags)
+}
+
+// PutAttachmentWithTagsInBucket is PutAttachmentWithTags scoped to an
+// explicit bucket (v3.2 per-binding storage). Default-bucket variant
+// above delegates here. Empty bucket falls back to the backend default.
+func (m *MinIOBackend) PutAttachmentWithTagsInBucket(ctx context.Context, bucket, profile, vault, sha, ext string, body []byte, contentType string, indexTags []string) (string, error) {
+	b := m.resolveBucket(bucket)
 	key := fmt.Sprintf("%s/%s/attachments/%s%s", profile, vault, sha, ext)
 	if contentType == "" {
 		contentType = "application/octet-stream"
@@ -379,9 +413,9 @@ func (m *MinIOBackend) PutAttachmentWithTags(ctx context.Context, profile, vault
 	if userTags := encodeMinIOTags(indexTags); len(userTags) > 0 {
 		opts.UserTags = userTags
 	}
-	_, err := m.client.PutObject(ctx, m.bucket, key, bytes.NewReader(body), int64(len(body)), opts)
+	_, err := m.client.PutObject(ctx, b, key, bytes.NewReader(body), int64(len(body)), opts)
 	if err != nil {
-		return "", fmt.Errorf("server: minio put attachment %s: %w", key, err)
+		return "", fmt.Errorf("server: minio put attachment %s in bucket %s: %w", key, b, err)
 	}
 	return key, nil
 }
@@ -449,12 +483,20 @@ func minioTagValid(s string) bool {
 // extractor (pdftotext reads stdin); the SynthWorker holds one of
 // these at a time.
 func (m *MinIOBackend) GetAttachmentBytes(ctx context.Context, key string, maxBytes int64) ([]byte, error) {
+	return m.GetAttachmentBytesInBucket(ctx, m.bucket, key, maxBytes)
+}
+
+// GetAttachmentBytesInBucket is GetAttachmentBytes scoped to an
+// explicit bucket (v3.2 per-binding storage). Empty bucket falls back
+// to the backend default.
+func (m *MinIOBackend) GetAttachmentBytesInBucket(ctx context.Context, bucket, key string, maxBytes int64) ([]byte, error) {
 	if maxBytes <= 0 {
 		maxBytes = 256 << 20
 	}
-	obj, err := m.client.GetObject(ctx, m.bucket, key, minio.GetObjectOptions{})
+	b := m.resolveBucket(bucket)
+	obj, err := m.client.GetObject(ctx, b, key, minio.GetObjectOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("server: minio get attachment %s: %w", key, err)
+		return nil, fmt.Errorf("server: minio get attachment %s from bucket %s: %w", key, b, err)
 	}
 	defer obj.Close()
 	buf, err := io.ReadAll(io.LimitReader(obj, maxBytes+1))
@@ -473,22 +515,49 @@ func (m *MinIOBackend) GetAttachmentBytes(ctx context.Context, key string, maxBy
 // 10 minutes — long enough for an agent to follow the redirect, short
 // enough that a leaked URL expires fast.
 func (m *MinIOBackend) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error) {
-	u, err := m.client.PresignedGetObject(ctx, m.bucket, key, ttl, nil)
+	return m.PresignGetInBucket(ctx, m.bucket, key, ttl)
+}
+
+// PresignGetInBucket is PresignGet scoped to an explicit bucket
+// (v3.2 per-binding storage). Empty bucket falls back to the
+// backend default.
+func (m *MinIOBackend) PresignGetInBucket(ctx context.Context, bucket, key string, ttl time.Duration) (string, error) {
+	b := m.resolveBucket(bucket)
+	u, err := m.client.PresignedGetObject(ctx, b, key, ttl, nil)
 	if err != nil {
-		return "", fmt.Errorf("server: minio presign get %s: %w", key, err)
+		return "", fmt.Errorf("server: minio presign get %s in bucket %s: %w", key, b, err)
 	}
 	return u.String(), nil
+}
+
+// EnsureBucketExists returns nil when the bucket exists, an error
+// when it doesn't. Does NOT create — per the Level 2 contract the
+// operator runs `mc mb` first. Idempotent — called once per distinct
+// bucket at startup.
+func (m *MinIOBackend) EnsureBucketExists(ctx context.Context, bucket string) error {
+	if bucket == "" {
+		return errors.New("server: EnsureBucketExists requires a bucket")
+	}
+	ok, err := m.client.BucketExists(ctx, bucket)
+	if err != nil {
+		return fmt.Errorf("server: minio bucket exists probe %q: %w", bucket, err)
+	}
+	if !ok {
+		return fmt.Errorf("server: minio bucket %q does not exist — create it (mc mb) before starting the daemon", bucket)
+	}
+	return nil
 }
 
 // RegisterUpload pre-records the (profile, vault) binding for an
 // upload_id so CompleteUpload can route the downloaded bytes to the
 // right vault's _pending/ dir. Called by the /merge/init handler
 // right after NewUpload returns. Symmetric with LocalBackend.
-func (m *MinIOBackend) RegisterUpload(uploadID, brainID, profile, vault, objKey string, expires time.Time) {
+func (m *MinIOBackend) RegisterUpload(uploadID, brainID, profile, vault, bucket, objKey string, expires time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.uploads[uploadID] = minioUploadState{
-		BrainID: brainID, Profile: profile, Vault: vault, Expires: expires, ObjKey: objKey,
+		BrainID: brainID, Profile: profile, Vault: vault,
+		Bucket: m.resolveBucket(bucket), Expires: expires, ObjKey: objKey,
 	}
 }
 
@@ -521,11 +590,12 @@ func (m *MinIOBackend) NewUpload(brainID string, ttl time.Duration) (UploadHandl
 // RegisterUpload (which carries the bound (profile, vault)) between
 // the two steps without juggling extra parameters in the storage
 // interface.
-func (m *MinIOBackend) PresignedPutForUpload(ctx context.Context, profile, vault, uploadID string, ttl time.Duration) (string, string, error) {
+func (m *MinIOBackend) PresignedPutForUpload(ctx context.Context, bucket, profile, vault, uploadID string, ttl time.Duration) (string, string, error) {
+	b := m.resolveBucket(bucket)
 	objKey := fmt.Sprintf("%s/%s/_uploads/%s.tar", profile, vault, uploadID)
-	u, err := m.client.PresignedPutObject(ctx, m.bucket, objKey, ttl)
+	u, err := m.client.PresignedPutObject(ctx, b, objKey, ttl)
 	if err != nil {
-		return "", "", fmt.Errorf("server: presign put: %w", err)
+		return "", "", fmt.Errorf("server: presign put in bucket %s: %w", b, err)
 	}
 	// Token isn't strictly used by MinIO (SigV4 query params are the
 	// auth); we return the object key so the handler can stash it on
@@ -569,11 +639,15 @@ func (m *MinIOBackend) CompleteUpload(profile, vault, brainID, uploadID string) 
 	if err != nil {
 		return "", err
 	}
-	obj, err := m.client.GetObject(ctx, m.bucket, st.ObjKey, minio.GetObjectOptions{})
+	bucket := st.Bucket
+	if bucket == "" {
+		bucket = m.bucket
+	}
+	obj, err := m.client.GetObject(ctx, bucket, st.ObjKey, minio.GetObjectOptions{})
 	if err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
-		return "", fmt.Errorf("server: get object %s: %w", st.ObjKey, err)
+		return "", fmt.Errorf("server: get object %s from bucket %s: %w", st.ObjKey, bucket, err)
 	}
 	defer obj.Close()
 	if _, err := io.Copy(tmp, obj); err != nil {
@@ -598,7 +672,7 @@ func (m *MinIOBackend) CompleteUpload(profile, vault, brainID, uploadID string) 
 	// Best-effort cleanup of the MinIO upload. Failure here is
 	// logged-but-not-fatal — bucket lifecycle policy is the backstop
 	// for orphaned uploads.
-	_ = m.client.RemoveObject(ctx, m.bucket, st.ObjKey, minio.RemoveObjectOptions{})
+	_ = m.client.RemoveObject(ctx, bucket, st.ObjKey, minio.RemoveObjectOptions{})
 
 	m.mu.Lock()
 	delete(m.uploads, uploadID)

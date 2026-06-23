@@ -164,6 +164,11 @@ func startWriteRig(t *testing.T) *writeRig {
 	d.osClient = os
 	d.attach = attach
 	d.synth = synth
+	// Test rig wires the shared osClient/attach directly without
+	// building per-binding views — opt in to the legacy fallback
+	// path so resolveOS / resolveAttach return them instead of
+	// failing loud (v3.2 blocker fix).
+	d.allowSharedFallback = true
 	return &writeRig{d: d, url: url, token: token, os: os, attach: attach, synth: synth, cleanup: cleanup}
 }
 

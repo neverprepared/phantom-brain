@@ -19,6 +19,12 @@ import (
 // to iterate attachments doesn't have to re-implement the scroll
 // boilerplate already burned into scrollSummariesIntoIndex.
 func (c *Client) ScrollAttachments(ctx context.Context, profile, vault string, batchSize int, fn func(AttachmentDoc) error) error {
+	return c.ScrollAttachmentsWithPrefix(ctx, c.prefix, profile, vault, batchSize, fn)
+}
+
+// ScrollAttachmentsWithPrefix paginates pb_attachments at the index
+// resolved from the supplied per-call prefix.
+func (c *Client) ScrollAttachmentsWithPrefix(ctx context.Context, prefix, profile, vault string, batchSize int, fn func(AttachmentDoc) error) error {
 	if profile == "" || vault == "" {
 		return fmt.Errorf("osearch.ScrollAttachments: profile and vault required")
 	}
@@ -45,7 +51,7 @@ func (c *Client) ScrollAttachments(ctx context.Context, profile, vault string, b
 	}
 
 	resp, err := c.api.Search(ctx, &osapi.SearchReq{
-		Indices: []string{c.IndexName(IndexAttachments)},
+		Indices: []string{IndexNameWithPrefix(prefix, IndexAttachments)},
 		Body:    bytes.NewReader(body),
 		Params:  osapi.SearchParams{Scroll: keepAlive},
 	})

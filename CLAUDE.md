@@ -55,7 +55,7 @@ Phase 6 (v2.0+) moved the canonical content store from a local Obsidian vault to
 
 | Tier | What it is | Where in code |
 |---|---|---|
-| **Long-term memory** | OpenSearch indices (`pb_summaries`, `pb_entities`, `pb_attachments`) + MinIO for attachment blobs. Canonical, durable, shared across all agents bound to the same vault. | `internal/osearch/` + the daemon HTTP surface in `internal/server/` |
+| **Long-term memory** | OpenSearch indices (`pb_summaries`, `pb_entities`, `pb_attachments`) + MinIO for attachment blobs. Canonical, durable, shared across all agents bound to the same vault. v3.2+: indices and MinIO bucket MAY be per-binding-prefixed via `[storage_overrides]` (see "Per-binding storage overrides" below). | `internal/osearch/` + the daemon HTTP surface in `internal/server/` |
 | **Active memory** | Per-process SQLite at `_index/wm-<pid>.sqlite`. Tasks, findings, artifacts, open questions. Lives only for the agent process; dropped at exit. | `internal/working/` |
 | **Read cache** | Per-brain `_index/vectors.db` (sqlite-vec + FTS5). A snapshot of the daemon's OS view, pulled as a tarball at birth. Read-only — the agent doesn't write directly. | `internal/index/` + `internal/brain/` birth machinery |
 | **Write-ahead queue** (v3.1) | Per-binding SQLite at `<VaultBaseDir>/wqueue.sqlite` + attachment staging dir. Catches writes when the daemon is unreachable; drainer goroutine retries with exponential backoff. Persists across MCP child deaths. | `internal/brain/wqueue/` + `internal/brain/drainer.go` |
@@ -196,6 +196,19 @@ $PHANTOM_BRAIN_CONFIG_DIR/
 
 Bearer tokens live in `auth.toml`, ONE per vault binding. The daemon's registry walks `profiles/*/vaults/*/auth.toml` at startup + on SIGHUP.
 
+`config.toml` accepts an optional `[storage_overrides]` block (v3.2+) that re-routes a single binding to its own OS index prefix and/or MinIO bucket while the daemon keeps ONE OpenSearch connection pool and ONE MinIO credential. Example:
+
+```toml
+# profiles/client_x/vaults/main/config.toml
+retention_gens = 10
+
+[storage_overrides]
+index_prefix = "client_x_"   # APPENDED to daemon-global cfg.OpenSearch.IndexPrefix
+bucket       = "pb-client-x" # REPLACES cfg.Storage.MinIOBucket for this binding
+```
+
+Allowed characters in `index_prefix`: lowercase ASCII letters, digits, underscore. Bucket must exist before daemon start — the daemon refuses to create it (operator runs `mc mb` first). See "Per-binding storage overrides (v3.2)" below for the full contract.
+
 ### The Gate (`internal/server/gate.go`)
 
 `RunGate()` is the daemon-side LLM call. It shells out to the `claude` CLI (bundled in the Docker image since v2.2.0), authenticated via `CLAUDE_CODE_OAUTH_TOKEN` (Claude Max subscription credentials, NOT `ANTHROPIC_API_KEY`).
@@ -259,6 +272,51 @@ Embeddings computed locally via Ollama. Idempotent — daemon dedups by SHA. `--
 
 - `cmd/pbrainctl/ops.go` — operator subcommands: `vault list`, `snapshot status`, `maintenance enter/exit`, `brain list`, etc.
 - `scripts/seed-vault-via-minio.sh` — bootstrap a remote MinIO with a seed tarball (rare).
+
+## Per-binding storage overrides (v3.2)
+
+A binding may carve out its own OS index set and/or MinIO bucket without standing up a separate daemon. One process, one OpenSearch connection pool, one MinIO credential — but per-(profile, vault) physical storage. Targets the multi-tenant case where one operator hosts several clients and wants a hard data boundary without N daemons.
+
+### Resolution
+
+`Registry.Load` builds `VaultBinding.Storage` once per binding:
+
+```
+IndexPrefix = cfg.OpenSearch.IndexPrefix + overrides.StorageOverrides.IndexPrefix
+Bucket      = overrides.StorageOverrides.Bucket || cfg.Storage.MinIOBucket
+```
+
+Global prefix stays first so a dev/test sandbox prefix still wraps every binding the same way. Bucket is a straight replacement — MinIO credentials and endpoint are NOT overridable (Level 2 contract: one TCP pool, one credential, many buckets).
+
+Write paths go through per-binding views (`internal/server/binding_views.go`):
+- `*osBindingView` — a `*osearch.Client` clone bound via `WithPrefix(binding.Storage.IndexPrefix)`.
+- `*minioBindingView` — the shared `*MinIOBackend` with `binding.Storage.Bucket` pinned.
+
+Both are constructed once at startup (and rebuilt on SIGHUP reload) and cached on the Daemon by `VaultKey`. Handlers + the SynthWorker fetch the view via `Daemon.resolveOS` / `Daemon.resolveAttach` / `SynthWorker.resolveForJob` — there is NO per-request allocation beyond the cache lookup.
+
+### Eager-ensure at startup
+
+Before the HTTP listener opens, `Daemon.Start` walks every binding, collects the distinct (prefix, bucket) pairs, and runs:
+- `osearch.Client.EnsurePrefixes` — idempotent create-if-missing for `pb_summaries`, `pb_entities`, `pb_attachments` under each prefix.
+- `MinIOBackend.EnsureBucketExists` — probes (no create) for each distinct bucket. Missing bucket = startup error (`mc mb` is operator action).
+
+Failure here aborts startup. Better to refuse to serve than to 500 on every write to a misconfigured binding.
+
+### Operator-footgun guard
+
+`VerifyStorageOverrides` runs after eager-ensure for every binding whose resolved prefix differs from the daemon default. For each such binding:
+
+1. Count `pb_summaries` matching `(profile, vault)` under the binding's prefixed index.
+2. If 0, count the same query under the SHARED prefix.
+3. If shared count > 0, refuse to start with:
+
+   `server: binding client_x/main has [storage_overrides] (prefix="client_x_") but 1234 docs exist on shared indices — run migration or revert config`
+
+The trigger condition is "operator added `[storage_overrides]` to a binding that already had data on the shared prefix" — the binding would silently stop seeing its own docs. A binding that's migrated (docs on both shared AND prefixed, or only on prefixed) passes the check.
+
+### Tenant-boundary safety
+
+Cache miss on `resolveOS` / `resolveAttach` / `SynthWorker.resolveForJob` returns an error rather than silently falling back to the shared daemon-global infrastructure. Synthesising a doc into the wrong tenant's indices is a worse failure than dropping the job; HTTP handlers return 500 ("binding configuration error") and SynthWorker drops the job, expecting a re-enqueue (`brain_reflect`) once the binding view is registered. Tests + legacy single-binding daemons opt back into the shared fallback explicitly via `Daemon.allowSharedFallback`.
 
 ## Offline resilience (v3.1)
 

@@ -18,10 +18,17 @@ import (
 // immediately on return — set in tests; in production, the 1s
 // refresh_interval is fine.
 func (c *Client) UpsertSummary(ctx context.Context, doc SummaryDoc, waitForRefresh bool) error {
+	return c.UpsertSummaryWithPrefix(ctx, c.prefix, doc, waitForRefresh)
+}
+
+// UpsertSummaryWithPrefix writes the doc against the index resolved
+// from the supplied per-call prefix. Used by daemon handlers once
+// they hold the binding's resolved storage handle.
+func (c *Client) UpsertSummaryWithPrefix(ctx context.Context, prefix string, doc SummaryDoc, waitForRefresh bool) error {
 	if doc.Profile == "" || doc.Vault == "" || doc.SHA == "" {
 		return errors.New("osearch: summary doc requires profile, vault, sha")
 	}
-	return c.putDoc(ctx, IndexSummaries, DocID(doc.Profile, doc.Vault, doc.SHA), doc, waitForRefresh)
+	return c.putDoc(ctx, prefix, IndexSummaries, DocID(doc.Profile, doc.Vault, doc.SHA), doc, waitForRefresh)
 }
 
 // UpsertEntity writes or replaces an entity doc by canonical slug.
@@ -29,30 +36,42 @@ func (c *Client) UpsertSummary(ctx context.Context, doc SummaryDoc, waitForRefre
 // queue) is responsible for merging MentionedBy[] before calling.
 // For atomic append-without-read-modify-write, use UpdateEntityMentions.
 func (c *Client) UpsertEntity(ctx context.Context, doc EntityDoc, waitForRefresh bool) error {
+	return c.UpsertEntityWithPrefix(ctx, c.prefix, doc, waitForRefresh)
+}
+
+// UpsertEntityWithPrefix writes the entity doc against the index
+// resolved from the supplied per-call prefix.
+func (c *Client) UpsertEntityWithPrefix(ctx context.Context, prefix string, doc EntityDoc, waitForRefresh bool) error {
 	if doc.Profile == "" || doc.Vault == "" || doc.Slug == "" {
 		return errors.New("osearch: entity doc requires profile, vault, slug")
 	}
-	return c.putDoc(ctx, IndexEntities, DocID(doc.Profile, doc.Vault, doc.Slug), doc, waitForRefresh)
+	return c.putDoc(ctx, prefix, IndexEntities, DocID(doc.Profile, doc.Vault, doc.Slug), doc, waitForRefresh)
 }
 
 // UpsertAttachment writes or replaces an attachment metadata doc.
 // The binary itself lives in MinIO at doc.MinIOKey; this index holds
 // only the searchable metadata + extracted text.
 func (c *Client) UpsertAttachment(ctx context.Context, doc AttachmentDoc, waitForRefresh bool) error {
+	return c.UpsertAttachmentWithPrefix(ctx, c.prefix, doc, waitForRefresh)
+}
+
+// UpsertAttachmentWithPrefix writes the attachment metadata doc
+// against the index resolved from the supplied per-call prefix.
+func (c *Client) UpsertAttachmentWithPrefix(ctx context.Context, prefix string, doc AttachmentDoc, waitForRefresh bool) error {
 	if doc.Profile == "" || doc.Vault == "" || doc.SHA == "" {
 		return errors.New("osearch: attachment doc requires profile, vault, sha")
 	}
-	return c.putDoc(ctx, IndexAttachments, DocID(doc.Profile, doc.Vault, doc.SHA), doc, waitForRefresh)
+	return c.putDoc(ctx, prefix, IndexAttachments, DocID(doc.Profile, doc.Vault, doc.SHA), doc, waitForRefresh)
 }
 
-func (c *Client) putDoc(ctx context.Context, logical, id string, payload any, waitForRefresh bool) error {
+func (c *Client) putDoc(ctx context.Context, prefix, logical, id string, payload any, waitForRefresh bool) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
 
 	req := osapi.IndexReq{
-		Index:      c.IndexName(logical),
+		Index:      IndexNameWithPrefix(prefix, logical),
 		DocumentID: id,
 		Body:       bytes.NewReader(body),
 	}
@@ -77,8 +96,14 @@ func (c *Client) putDoc(ctx context.Context, logical, id string, payload any, wa
 // GetSummary fetches a summary doc by its full ID (profile/vault/sha).
 // Returns (nil, nil) when the doc does not exist.
 func (c *Client) GetSummary(ctx context.Context, profile, vault, sha string) (*SummaryDoc, error) {
+	return c.GetSummaryWithPrefix(ctx, c.prefix, profile, vault, sha)
+}
+
+// GetSummaryWithPrefix fetches against the index resolved from the
+// supplied per-call prefix. Returns (nil, nil) when the doc is absent.
+func (c *Client) GetSummaryWithPrefix(ctx context.Context, prefix, profile, vault, sha string) (*SummaryDoc, error) {
 	var doc SummaryDoc
-	found, err := c.getDoc(ctx, IndexSummaries, DocID(profile, vault, sha), &doc)
+	found, err := c.getDoc(ctx, prefix, IndexSummaries, DocID(profile, vault, sha), &doc)
 	if err != nil || !found {
 		return nil, err
 	}
@@ -87,8 +112,14 @@ func (c *Client) GetSummary(ctx context.Context, profile, vault, sha string) (*S
 
 // GetEntity fetches an entity doc by (profile, vault, slug).
 func (c *Client) GetEntity(ctx context.Context, profile, vault, slug string) (*EntityDoc, error) {
+	return c.GetEntityWithPrefix(ctx, c.prefix, profile, vault, slug)
+}
+
+// GetEntityWithPrefix fetches against the index resolved from the
+// supplied per-call prefix.
+func (c *Client) GetEntityWithPrefix(ctx context.Context, prefix, profile, vault, slug string) (*EntityDoc, error) {
 	var doc EntityDoc
-	found, err := c.getDoc(ctx, IndexEntities, DocID(profile, vault, slug), &doc)
+	found, err := c.getDoc(ctx, prefix, IndexEntities, DocID(profile, vault, slug), &doc)
 	if err != nil || !found {
 		return nil, err
 	}
@@ -97,17 +128,23 @@ func (c *Client) GetEntity(ctx context.Context, profile, vault, slug string) (*E
 
 // GetAttachment fetches an attachment metadata doc by (profile, vault, sha).
 func (c *Client) GetAttachment(ctx context.Context, profile, vault, sha string) (*AttachmentDoc, error) {
+	return c.GetAttachmentWithPrefix(ctx, c.prefix, profile, vault, sha)
+}
+
+// GetAttachmentWithPrefix fetches against the index resolved from
+// the supplied per-call prefix.
+func (c *Client) GetAttachmentWithPrefix(ctx context.Context, prefix, profile, vault, sha string) (*AttachmentDoc, error) {
 	var doc AttachmentDoc
-	found, err := c.getDoc(ctx, IndexAttachments, DocID(profile, vault, sha), &doc)
+	found, err := c.getDoc(ctx, prefix, IndexAttachments, DocID(profile, vault, sha), &doc)
 	if err != nil || !found {
 		return nil, err
 	}
 	return &doc, nil
 }
 
-func (c *Client) getDoc(ctx context.Context, logical, id string, out any) (bool, error) {
+func (c *Client) getDoc(ctx context.Context, prefix, logical, id string, out any) (bool, error) {
 	resp, err := c.api.Document.Get(ctx, osapi.DocumentGetReq{
-		Index:      c.IndexName(logical),
+		Index:      IndexNameWithPrefix(prefix, logical),
 		DocumentID: id,
 	})
 	if err != nil {
@@ -132,23 +169,41 @@ func (c *Client) getDoc(ctx context.Context, logical, id string, out any) (bool,
 // DeleteSummary removes a summary doc by (profile, vault, sha). Used
 // by tests and `brain_reflect` cleanup. Missing-doc returns nil.
 func (c *Client) DeleteSummary(ctx context.Context, profile, vault, sha string) error {
-	return c.deleteDoc(ctx, IndexSummaries, DocID(profile, vault, sha))
+	return c.DeleteSummaryWithPrefix(ctx, c.prefix, profile, vault, sha)
+}
+
+// DeleteSummaryWithPrefix deletes against the index resolved from
+// the supplied per-call prefix.
+func (c *Client) DeleteSummaryWithPrefix(ctx context.Context, prefix, profile, vault, sha string) error {
+	return c.deleteDoc(ctx, prefix, IndexSummaries, DocID(profile, vault, sha))
 }
 
 // DeleteEntity removes an entity doc.
 func (c *Client) DeleteEntity(ctx context.Context, profile, vault, slug string) error {
-	return c.deleteDoc(ctx, IndexEntities, DocID(profile, vault, slug))
+	return c.DeleteEntityWithPrefix(ctx, c.prefix, profile, vault, slug)
+}
+
+// DeleteEntityWithPrefix deletes against the index resolved from
+// the supplied per-call prefix.
+func (c *Client) DeleteEntityWithPrefix(ctx context.Context, prefix, profile, vault, slug string) error {
+	return c.deleteDoc(ctx, prefix, IndexEntities, DocID(profile, vault, slug))
 }
 
 // DeleteAttachment removes an attachment metadata doc. The MinIO
 // blob is NOT deleted (attachments are immutable by design).
 func (c *Client) DeleteAttachment(ctx context.Context, profile, vault, sha string) error {
-	return c.deleteDoc(ctx, IndexAttachments, DocID(profile, vault, sha))
+	return c.DeleteAttachmentWithPrefix(ctx, c.prefix, profile, vault, sha)
 }
 
-func (c *Client) deleteDoc(ctx context.Context, logical, id string) error {
+// DeleteAttachmentWithPrefix deletes against the index resolved from
+// the supplied per-call prefix.
+func (c *Client) DeleteAttachmentWithPrefix(ctx context.Context, prefix, profile, vault, sha string) error {
+	return c.deleteDoc(ctx, prefix, IndexAttachments, DocID(profile, vault, sha))
+}
+
+func (c *Client) deleteDoc(ctx context.Context, prefix, logical, id string) error {
 	resp, err := c.api.Document.Delete(ctx, osapi.DocumentDeleteReq{
-		Index:      c.IndexName(logical),
+		Index:      IndexNameWithPrefix(prefix, logical),
 		DocumentID: id,
 	})
 	if err != nil {
@@ -168,9 +223,15 @@ func (c *Client) deleteDoc(ctx context.Context, logical, id string) error {
 // making recent writes searchable. Test-only — production relies on
 // the 1s refresh_interval.
 func (c *Client) Refresh(ctx context.Context) error {
+	return c.RefreshWithPrefix(ctx, c.prefix)
+}
+
+// RefreshWithPrefix forces an immediate refresh of the index set
+// resolved from the supplied per-call prefix.
+func (c *Client) RefreshWithPrefix(ctx context.Context, prefix string) error {
 	for _, logical := range []string{IndexSummaries, IndexEntities, IndexAttachments} {
 		_, err := c.api.Indices.Refresh(ctx, &osapi.IndicesRefreshReq{
-			Indices: []string{c.IndexName(logical)},
+			Indices: []string{IndexNameWithPrefix(prefix, logical)},
 		})
 		if err != nil {
 			return fmt.Errorf("refresh %s: %w", logical, err)

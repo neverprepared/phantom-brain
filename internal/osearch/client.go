@@ -117,11 +117,56 @@ func Open(ctx context.Context, cfg Config) (*Client, error) {
 func (c *Client) API() *osapi.Client { return c.api }
 
 // IndexName resolves a logical index name (e.g. "pb_summaries") to
-// its prefixed physical form. Use this everywhere instead of string
-// constants so the IndexPrefix override works.
+// its prefixed physical form using the client's stored default prefix.
+//
+// Deprecated for new code: prefer IndexNameWithPrefix and the
+// *WithPrefix method variants so per-binding storage overrides (Level
+// 2, v3.2) can resolve the right physical index per call. This form
+// remains for call sites that still rely on the single daemon-global
+// prefix.
 func (c *Client) IndexName(logical string) string {
-	if c.prefix == "" {
+	return IndexNameWithPrefix(c.prefix, logical)
+}
+
+// DefaultPrefix returns the client's baked-in prefix (cfg.IndexPrefix
+// at Open time). Stream D consumers use this only to derive a
+// fallback when no per-binding override is in play.
+func (c *Client) DefaultPrefix() string { return c.prefix }
+
+// IndexNameWithPrefix is the per-call resolver. It concatenates the
+// supplied prefix (already including any daemon-global + binding
+// override segments) with the logical index name. Empty prefix
+// yields the bare logical name.
+func IndexNameWithPrefix(prefix, logical string) string {
+	if prefix == "" {
 		return logical
 	}
-	return c.prefix + strings.TrimPrefix(logical, "")
+	return prefix + strings.TrimPrefix(logical, "")
 }
+
+// WithPrefix returns a shallow-copy of the Client that routes every
+// index operation through the supplied prefix instead of the one
+// baked in at Open time. The underlying HTTP connection + auth are
+// shared. Used by the daemon to derive per-binding views without
+// opening a second TCP pool.
+//
+// Phase 7 (Level 2 per-binding storage): every (profile, vault)
+// binding resolves to its own ResolvedStorage{IndexPrefix, Bucket}.
+// Handlers look up the binding's view, call WithPrefix(binding.
+// Storage.IndexPrefix), and hand the result to the OS write/read
+// methods. Bindings with no override keep using the daemon-global
+// prefix; bindings with [storage_overrides] get their prefixed
+// physical indices.
+func (c *Client) WithPrefix(prefix string) *Client {
+	if c == nil {
+		return nil
+	}
+	cp := *c
+	cp.prefix = prefix
+	return &cp
+}
+
+// Prefix returns the index prefix this Client is configured with.
+// Used by callers that need to log "which physical index am I about
+// to hit" without re-resolving via IndexName.
+func (c *Client) Prefix() string { return c.prefix }
