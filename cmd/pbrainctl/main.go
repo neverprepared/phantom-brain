@@ -62,6 +62,7 @@ See https://github.com/neverprepared/mcp-phantom-brain for the v5 spec.`,
 	root.AddCommand(brainListCmd())
 	root.AddCommand(brainShowCmd())
 	root.AddCommand(brainOrphansCmd())
+	root.AddCommand(gcBrainsCmd())
 	// force-merge retired in Phase 6 — no reaper pass to fire.
 	// force-checkpoint retired in Phase 6 — daemon's SynthWorker drains async.
 
