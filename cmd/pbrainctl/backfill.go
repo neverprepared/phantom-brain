@@ -10,9 +10,18 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/neverprepared/mcp-phantom-brain/internal/ollama"
 	"github.com/neverprepared/mcp-phantom-brain/internal/osearch"
 	pbserver "github.com/neverprepared/mcp-phantom-brain/internal/server"
 )
+
+// backfillEmbedder is the minimal slice of *ollama.Client the backfill
+// subcommand needs. Mirrors ingest-bulk's pattern so tests can substitute
+// an in-memory fake without an Ollama process.
+type backfillEmbedder interface {
+	Embed(ctx context.Context, inputs []string) ([][]float32, error)
+	Dims() int
+}
 
 // backfillStubClient is the minimal slice of *osearch.Client the
 // backfill subcommand needs. Declared as an interface so tests can
@@ -97,7 +106,13 @@ manually so agents pull a snapshot that contains the new stubs.`,
 				return fmt.Errorf("opensearch open: %w", err)
 			}
 
-			res, err := runBackfillAttachmentStubs(ctx, oc, backfillOpts{
+			emb := ollama.New(ollama.OptionsFromEnv())
+			if emb.Dims() != osearch.EmbeddingDim {
+				return fmt.Errorf("embedder dim %d != osearch.EmbeddingDim %d",
+					emb.Dims(), osearch.EmbeddingDim)
+			}
+
+			res, err := runBackfillAttachmentStubs(ctx, oc, emb, backfillOpts{
 				Profile:     profile,
 				Vault:       vault,
 				DryRun:      dryRun,
@@ -143,7 +158,11 @@ type backfillResult struct {
 // runBackfillAttachmentStubs is the testable core: scroll attachments,
 // skip those that already have a SummaryDoc, build + upsert a stub for
 // the rest. Concurrency-limited so a large vault doesn't stampede OS.
-func runBackfillAttachmentStubs(ctx context.Context, client backfillStubClient, opts backfillOpts) (backfillResult, error) {
+//
+// The embedder is required because v2.5.0 attachments may carry empty
+// embeddings, and the snapshot exporter drops zero-vector docs. Without
+// re-embedding here, backfilled stubs would never reach brain_recall.
+func runBackfillAttachmentStubs(ctx context.Context, client backfillStubClient, emb backfillEmbedder, opts backfillOpts) (backfillResult, error) {
 	var res backfillResult
 
 	jobs := make(chan osearch.AttachmentDoc, opts.Concurrency*2)
@@ -157,7 +176,7 @@ func runBackfillAttachmentStubs(ctx context.Context, client backfillStubClient, 
 			if ctx.Err() != nil {
 				return
 			}
-			created, err := processBackfillOne(ctx, client, att, opts.DryRun)
+			created, err := processBackfillOne(ctx, client, emb, att, opts.DryRun)
 			if err != nil {
 				atomic.AddInt64(&res.Errors, 1)
 				firstErrOnce.Do(func() { firstErr = err })
@@ -200,7 +219,7 @@ func runBackfillAttachmentStubs(ctx context.Context, client backfillStubClient, 
 
 // processBackfillOne returns (created, error). created=false means
 // the stub already existed (idempotent skip).
-func processBackfillOne(ctx context.Context, client backfillStubClient, att osearch.AttachmentDoc, dryRun bool) (bool, error) {
+func processBackfillOne(ctx context.Context, client backfillStubClient, emb backfillEmbedder, att osearch.AttachmentDoc, dryRun bool) (bool, error) {
 	if att.SHA == "" || att.Profile == "" || att.Vault == "" {
 		return false, fmt.Errorf("attachment missing identity: profile=%q vault=%q sha=%q",
 			att.Profile, att.Vault, att.SHA)
@@ -214,6 +233,20 @@ func processBackfillOne(ctx context.Context, client backfillStubClient, att osea
 	}
 
 	stub := buildAttachmentStub(att)
+	if len(stub.Embedding) == 0 {
+		embInput := stub.Title
+		if stub.RawBody != "" {
+			embInput = stub.Title + "\n\n" + stub.RawBody
+		}
+		vecs, err := emb.Embed(ctx, []string{embInput})
+		if err != nil {
+			return false, fmt.Errorf("embed %s: %w", att.SHA, err)
+		}
+		if len(vecs) != 1 {
+			return false, fmt.Errorf("embed %s: got %d vectors, want 1", att.SHA, len(vecs))
+		}
+		stub.Embedding = vecs[0]
+	}
 	if dryRun {
 		return true, nil
 	}
@@ -273,13 +306,14 @@ func buildAttachmentStub(att osearch.AttachmentDoc) osearch.SummaryDoc {
 		CapturedAt:  att.CapturedAt,
 		Title:       title,
 		RawBody:     rawBody,
+		Body:        rawBody,
 		Tags:        tags,
 		Reliability: osearch.ReliabilityMedium,
 		GateReason:  "curated (attachment)",
 		Attachments: []string{att.SHA},
 		References:  append([]string{}, att.References...),
 		Embedding:   att.Embedding,
-		Synthesised: false,
+		Synthesised: true,
 	}
 	return stub
 }
