@@ -75,6 +75,7 @@ func clientCmd() *cobra.Command {
 	c.AddCommand(migrateLegacyCmd())
 	c.AddCommand(brainCmd())
 	c.AddCommand(gcBrainsCmd())
+	c.AddCommand(clientQueueCmd())
 	c.AddCommand(versionCmd())
 	return c
 }
