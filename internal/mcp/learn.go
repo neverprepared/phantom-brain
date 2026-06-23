@@ -97,7 +97,7 @@ func (s *Server) handleLearn(ctx context.Context, req mcp.CallToolRequest) (*mcp
 			fmt.Fprintf(&b, "[%d] %s — duplicate (SHA %s)\n", i+1, it.Title, res.SHA[:12])
 		default:
 			stored++
-			fmt.Fprintf(&b, "[%d] %s — stored to %s (SHA %s)\n", i+1, it.Title, res.RelativePath, res.SHA[:12])
+			fmt.Fprintf(&b, "[%d] %s — stored to %s (SHA %s)%s\n", i+1, it.Title, res.RelativePath, res.SHA[:12], res.Notice)
 		}
 	}
 

@@ -75,7 +75,7 @@ func TestRenderRecallHitsIncludesTitleKindSnippet(t *testing.T) {
 			Score:   0.05, VectorRank: 0, TextRank: 3,
 		},
 	}
-	out := renderRecallHits("tax", hits)
+	out := renderRecallHits("tax", hits, 0, 0)
 
 	wantSubs := []string{
 		"## 1. Tax forms 2026 [note]",
@@ -101,7 +101,7 @@ func TestRenderRecallHitsFallsBackToPathWhenTitleEmpty(t *testing.T) {
 	hits := []index.Hit{{
 		SHA: "x", SourcePath: "Wiki/x.md", Kind: "web_scrape", Score: 1,
 	}}
-	out := renderRecallHits("q", hits)
+	out := renderRecallHits("q", hits, 0, 0)
 	if !strings.Contains(out, "## 1. Wiki/x.md [web]") {
 		t.Errorf("fallback heading missing: %s", out)
 	}

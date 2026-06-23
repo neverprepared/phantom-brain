@@ -71,7 +71,7 @@ func (s *Server) handlePerceive(ctx context.Context, req mcp.CallToolRequest) (*
 	if res.Status == "duplicate" {
 		return mcp.NewToolResultText(fmt.Sprintf("Duplicate (already in index). SHA: %s", res.SHA)), nil
 	}
-	return mcp.NewToolResultText(fmt.Sprintf("Stored to %s. SHA: %s. Queued for synthesis.", res.RelativePath, res.SHA)), nil
+	return mcp.NewToolResultText(fmt.Sprintf("Stored to %s. SHA: %s. Queued for synthesis.%s", res.RelativePath, res.SHA, res.Notice)), nil
 }
 
 // resolvePerceiveFilename returns a final filename for a Raw/<subdir>/

@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/neverprepared/phantom-brain/internal/brain/wqueue"
 	"github.com/neverprepared/phantom-brain/internal/config"
 )
 
@@ -44,6 +45,14 @@ type Lifecycle struct {
 	// otherwise (legacy BRAIN_VAULT_PATH mode). MCP handlers branch
 	// on Client() != nil to choose POST-to-daemon vs local-only.
 	client *Client
+
+	// Issue #61: write-ahead queue + connectivity tracker for the
+	// degraded-mode UX. Both are nil in legacy mode. Stream B owns
+	// the drainer goroutine that runs against these; this struct
+	// just carries the handles so MCP tools can reach them.
+	queue           *wqueue.Queue
+	conn            *Connectivity
+	snapshotBuiltAt time.Time
 }
 
 // StartOpts narrows what callers must supply to instantiate a
@@ -114,6 +123,16 @@ func Start(opts StartOpts) (*Lifecycle, error) {
 			return nil, fmt.Errorf("brain: start: build daemon client: %w", cerr)
 		}
 		lc.client = c
+		// Issue #61: open the write-ahead queue under the vault root
+		// so writes survive daemon outages. Failing here would
+		// silently disable degraded mode; we fail Start instead so
+		// operators see the problem immediately.
+		q, qerr := wqueue.Open(opts.Agent.VaultBaseDir())
+		if qerr != nil {
+			return nil, fmt.Errorf("brain: start: open write queue: %w", qerr)
+		}
+		lc.queue = q
+		lc.conn = NewConnectivity()
 	}
 	if !opts.SkipHeartbeat {
 		hbCtx := opts.HeartbeatCtx
@@ -154,6 +173,54 @@ func Start(opts StartOpts) (*Lifecycle, error) {
 // Lifecycle was started without API + Token (legacy mode). MCP
 // handlers branch on this to decide local-only vs POST-to-daemon.
 func (l *Lifecycle) Client() *Client { return l.client }
+
+// Queue returns the per-Lifecycle write-ahead queue. Nil in legacy
+// BRAIN_VAULT_PATH mode.
+func (l *Lifecycle) Queue() *wqueue.Queue {
+	if l == nil {
+		return nil
+	}
+	return l.queue
+}
+
+// Connectivity returns the per-Lifecycle daemon-reachability tracker.
+// Nil in legacy mode. The returned holder's methods are nil-receiver
+// tolerant.
+func (l *Lifecycle) Connectivity() *Connectivity {
+	if l == nil {
+		return nil
+	}
+	return l.conn
+}
+
+// SetSnapshotBuiltAt records the daemon-side built_at timestamp for
+// the snapshot this brain was birthed from. Zero means unknown.
+func (l *Lifecycle) SetSnapshotBuiltAt(t time.Time) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.snapshotBuiltAt = t
+}
+
+// SnapshotAge returns how long ago the parent snapshot was built on
+// the daemon. Returns 0 when unknown.
+func (l *Lifecycle) SnapshotAge(now time.Time) time.Duration {
+	if l == nil {
+		return 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.snapshotBuiltAt.IsZero() {
+		return 0
+	}
+	d := now.Sub(l.snapshotBuiltAt)
+	if d < 0 {
+		return 0
+	}
+	return d
+}
 
 // RecordWrite is the hook ingest handlers (brain_perceive,
 // brain_learn, brain_attach) call after a successful write so the
@@ -297,6 +364,14 @@ func (l *Lifecycle) Shutdown(ctx context.Context) (*DeathResult, error) {
 		l.mu.Unlock()
 		<-l.ckptDone
 		l.mu.Lock()
+	}
+	// Close the write-ahead queue before Death so the underlying
+	// sqlite file is released cleanly. The drainer goroutine (Stream
+	// B) will already have shut down via its own ctx; closing here
+	// is just the handle release.
+	if l.queue != nil {
+		_ = l.queue.Close()
+		l.queue = nil
 	}
 	res, err := Death(DeathOpts{
 		Agent:    l.agent,

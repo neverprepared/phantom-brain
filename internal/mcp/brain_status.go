@@ -12,27 +12,31 @@ import (
 )
 
 // brainStatusTool exposes the brain's manifest + heartbeat freshness
-// + ship-queue depth as a JSON blob. Used by operators (and the agent
-// itself) to introspect "am I a healthy brain right now?" without
-// having to read manifest.json off disk.
+// + connectivity / queued-writes + snapshot age. Used by operators
+// (and the agent itself) to introspect "am I healthy right now?"
+// without reading manifest.json off disk.
 func brainStatusTool() mcp.Tool {
 	return mcp.NewTool("brain_status",
 		mcp.WithDescription(
-			`Return the running brain's manifest, heartbeat age in seconds, and ship-queue `+
-				`depth (count + bytes). Returns an error in legacy BRAIN_VAULT_PATH mode where `+
-				`no Lifecycle has been started.`,
+			`Return the running brain's manifest, heartbeat age, daemon connectivity, `+
+				`queued-write depth, and snapshot age (all in seconds). Returns an error in `+
+				`legacy BRAIN_VAULT_PATH mode where no Lifecycle has been started.`,
 		),
 	)
 }
 
 // brainStatusResponse is the JSON shape returned to operators.
-// Documented inline so the schema is discoverable from the source —
-// MCP clients don't currently get a typed output schema.
 type brainStatusResponse struct {
 	BrainID          string         `json:"brain_id"`
 	BrainDir         string         `json:"brain_dir"`
 	Manifest         brain.Manifest `json:"manifest"`
 	HeartbeatAgeSecs int64          `json:"heartbeat_age_secs"` // -1 if unparseable
+
+	// Issue #61: degraded-mode visibility.
+	Connectivity         string `json:"connectivity"`             // online|degraded|offline
+	LastDaemonContactSec int64  `json:"last_daemon_contact_secs"` // -1 if never contacted
+	QueuedWrites         int    `json:"queued_writes"`
+	SnapshotAgeSecs      int64  `json:"snapshot_age_secs"` // -1 if unknown
 }
 
 func (s *Server) handleBrainStatus(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -49,11 +53,37 @@ func (s *Server) handleBrainStatus(ctx context.Context, req mcp.CallToolRequest)
 		}
 	}
 
+	// Default to offline + -1 + 0 so legacy or partly-wired lifecycles
+	// (no daemon client, no queue) emit a sensible shape.
+	connState := string(brain.ConnOffline)
+	lastContact := int64(-1)
+	queued := 0
+	if conn := lc.Connectivity(); conn != nil {
+		snap := conn.Snapshot()
+		connState = string(snap.State)
+		if !snap.LastContactAt.IsZero() {
+			lastContact = int64(time.Since(snap.LastContactAt).Seconds())
+		}
+	}
+	if q := lc.Queue(); q != nil {
+		if n, qerr := q.Depth(ctx); qerr == nil {
+			queued = n
+		}
+	}
+	snapAgeSecs := int64(-1)
+	if age := lc.SnapshotAge(time.Now()); age > 0 {
+		snapAgeSecs = int64(age.Seconds())
+	}
+
 	resp := brainStatusResponse{
-		BrainID:          m.BrainID,
-		BrainDir:         lc.BrainDir(),
-		Manifest:         m,
-		HeartbeatAgeSecs: ageSecs,
+		BrainID:              m.BrainID,
+		BrainDir:             lc.BrainDir(),
+		Manifest:             m,
+		HeartbeatAgeSecs:     ageSecs,
+		Connectivity:         connState,
+		LastDaemonContactSec: lastContact,
+		QueuedWrites:         queued,
+		SnapshotAgeSecs:      snapAgeSecs,
 	}
 	body, err := json.MarshalIndent(resp, "", "  ")
 	if err != nil {
