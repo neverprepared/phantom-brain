@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -71,7 +72,7 @@ func bindingCreateCmd() *cobra.Command {
 				return fmt.Errorf("stat %s: %w", bindingDir, err)
 			}
 			if err := os.MkdirAll(bindingDir, 0o700); err != nil {
-				return fmt.Errorf("mkdir %s: %w", bindingDir, err)
+				return bindingWriteErr("mkdir", bindingDir, key.Profile, key.Vault, err)
 			}
 
 			if strings.TrimSpace(token) == "" {
@@ -87,7 +88,7 @@ func bindingCreateCmd() *cobra.Command {
 			authPath := filepath.Join(bindingDir, "auth.toml")
 			authBody := fmt.Sprintf("bearer_token = %q\n", token)
 			if err := os.WriteFile(authPath, []byte(authBody), 0o600); err != nil {
-				return fmt.Errorf("write %s: %w", authPath, err)
+				return bindingWriteErr("write", authPath, key.Profile, key.Vault, err)
 			}
 
 			cfgPath := ""
@@ -95,7 +96,7 @@ func bindingCreateCmd() *cobra.Command {
 				cfgPath = filepath.Join(bindingDir, "config.toml")
 				body := buildBindingConfigTOML(indexPrefix, bucket)
 				if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
-					return fmt.Errorf("write %s: %w", cfgPath, err)
+					return bindingWriteErr("write", cfgPath, key.Profile, key.Vault, err)
 				}
 			}
 
@@ -133,6 +134,23 @@ func bindingCreateCmd() *cobra.Command {
 	c.Flags().BoolVar(&createBucket, "create-bucket", false, "also call MakeBucket on --bucket")
 	c.Flags().StringVar(&token, "token", "", "bearer token (default: generated 32 random bytes hex)")
 	return c
+}
+
+// bindingWriteErr wraps a filesystem write failure from `binding
+// create`. When the cause is EROFS it returns an actionable hint
+// instead of the bare syscall error: in production the daemon
+// container bind-mounts /config read-only, so this subcommand has to
+// be run against a writeable path (the bind-mount source on the host,
+// or a local config dir whose result is copied into the config root).
+func bindingWriteErr(op, path, profile, vault string, err error) error {
+	if errors.Is(err, syscall.EROFS) {
+		return fmt.Errorf("%s %s: config dir is read-only (typical in production: /config is bind-mounted ro into the daemon container).\n"+
+			"Run this subcommand against a writeable path:\n"+
+			"  - on the storage box host: --config-dir <path-on-host> (the bind-mount source)\n"+
+			"  - on a workstation: write to a local --config-dir, then copy the resulting profiles/%s/vaults/%s/ subtree into the daemon's config root",
+			op, path, profile, vault)
+	}
+	return fmt.Errorf("%s %s: %w", op, path, err)
 }
 
 // buildBindingConfigTOML writes the minimal [storage_overrides] body.

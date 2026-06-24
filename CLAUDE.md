@@ -218,6 +218,8 @@ pbrainctl server binding create client_x/main \
 
 The command writes `auth.toml` (mode 0o600) + `config.toml` with the override block, prints the generated bearer token once, and (with `--create-bucket`) calls MakeBucket inline. See "Per-binding storage overrides (v3.2)" below for the full contract.
 
+**Run `binding create` on the storage box host, not inside the daemon container.** The daemon container bind-mounts `/config` read-only (it reads config, never writes), so `binding create` will fail with EROFS there (it returns an actionable hint, not the raw syscall error — issue #69). Install `pbrainctl` on the host (brew or scp) and point the subcommand at the bind-mount source: `pbrainctl server binding create … --config-dir <host-path>`. This avoids hand-editing the TOML (the typo/duplicate-token/silent-drift failure mode). On a workstation you can write to any local `--config-dir` and copy the resulting `profiles/<profile>/vaults/<vault>/` subtree into the daemon's config root.
+
 ### The Gate (`internal/server/gate.go`)
 
 `RunGate()` is the daemon-side LLM call. It shells out to the `claude` CLI (bundled in the Docker image since v2.2.0), authenticated via `CLAUDE_CODE_OAUTH_TOKEN` (Claude Max subscription credentials, NOT `ANTHROPIC_API_KEY`).

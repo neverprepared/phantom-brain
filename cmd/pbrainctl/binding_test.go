@@ -2,12 +2,38 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
+
+// TestBindingWriteErr_EROFSHint verifies that a read-only filesystem
+// error is rewrapped into the actionable hint (issue #69), while any
+// other error is passed through with %w so errors.Is still works.
+func TestBindingWriteErr_EROFSHint(t *testing.T) {
+	rofs := bindingWriteErr("mkdir", "/config/profiles/gsa/vaults/memory", "gsa", "memory",
+		fmt.Errorf("mkdir /config/profiles/gsa: %w", syscall.EROFS))
+	msg := rofs.Error()
+	for _, want := range []string{"read-only", "--config-dir", "profiles/gsa/vaults/memory/"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("EROFS hint missing %q in:\n%s", want, msg)
+		}
+	}
+
+	// Non-EROFS errors keep their cause unwrappable via errors.Is.
+	other := bindingWriteErr("write", "/x", "p", "v", os.ErrPermission)
+	if !errors.Is(other, os.ErrPermission) {
+		t.Errorf("non-EROFS error lost its cause: %v", other)
+	}
+	if strings.Contains(other.Error(), "read-only") {
+		t.Errorf("non-EROFS error should not get the read-only hint: %v", other)
+	}
+}
 
 // TestBindingCreate_WritesFilesAndPerms covers the v3.3 happy path:
 // new binding under a fresh config dir gets auth.toml (mode 0o600),
