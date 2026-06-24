@@ -95,19 +95,19 @@ $PHANTOM_BRAIN_DATA_DIR/{profile}/{vault}/collective/
 
 ### Install
 
-**macOS — homebrew tap (recommended):**
+**Homebrew tap (recommended) — macOS arm64 + Linux amd64:**
 
 ```bash
 brew install neverprepared/tap/pbrainctl
 ```
 
-**Linux — release tarball:**
+**Linux — release tarball (no Homebrew):**
 
 ```bash
 curl -L -o pb.tar.gz https://github.com/neverprepared/phantom-brain/releases/latest/download/pbrainctl_linux_amd64.tar.gz
-tar -xzf pb.tar.gz
-sudo install pbrainctl_linux_amd64/pbrainctl /usr/local/bin/
-pbrainctl version
+tar -xzf pb.tar.gz                          # extracts pbrainctl at the archive root
+sudo install pbrainctl /usr/local/bin/
+pbrainctl client version
 ```
 
 **Any platform — build from source:**

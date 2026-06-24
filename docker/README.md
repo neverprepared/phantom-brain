@@ -97,7 +97,7 @@ docker compose exec pbrainctl pbrainctl snapshot rebuild personal/memory
 ## Operator commands inside the container
 
 ```bash
-docker compose exec pbrainctl pbrainctl version
+docker compose exec pbrainctl pbrainctl server version
 docker compose exec pbrainctl pbrainctl vault list
 docker compose exec pbrainctl pbrainctl snapshot status personal/memory
 docker compose exec pbrainctl pbrainctl queue depth

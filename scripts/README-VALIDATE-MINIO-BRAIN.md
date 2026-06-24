@@ -33,7 +33,7 @@ pbrainctl mcp                              │   │   reaps from
 # Get the binary onto the remote host. Easiest path: build locally,
 # scp over. Or build from source on the remote (Go 1.26+ required).
 scp ./pbrainctl  remote:/usr/local/bin/pbrainctl
-ssh remote 'pbrainctl version'
+ssh remote 'pbrainctl server version'
 
 # Run the bootstrap. Pulls personal-memory from the obsidian-vaults
 # bucket into the daemon's collective vault, writes config files,
