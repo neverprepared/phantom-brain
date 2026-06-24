@@ -87,4 +87,8 @@ func (s *Server) Register(srv *server.MCPServer) {
 	srv.AddTool(brainStatusTool(), s.handleBrainStatus)
 	srv.AddTool(brainCheckpointTool(), s.handleBrainCheckpoint)
 	srv.AddTool(brainDeathTool(), s.handleBrainDeath)
+
+	// v3.3 brain_reflect maintenance cycle (issue #72 Phase 1).
+	srv.AddTool(reflectTool(), s.handleReflect)
+	srv.AddTool(forgetTool(), s.handleForget)
 }

@@ -366,6 +366,49 @@ func (c *Client) Health(ctx context.Context) error {
 	return c.do(ctx, http.MethodGet, "/api/brain/health", nil, nil)
 }
 
+// --- v3.3 brain_reflect maintenance cycle (issue #72 Phase 1) ------
+
+// ReflectCandidate mirrors internal/server.ReflectCandidate — one
+// forget-candidate surfaced by the daemon's read-only reflect scan.
+type ReflectCandidate struct {
+	SHA    string `json:"sha"`
+	Title  string `json:"title"`
+	Reason string `json:"reason"`
+}
+
+// ReflectResponse mirrors internal/server.ReflectResponse.
+type ReflectResponse struct {
+	Candidates []ReflectCandidate `json:"candidates"`
+}
+
+// ForgetResponse mirrors internal/server.ForgetResponse.
+type ForgetResponse struct {
+	SHA       string `json:"sha"`
+	Forgotten bool   `json:"forgotten"`
+}
+
+// Reflect GETs the daemon's read-only forget-candidate report. The
+// agent surfaces the result and the operator decides what to Forget;
+// nothing is deleted here (propose-then-apply).
+func (c *Client) Reflect(ctx context.Context) (*ReflectResponse, error) {
+	var out ReflectResponse
+	if err := c.do(ctx, http.MethodGet, "/api/brain/reflect", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Forget POSTs a single-SHA forget. The daemon deletes the summary doc
+// and triggers a snapshot rebuild so the removal propagates. This is a
+// delete, NOT an ingest — it does not go through the write-ahead queue.
+func (c *Client) Forget(ctx context.Context, sha string) (*ForgetResponse, error) {
+	var out ForgetResponse
+	if err := c.do(ctx, http.MethodPost, "/api/brain/forget", map[string]string{"sha": sha}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // do is the shared request helper. Encodes body as JSON when
 // non-nil, decodes the response into out when non-nil, and turns
 // non-2xx responses into typed APIErrors carrying the daemon's

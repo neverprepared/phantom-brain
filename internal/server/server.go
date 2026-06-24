@@ -403,6 +403,11 @@ func (d *Daemon) buildRouter() chi.Router {
 			r.Post("/trace", d.handleTrace)
 			r.Get("/attach/{sha}", d.handleAttachGet)
 			r.Get("/capture/{sha}", d.handleCaptureGet)
+
+			// v3.3 brain_reflect maintenance cycle (issue #72 Phase 1).
+			// reflect REPORTS forget-candidates; forget APPLIES one.
+			r.Get("/reflect", d.handleReflect)
+			r.Post("/forget", d.handleForget)
 		})
 
 		// Upload route is local-backend only and uses its own
