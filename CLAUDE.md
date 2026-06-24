@@ -34,6 +34,7 @@ pbrainctl client queue list|drain-now|clear   # v3.1 write-ahead queue inspectio
 pbrainctl client version
 
 pbrainctl server serve               # HTTP daemon (per-(profile, vault) synth + snapshot publisher)
+pbrainctl server config validate [profile/vault]  # dry-run the startup registry load before restart (#70)
 pbrainctl server vault list|status|reload
 pbrainctl server snapshot status|rebuild|prune|claims
 pbrainctl server queue depth|contributors
@@ -218,6 +219,8 @@ pbrainctl server binding create client_x/main \
 
 The command writes `auth.toml` (mode 0o600) + `config.toml` with the override block, prints the generated bearer token once, and (with `--create-bucket`) calls MakeBucket inline. See "Per-binding storage overrides (v3.2)" below for the full contract.
 
+**Run `binding create` on the storage box host, not inside the daemon container.** The daemon container bind-mounts `/config` read-only (it reads config, never writes), so `binding create` will fail with EROFS there (it returns an actionable hint, not the raw syscall error — issue #69). Install `pbrainctl` on the host (brew or scp) and point the subcommand at the bind-mount source: `pbrainctl server binding create … --config-dir <host-path>`. This avoids hand-editing the TOML (the typo/duplicate-token/silent-drift failure mode). On a workstation you can write to any local `--config-dir` and copy the resulting `profiles/<profile>/vaults/<vault>/` subtree into the daemon's config root.
+
 ### The Gate (`internal/server/gate.go`)
 
 `RunGate()` is the daemon-side LLM call. It shells out to the `claude` CLI (bundled in the Docker image since v2.2.0), authenticated via `CLAUDE_CODE_OAUTH_TOKEN` (Claude Max subscription credentials, NOT `ANTHROPIC_API_KEY`).
@@ -326,6 +329,63 @@ The trigger condition is "operator added `[storage_overrides]` to a binding that
 ### Tenant-boundary safety
 
 Cache miss on `resolveOS` / `resolveAttach` / `SynthWorker.resolveForJob` returns an error rather than silently falling back to the shared daemon-global infrastructure. Synthesising a doc into the wrong tenant's indices is a worse failure than dropping the job; HTTP handlers return 500 ("binding configuration error") and SynthWorker drops the job, expecting a re-enqueue (`brain_reflect`) once the binding view is registered. Tests + legacy single-binding daemons opt back into the shared fallback explicitly via `Daemon.allowSharedFallback`.
+
+## Operator workflow: writing config in a read-only container
+
+The recommended production hardening bind-mounts the daemon's `/config` **read-only** (the daemon reads config, never writes it). That means `pbrainctl server binding create` cannot run *inside* the container — it needs to write `auth.toml` + `config.toml` under the config dir and fails with EROFS (handled with an actionable hint, not a raw syscall error — issue #69). Use one of the paths below; never hand-edit TOML as a first resort (it caused the typo / duplicate-token / silent-drift incidents this workflow exists to prevent).
+
+### Two viable paths
+
+1. **`pbrainctl` on the storage-box host** (preferred). Brew-install or scp the binary onto the host that owns the bind-mount source, and run against that path:
+   ```
+   pbrainctl server binding create client_x/main \
+       --config-dir /srv/phantom-brain/config \
+       --index-prefix client_x_ --bucket pb-client-x --create-bucket
+   ```
+   The host path is the *source* of the container's read-only mount, so the daemon picks up the new binding on the next reload.
+
+2. **Workstation scratch dir, then copy.** Generate the subtree anywhere writeable, then move it onto the host's mount source:
+   ```
+   pbrainctl server binding create client_x/main --config-dir /tmp/scratch ...
+   scp -r /tmp/scratch/profiles/client_x dch-host:/srv/phantom-brain/config/profiles/
+   ```
+
+After either path, **validate before restarting** (issue #70):
+```
+pbrainctl server config validate --config-dir /srv/phantom-brain/config
+```
+then reload: SIGHUP via `pbrainctl server vault reload` (re-reads the registry, no downtime) is preferred over a full `docker compose restart pbrainctl` (drops the in-memory synth queue).
+
+### Manual fallback recipe (last resort)
+
+If neither path is convenient, write the files by hand — but honor every reminder here, because each maps to a real incident:
+
+```bash
+PROFILE=client_x VAULT=main
+BDIR=/srv/phantom-brain/config/profiles/$PROFILE/vaults/$VAULT
+mkdir -p "$BDIR"
+TOKEN=$(openssl rand -hex 32)            # FRESH per binding — do NOT reuse a shell var across bindings
+printf 'bearer_token = "%s"\n' "$TOKEN" > "$BDIR/auth.toml"
+chmod 0600 "$BDIR/auth.toml"             # auth.toml holds a secret
+# optional per-binding storage overrides:
+printf '[storage_overrides]\nindex_prefix = "client_x_"\nbucket = "pb-client-x"\n' > "$BDIR/config.toml"
+pbrainctl server config validate --config-dir /srv/phantom-brain/config   # catch mistakes BEFORE reload
+```
+
+- **Fresh token per binding.** Reusing one token across bindings trips the daemon's duplicate-bearer-token guard at startup → crash-loop.
+- **`chmod 0600 auth.toml`.** It's a bearer secret; `binding create` sets this for you, a manual write does not.
+- **SIGHUP, not restart.** `pbrainctl server vault reload` reloads the registry without dropping the synth queue.
+
+### Startup-failure recovery flowchart
+
+When the daemon crash-loops after a config change (it refuses to serve **any** binding, including unaffected ones), `config validate` should have caught it first. If it slipped through:
+
+| Symptom in `docker compose logs pbrainctl --tail 20` | Cause | Fix |
+|---|---|---|
+| `parse … config.toml` / TOML decode error | syntax typo | fix the TOML; `config validate` before reload |
+| `duplicate bearer_token across vaults; conflict at …` | reused token | grep every `auth.toml`, regenerate one |
+| `has [storage_overrides] … but N docs exist on shared indices` | v3.2 footgun guard | migrate the docs to the prefixed indices, or revert the override block |
+| writes silently missing during the outage | wqueue queued offline | `pbrainctl client queue list`; they drain on reconnect |
 
 ## Offline resilience (v3.1)
 

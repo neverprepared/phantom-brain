@@ -92,6 +92,7 @@ func serverCmd() *cobra.Command {
 		Short: "Daemon-side commands (HTTP serve, vault/snapshot/maintenance)",
 	}
 	c.AddCommand(serveCmd())
+	c.AddCommand(configCmd())
 	c.AddCommand(vaultCmd())
 	c.AddCommand(snapshotCmd())
 	c.AddCommand(queueCmd())
