@@ -90,6 +90,7 @@ Write path (v3.1): every write tool calls `wqueue.Enqueue` first, then attempts 
 | `brain_learn` | `internal/mcp/learn.go` | Ingest a curated note. Kind: `note`. Skips LLM gate (defaults to medium reliability). | Long-term |
 | `brain_attach` | `internal/mcp/attach.go` | Ingest a binary file. Kind: `attachment_stub`. Bytes → MinIO; metadata → OS. | Long-term + MinIO |
 | `brain_recall` | `internal/mcp/recall.go` | Hybrid BM25 + kNN over the local read cache. Result hits include title, kind indicator (`[note]` / `[attachment pdf]` / etc.), 150-char snippet, and a fetch hint for attachments. Footer mentions snapshot age when > 1h. | Reads only |
+| `brain_fetch` | `internal/mcp/fetch.go` | Retrieval step paired with recall: returns one doc's **full** (untruncated) body by SHA. Reads the same local snapshot as recall (`index.FetchBySHA`), so any SHA recall surfaced is fetchable and consistent. Use deliberately — recall to find, fetch to read. | Reads only |
 | `brain_trace` | `internal/mcp/trace.go` | Read the local Wiki/_log.md audit trail. | Reads only |
 | `brain_checkpoint` | `internal/mcp/brain_checkpoint.go` | Force a checkpoint of the working-memory state. | Local working DB |
 | `brain_status` | `internal/mcp/brain_status.go` | Report brain state (gen, snapshot SHA, heartbeat age) + v3.1 connectivity (`online`/`degraded`/`offline`), `queued_writes` depth, `last_daemon_contact_secs`, `snapshot_age_secs`. | Reads only |

@@ -74,6 +74,7 @@ func NewServer(deps ServerDeps) *Server {
 // in a sibling file.
 func (s *Server) Register(srv *server.MCPServer) {
 	srv.AddTool(recallTool(), s.handleRecall)
+	srv.AddTool(fetchTool(), s.handleFetch)
 	srv.AddTool(perceiveTool(), s.handlePerceive)
 	srv.AddTool(learnTool(), s.handleLearn)
 	srv.AddTool(attachTool(), s.handleAttach)
