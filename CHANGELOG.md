@@ -1,5 +1,18 @@
 # Changelog
 
+## [3.4.0](https://github.com/neverprepared/phantom-brain/compare/v3.3.0...v3.4.0) (2026-06-24)
+
+
+### Features
+
+* brain_reflect maintenance cycle — Phase 1 (report + forget) ([#79](https://github.com/neverprepared/phantom-brain/issues/79)) ([820e160](https://github.com/neverprepared/phantom-brain/commit/820e1604c1554ca5299259e2e164e6f2026ea0c2)), closes [#72](https://github.com/neverprepared/phantom-brain/issues/72)
+* pbrainctl server config validate — dry-run startup config load ([#77](https://github.com/neverprepared/phantom-brain/issues/77)) ([d32c14b](https://github.com/neverprepared/phantom-brain/commit/d32c14bca5e281b892bbc6597bb54d3f54338e12)), closes [#70](https://github.com/neverprepared/phantom-brain/issues/70)
+
+
+### Bug Fixes
+
+* actionable error when binding create hits read-only config dir ([#75](https://github.com/neverprepared/phantom-brain/issues/75)) ([ec21c64](https://github.com/neverprepared/phantom-brain/commit/ec21c64dc26f0c39e95c294d2d4f22d78e426aa3)), closes [#69](https://github.com/neverprepared/phantom-brain/issues/69)
+
 ## [3.3.0](https://github.com/neverprepared/phantom-brain/compare/v3.2.0...v3.3.0) (2026-06-23)
 
 

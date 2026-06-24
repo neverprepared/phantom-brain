@@ -31,6 +31,8 @@ pbrainctl client migrate-legacy      # one-time v4.x → v5.0 brain dir migratio
 pbrainctl client brain list|show|orphans
 pbrainctl client gc-brains           # local brain dir GC; bindless walk if no scope set
 pbrainctl client queue list|drain-now|clear   # v3.1 write-ahead queue inspection
+pbrainctl client reflect             # v3.3 forget-candidate report (issue #72 Phase 1)
+pbrainctl client forget <sha>        # v3.3 delete one summary by SHA (+ snapshot rebuild)
 pbrainctl client version
 
 pbrainctl server serve               # HTTP daemon (per-(profile, vault) synth + snapshot publisher)
@@ -92,6 +94,8 @@ Write path (v3.1): every write tool calls `wqueue.Enqueue` first, then attempts 
 | `brain_checkpoint` | `internal/mcp/brain_checkpoint.go` | Force a checkpoint of the working-memory state. | Local working DB |
 | `brain_status` | `internal/mcp/brain_status.go` | Report brain state (gen, snapshot SHA, heartbeat age) + v3.1 connectivity (`online`/`degraded`/`offline`), `queued_writes` depth, `last_daemon_contact_secs`, `snapshot_age_secs`. | Reads only |
 | `brain_death` | `internal/mcp/brain_death.go` | Flip brain status to dead. Phase 6: no payload tarball, just status + log marker. | Local manifest |
+| `brain_reflect` | `internal/mcp/reflect.go` | v3.3 maintenance cycle (issue #72 Phase 1). Read-only report of forget-candidate SHAs. Detector: stale-gate (`Synthesised == false`). Propose-then-apply: review, then `brain_forget` approved SHAs. | Reads only |
+| `brain_forget` | `internal/mcp/forget.go` | Delete one long-term summary by SHA (the apply step). Daemon `DeleteSummary` + snapshot rebuild. Stays visible to recall until a new snapshot publishes. | Long-term (delete) |
 | `task_start` | `internal/mcp/task.go` | Create a working-memory task, auto-seeded from a `brain_recall` against the goal. | Active (local WM) |
 | `task_update` | `internal/mcp/task.go` | Append a finding / artifact / question. | Active |
 | `task_complete` | `internal/mcp/task.go` | Promote important findings to long-term via `brain_learn`. Kind: `task_summary`. | Active → Long-term |
