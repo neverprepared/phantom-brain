@@ -105,6 +105,12 @@ type osWriter interface {
 	GetEntity(ctx context.Context, profile, vault, slug string) (*osearch.EntityDoc, error)
 	UpsertAttachment(ctx context.Context, doc osearch.AttachmentDoc, waitForRefresh bool) error
 	GetAttachment(ctx context.Context, profile, vault, sha string) (*osearch.AttachmentDoc, error)
+
+	// v3.3 brain_reflect / brain_forget (issue #72 Phase 1):
+	//   - DeleteSummary is the forget primitive.
+	//   - ScrollSummaries feeds the read-only reflect detector.
+	DeleteSummary(ctx context.Context, profile, vault, sha string) error
+	ScrollSummaries(ctx context.Context, profile, vault string, batchSize int, fn func(osearch.SummaryDoc) error) error
 }
 
 // SynthQueue is the producer side of the per-vault synthesis worker

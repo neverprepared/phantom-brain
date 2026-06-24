@@ -84,6 +84,29 @@ func (f *fakeOS) GetAttachment(_ context.Context, profile, vault, sha string) (*
 	return &doc, nil
 }
 
+func (f *fakeOS) DeleteSummary(_ context.Context, profile, vault, sha string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.summaries, osearch.DocID(profile, vault, sha))
+	return nil
+}
+func (f *fakeOS) ScrollSummaries(_ context.Context, profile, vault string, _ int, fn func(osearch.SummaryDoc) error) error {
+	f.mu.Lock()
+	docs := make([]osearch.SummaryDoc, 0, len(f.summaries))
+	for _, d := range f.summaries {
+		if d.Profile == profile && d.Vault == vault {
+			docs = append(docs, d)
+		}
+	}
+	f.mu.Unlock()
+	for _, d := range docs {
+		if err := fn(d); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type fakeAttach struct {
 	mu      sync.Mutex
 	blobs   map[string][]byte
