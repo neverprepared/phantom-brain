@@ -34,6 +34,7 @@ pbrainctl client queue list|drain-now|clear   # v3.1 write-ahead queue inspectio
 pbrainctl client version
 
 pbrainctl server serve               # HTTP daemon (per-(profile, vault) synth + snapshot publisher)
+pbrainctl server config validate [profile/vault]  # dry-run the startup registry load before restart (#70)
 pbrainctl server vault list|status|reload
 pbrainctl server snapshot status|rebuild|prune|claims
 pbrainctl server queue depth|contributors
