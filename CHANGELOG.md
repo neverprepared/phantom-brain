@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.5.0](https://github.com/neverprepared/phantom-brain/compare/v3.4.0...v3.5.0) (2026-06-24)
+
+
+### Features
+
+* brain_fetch — retrieve a doc's full body by SHA ([#80](https://github.com/neverprepared/phantom-brain/issues/80)) ([8761a02](https://github.com/neverprepared/phantom-brain/commit/8761a024a96e0dcd255d6eaa57036ed7cece62f7))
+
 ## [3.4.0](https://github.com/neverprepared/phantom-brain/compare/v3.3.0...v3.4.0) (2026-06-24)
 
 
