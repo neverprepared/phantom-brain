@@ -408,6 +408,9 @@ func (d *Daemon) buildRouter() chi.Router {
 			// reflect REPORTS forget-candidates; forget APPLIES one.
 			r.Get("/reflect", d.handleReflect)
 			r.Post("/forget", d.handleForget)
+			// v3.4 re-synthesis backfill (issue #82): re-process docs
+			// stuck at Synthesised=false (dropped synth jobs).
+			r.Post("/resynth", d.handleResynth)
 		})
 
 		// Upload route is local-backend only and uses its own

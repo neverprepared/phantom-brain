@@ -100,3 +100,59 @@ publishes and a fresh brain births.`,
 		},
 	}
 }
+
+// clientResynthCmd exposes the v3.4 re-synthesis backfill (issue #82) on
+// the operator CLI. Defaults to a dry run (safe); --apply starts the
+// background backfill that re-processes docs stuck at Synthesised=false.
+func clientResynthCmd() *cobra.Command {
+	var apply bool
+	var limit int
+	cmd := &cobra.Command{
+		Use:   "resynth",
+		Short: "Re-synthesize docs stuck at Synthesised=false (dropped synth jobs)",
+		Long: `Reports docs the synth worker never enriched — typically a bulk ingest
+that outran the single CLI-bound worker and overflowed its queue. Defaults
+to a dry run; pass --apply to start a background backfill that re-processes
+them (non-lossy, serialized with the live worker). Unlike "forget" these
+docs are kept and re-synthesized, not deleted.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			client, err := newBrainClientFromEnv()
+			if err != nil {
+				return err
+			}
+			resp, err := client.Resynth(cmd.Context(), !apply, limit)
+			if err != nil {
+				return err
+			}
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "%d doc(s) stuck at Synthesised=false\n", resp.BacklogCount)
+			if len(resp.Sample) > 0 {
+				fmt.Fprintf(out, "\nsample (up to %d):\n", len(resp.Sample))
+				tw := tabwriter.NewWriter(out, 0, 2, 2, ' ', 0)
+				fmt.Fprintln(tw, "SHA\tTITLE")
+				for _, item := range resp.Sample {
+					title := item.Title
+					if strings.TrimSpace(title) == "" {
+						title = "(untitled)"
+					}
+					fmt.Fprintf(tw, "%s\t%s\n", item.SHA, title)
+				}
+				_ = tw.Flush()
+			}
+			if !apply {
+				fmt.Fprintln(out, "\ndry run — re-run with --apply to re-synthesize")
+				return nil
+			}
+			if resp.Started {
+				fmt.Fprintf(out, "\nstarted re-synthesis of %d doc(s) in the background — "+
+					"re-run without --apply to watch the count fall\n", resp.Pending)
+			} else {
+				fmt.Fprintln(out, "\nnothing to re-synthesize")
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&apply, "apply", false, "start the backfill (default is a dry-run report)")
+	cmd.Flags().IntVar(&limit, "limit", 0, "cap how many docs the apply pass processes (0 = all)")
+	return cmd
+}

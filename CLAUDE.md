@@ -33,6 +33,7 @@ pbrainctl client gc-brains           # local brain dir GC; bindless walk if no s
 pbrainctl client queue list|drain-now|clear   # v3.1 write-ahead queue inspection
 pbrainctl client reflect             # v3.3 forget-candidate report (issue #72 Phase 1)
 pbrainctl client forget <sha>        # v3.3 delete one summary by SHA (+ snapshot rebuild)
+pbrainctl client resynth [--apply]   # v3.3 re-synthesize the Synthesised=false backlog (issue #82)
 pbrainctl client version
 
 pbrainctl server serve               # HTTP daemon (per-(profile, vault) synth + snapshot publisher)
@@ -97,6 +98,7 @@ Write path (v3.1): every write tool calls `wqueue.Enqueue` first, then attempts 
 | `brain_death` | `internal/mcp/brain_death.go` | Flip brain status to dead. Phase 6: no payload tarball, just status + log marker. | Local manifest |
 | `brain_reflect` | `internal/mcp/reflect.go` | v3.3 maintenance cycle (issue #72 Phase 1). Read-only report of forget-candidate SHAs. Detector: stale-gate (`Synthesised == false`). Propose-then-apply: review, then `brain_forget` approved SHAs. | Reads only |
 | `brain_forget` | `internal/mcp/forget.go` | Delete one long-term summary by SHA (the apply step). Daemon `DeleteSummary` + snapshot rebuild. Stays visible to recall until a new snapshot publishes. | Long-term (delete) |
+| `brain_resynth` | `internal/mcp/resynth.go` | v3.3 re-synthesis backfill (issue #82). Re-processes `Synthesised=false` summaries (the dropped-job backlog) through the gate/distill pipeline. `dry_run` defaults true (report backlog + sample); apply spawns a background backfill that's NON-lossy (bypasses the lossy `Enqueue`, serialized with the live worker via `processMu`). The fix-it companion to `brain_reflect` — re-synthesize (keep), vs `brain_forget` (delete). | Long-term (re-synth) |
 | `task_start` | `internal/mcp/task.go` | Create a working-memory task, auto-seeded from a `brain_recall` against the goal. | Active (local WM) |
 | `task_update` | `internal/mcp/task.go` | Append a finding / artifact / question. | Active |
 | `task_complete` | `internal/mcp/task.go` | Promote important findings to long-term via `brain_learn`. Kind: `task_summary`. | Active → Long-term |

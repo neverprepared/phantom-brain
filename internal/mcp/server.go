@@ -92,4 +92,6 @@ func (s *Server) Register(srv *server.MCPServer) {
 	// v3.3 brain_reflect maintenance cycle (issue #72 Phase 1).
 	srv.AddTool(reflectTool(), s.handleReflect)
 	srv.AddTool(forgetTool(), s.handleForget)
+	// v3.4 re-synthesis backfill (issue #82).
+	srv.AddTool(resynthTool(), s.handleResynth)
 }
