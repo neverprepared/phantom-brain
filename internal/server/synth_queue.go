@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -90,6 +91,13 @@ type SynthWorker struct {
 	// nil and PDF attachments synth as a no-op.
 	pdfExtractor    PDFExtractor
 	pdfAvailable    bool
+
+	// ocrAvailable is snapshotted at construction. When true the worker
+	// may OCR image attachments and image-only (scanned) PDFs via
+	// tesseract. Office (docx/xlsx/pptx) extraction is pure-Go and needs
+	// no availability gate. Nil/false in environments without tesseract
+	// — those attachments synth with empty bodies, like before v3.4.
+	ocrAvailable bool
 }
 
 type synthJob struct {
@@ -152,6 +160,7 @@ func NewSynthWorker(opts SynthWorkerOpts) *SynthWorker {
 		capture:      opts.Capture,
 		pdfExtractor: extractor,
 		pdfAvailable: extractor != nil,
+		ocrAvailable: OCRAvailable(),
 	}
 }
 
@@ -281,6 +290,7 @@ func (w *SynthWorker) run(ctx context.Context) {
 		slog.Int("buf_size", w.bufSize),
 		slog.Bool("claude_cli", w.cliAvailable),
 		slog.Bool("pdftotext", w.pdfAvailable),
+		slog.Bool("tesseract_ocr", w.ocrAvailable),
 	)
 	for {
 		select {
@@ -538,6 +548,139 @@ func (w *SynthWorker) upsertEntity(ctx context.Context, job synthJob, src *osear
 	return slug, nil
 }
 
+// extractAttachmentText dispatches on the attachment's MIME type (with
+// a filename-extension fallback for the empty/octet-stream case the
+// bulk loader assigns) and runs the matching extractor. Every branch
+// is availability-gated and soft-fail: a fetch error, a missing tool,
+// or an extractor failure logs at Warn and returns "" so the caller
+// leaves ExtractedText empty exactly as the pre-v3.4 PDF path did.
+//
+// Dispatch table:
+//
+//	application/pdf              → pdftotext; empty result + OCR available
+//	                               → OCRExtractScannedPDF (scanned PDF)
+//	image/{png,jpeg,gif,bmp,     → OCRExtractImage (tesseract)
+//	       tiff,webp}
+//	docx/xlsx/pptx OOXML mimes   → OfficeExtract (pure-Go, always on)
+//	application/msword, …ms-     → OfficeExtract → unsupported-legacy log
+//	excel, …ms-powerpoint
+//
+// When MIMEType is empty or application/octet-stream, dispatch keys off
+// the OriginalFilename extension instead (the loader tags xlsx/pptx/doc/
+// xls as octet-stream — see guessAttachmentMIME).
+func (w *SynthWorker) extractAttachmentText(ctx context.Context, job synthJob, att *osearch.AttachmentDoc, attach AttachmentStore) string {
+	mime := att.MIMEType
+	ext := strings.ToLower(filepath.Ext(att.OriginalFilename))
+
+	// fetch lazily — every branch needs the bytes, but office/legacy
+	// dispatch can short-circuit before we pay the MinIO round-trip only
+	// in the unsupported-legacy case (handled inside OfficeExtract).
+	fetch := func() ([]byte, bool) {
+		body, ferr := attach.GetAttachmentBytes(ctx, att.MinIOKey, 0)
+		if ferr != nil {
+			w.logger.Warn("phantom-brain: attachment fetch failed (non-fatal)",
+				slog.String("sha", job.SHA), slog.String("key", att.MinIOKey),
+				slog.String("err", ferr.Error()))
+			return nil, false
+		}
+		return body, true
+	}
+
+	switch {
+	case mime == "application/pdf" || (isGenericMIME(mime) && ext == ".pdf"):
+		if w.pdfExtractor == nil {
+			return ""
+		}
+		body, ok := fetch()
+		if !ok {
+			return ""
+		}
+		text, eerr := w.pdfExtractor(ctx, body)
+		if eerr != nil {
+			w.logger.Warn("phantom-brain: pdf extract failed (non-fatal)",
+				slog.String("sha", job.SHA), slog.String("err", eerr.Error()))
+			text = ""
+		}
+		if strings.TrimSpace(text) != "" {
+			return text
+		}
+		// Image-only (scanned) PDF: pdftotext found nothing. Fall back to
+		// rasterize-then-OCR when tesseract is available.
+		if w.ocrAvailable {
+			ocrText, oerr := OCRExtractScannedPDF(ctx, body)
+			if oerr != nil {
+				w.logger.Warn("phantom-brain: scanned-pdf OCR failed (non-fatal)",
+					slog.String("sha", job.SHA), slog.String("err", oerr.Error()))
+				return ""
+			}
+			return ocrText
+		}
+		return ""
+
+	case isImageMIME(mime) || (isGenericMIME(mime) && isImageExt(ext)):
+		if !w.ocrAvailable {
+			return ""
+		}
+		body, ok := fetch()
+		if !ok {
+			return ""
+		}
+		text, oerr := OCRExtractImage(ctx, body)
+		if oerr != nil {
+			w.logger.Warn("phantom-brain: image OCR failed (non-fatal)",
+				slog.String("sha", job.SHA), slog.String("err", oerr.Error()))
+			return ""
+		}
+		return text
+
+	case officeKind(mime, att.OriginalFilename) != "":
+		body, ok := fetch()
+		if !ok {
+			return ""
+		}
+		text, oerr := OfficeExtract(mime, att.OriginalFilename, body)
+		if errors.Is(oerr, ErrUnsupportedLegacyOffice) {
+			w.logger.Info("phantom-brain: skipping legacy binary office format",
+				slog.String("sha", job.SHA), slog.String("mime", mime),
+				slog.String("filename", att.OriginalFilename))
+			return ""
+		}
+		if oerr != nil {
+			w.logger.Warn("phantom-brain: office extract failed (non-fatal)",
+				slog.String("sha", job.SHA), slog.String("err", oerr.Error()))
+			return ""
+		}
+		return text
+	}
+	return ""
+}
+
+// isGenericMIME reports whether the stored MIME is absent or the
+// catch-all octet-stream, in which case dispatch should fall back to
+// the filename extension.
+func isGenericMIME(mime string) bool {
+	return mime == "" || mime == "application/octet-stream"
+}
+
+// isImageMIME matches the raster image types we OCR.
+func isImageMIME(mime string) bool {
+	switch mime {
+	case "image/png", "image/jpeg", "image/gif",
+		"image/bmp", "image/tiff", "image/webp":
+		return true
+	}
+	return false
+}
+
+// isImageExt is the extension-fallback companion to isImageMIME.
+func isImageExt(ext string) bool {
+	switch ext {
+	case ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp":
+		return true
+	}
+	return false
+}
+
 // enrichAttachmentStub is the v2.5.1 attachment path: fold the
 // AttachmentDoc's extracted text into the companion stub SummaryDoc's
 // RawBody so the existing gate + distill + UpsertSummary tail handles
@@ -558,23 +701,13 @@ func (w *SynthWorker) enrichAttachmentStub(ctx context.Context, job synthJob, su
 		return nil
 	}
 
-	// Run pdftotext when text is absent and the mime is something we
-	// can handle. Failures here are soft — the stub falls back to
-	// description-only RawBody.
-	if att.ExtractedText == "" && att.MIMEType == "application/pdf" && attach != nil && w.pdfExtractor != nil {
-		body, ferr := attach.GetAttachmentBytes(ctx, att.MinIOKey, 0)
-		if ferr != nil {
-			w.logger.Warn("phantom-brain: pdf fetch failed (non-fatal)",
-				slog.String("sha", job.SHA), slog.String("key", att.MinIOKey),
-				slog.String("err", ferr.Error()))
-		} else {
-			text, eerr := w.pdfExtractor(ctx, body)
-			if eerr != nil {
-				w.logger.Warn("phantom-brain: pdf extract failed (non-fatal)",
-					slog.String("sha", job.SHA), slog.String("err", eerr.Error()))
-			} else if text != "" {
-				att.ExtractedText = text
-			}
+	// Extract searchable text when the attachment carries none yet and
+	// its type is one we can handle (PDF, image via OCR, OOXML office).
+	// Failures here are soft — the stub falls back to description-only
+	// RawBody.
+	if att.ExtractedText == "" && attach != nil {
+		if text := w.extractAttachmentText(ctx, job, att, attach); text != "" {
+			att.ExtractedText = text
 		}
 	}
 
@@ -609,10 +742,10 @@ func (w *SynthWorker) enrichAttachmentStub(ctx context.Context, job synthJob, su
 	return nil
 }
 
-// processAttachmentJob runs the attachment-specific synth pass.
-// Currently the only enrichment is PDF text extraction; future
-// mime types (.docx via docx2txt, .txt passthrough, OCR for images)
-// slot in as additional MIMEType branches.
+// processAttachmentJob runs the attachment-specific synth pass for an
+// AttachmentDoc with no companion SummaryDoc. v3.4 (#86) generalized
+// the enrichment from PDF-only to a MIME dispatch (PDF + scanned-PDF
+// OCR, image OCR, OOXML office) via extractAttachmentText.
 //
 // Failure modes are all soft — log + return nil — because an
 // attachment with no extracted text is still a valid recall hit on
@@ -632,34 +765,17 @@ func (w *SynthWorker) processAttachmentJob(ctx context.Context, job synthJob, os
 		// a previous synth pass did. Don't pay the subprocess cost twice.
 		return nil
 	}
-	if doc.MIMEType != "application/pdf" {
-		// Other mime types: out of scope for this pass.
+	if attach == nil {
+		w.logger.Info("phantom-brain: skipping attachment extraction (no store)",
+			slog.String("sha", job.SHA))
 		return nil
 	}
-	if attach == nil || w.pdfExtractor == nil {
-		w.logger.Info("phantom-brain: skipping PDF extraction (no store or pdftotext)",
-			slog.String("sha", job.SHA),
-			slog.Bool("have_store", attach != nil),
-			slog.Bool("have_extractor", w.pdfExtractor != nil))
-		return nil
-	}
-	body, err := attach.GetAttachmentBytes(ctx, doc.MinIOKey, 0)
-	if err != nil {
-		w.logger.Warn("phantom-brain: pdf fetch failed (non-fatal)",
-			slog.String("sha", job.SHA), slog.String("key", doc.MinIOKey),
-			slog.String("err", err.Error()))
-		return nil
-	}
-	text, err := w.pdfExtractor(ctx, body)
-	if err != nil {
-		w.logger.Warn("phantom-brain: pdf extract failed (non-fatal)",
-			slog.String("sha", job.SHA), slog.String("err", err.Error()))
-		return nil
-	}
-	if text == "" {
-		// Scanned PDF or one pdftotext couldn't parse — leave the doc
-		// alone rather than writing an empty body that signals "we
-		// tried" when callers may want to retry with OCR later.
+	// Shared MIME dispatch (PDF/pdftotext+OCR, image OCR, OOXML office).
+	// Soft-fail: an unhandled type or a tool failure returns "" and we
+	// leave the doc alone rather than writing an empty body that signals
+	// "we tried" when a later re-enrich could succeed.
+	text := w.extractAttachmentText(ctx, job, doc, attach)
+	if strings.TrimSpace(text) == "" {
 		return nil
 	}
 	doc.ExtractedText = text
