@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.7.0](https://github.com/neverprepared/phantom-brain/compare/v3.6.0...v3.7.0) (2026-06-25)
+
+
+### Features
+
+* ingest-bulk loads curated/gathered .txt and .html, not just .md ([#88](https://github.com/neverprepared/phantom-brain/issues/88)) ([6faeffa](https://github.com/neverprepared/phantom-brain/commit/6faeffa3078453748c6211a3ecfb2544ff6a2877)), closes [#87](https://github.com/neverprepared/phantom-brain/issues/87)
+* OCR + office-document extraction for attachments ([#90](https://github.com/neverprepared/phantom-brain/issues/90)) ([b2d5dee](https://github.com/neverprepared/phantom-brain/commit/b2d5deec340215be5cc4ebb797fd85370e4c219d)), closes [#86](https://github.com/neverprepared/phantom-brain/issues/86)
+
 ## [3.6.0](https://github.com/neverprepared/phantom-brain/compare/v3.5.0...v3.6.0) (2026-06-25)
 
 
