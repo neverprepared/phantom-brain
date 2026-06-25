@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.6.0](https://github.com/neverprepared/phantom-brain/compare/v3.5.0...v3.6.0) (2026-06-25)
+
+
+### Features
+
+* brain_resynth — re-synthesize the dropped-job backlog ([#82](https://github.com/neverprepared/phantom-brain/issues/82)) ([#83](https://github.com/neverprepared/phantom-brain/issues/83)) ([2f6ce36](https://github.com/neverprepared/phantom-brain/commit/2f6ce36044d1e7cb16563192ceddb0f55d5a4efa))
+
 ## [3.5.0](https://github.com/neverprepared/phantom-brain/compare/v3.4.0...v3.5.0) (2026-06-24)
 
 
