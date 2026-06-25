@@ -11,10 +11,17 @@ func TestClassifyIngestPath(t *testing.T) {
 	cases := map[string]ingestKind{
 		"Raw/curated/notes.md":           kindLearn,
 		"Raw/curated/sub/notes.md":       kindLearn,
+		"Raw/curated/legal-doc.txt":      kindLearn,     // #87: .txt now ingested
+		"Raw/curated/scrape.html":        kindLearn,     // #87: .html now ingested
+		"Raw/curated/scrape.HTM":         kindLearn,     // #87: case-insensitive
 		"Raw/gathered/web.md":            kindPerceive,
 		"Raw/gathered/sub/web.md":        kindPerceive,
+		"Raw/gathered/page.txt":          kindPerceive,  // #87
+		"Raw/gathered/page.html":         kindPerceive,  // #87
 		"Raw/attachments/abc.pdf":        kindAttach,
 		"Raw/attachments/abc.md":         kindSkip, // sidecar stub
+		"Raw/attachments/scan.txt":       kindAttach, // text under attachments is still a blob
+		"Raw/curated/data.json":          kindSkip,  // non-text extension stays skipped
 		"Wiki/summaries/foo.md":          kindSkip,
 		"_index/provenance.json":         kindSkip,
 		"random.md":                      kindSkip,

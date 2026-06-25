@@ -30,9 +30,9 @@ import (
 // migrate-legacy story for v2.0 deployments.
 //
 // Routing heuristic:
-//   - *.md under any path containing "/curated/"   → Client.Learn
-//   - *.md anywhere else (gathered, top-level)     → Client.Perceive
-//   - binary files under "/attachments/"           → Client.Attach
+//   - text notes (.md/.txt/.html) under "/curated/"  → Client.Learn
+//   - text notes (.md/.txt/.html) under "/gathered/" → Client.Perceive
+//   - binary files under "/attachments/"             → Client.Attach
 //   - everything else                              → skipped (with a log)
 //
 // Embedding runs locally via Ollama (same model the daemon's snapshot
@@ -58,8 +58,8 @@ func ingestBulkCmd() *cobra.Command {
 		Short: "Walk a vault dir and POST every file to the daemon",
 		Long: `ingest-bulk loads an existing on-disk vault into the Phase 6 daemon.
 Files are routed by path:
-  Raw/curated/*.md         → brain_learn  (POST /api/brain/learn)
-  Raw/gathered/*.md (etc)  → brain_perceive (POST /api/brain/perceive)
+  Raw/curated/*.{md,txt,html}   → brain_learn  (POST /api/brain/learn)
+  Raw/gathered/*.{md,txt,html}  → brain_perceive (POST /api/brain/perceive)
   Raw/attachments/*        → brain_attach (POST /api/brain/attach)
 
 Embeddings are computed locally via Ollama (nomic-embed-text); the
@@ -235,9 +235,9 @@ func scanVaultForIngest(vaultDir string, maxFileBytes int64) (*ingestPlan, error
 func classifyIngestPath(rel string) ingestKind {
 	rel = filepath.ToSlash(rel)
 	switch {
-	case strings.HasPrefix(rel, "Raw/curated/") && strings.HasSuffix(rel, ".md"):
+	case strings.HasPrefix(rel, "Raw/curated/") && isIngestableText(rel):
 		return kindLearn
-	case strings.HasPrefix(rel, "Raw/gathered/") && strings.HasSuffix(rel, ".md"):
+	case strings.HasPrefix(rel, "Raw/gathered/") && isIngestableText(rel):
 		return kindPerceive
 	case strings.HasPrefix(rel, "Raw/attachments/"):
 		// Skip the .md stub files alongside binaries — daemon re-derives
@@ -248,6 +248,19 @@ func classifyIngestPath(rel string) ingestKind {
 		return kindAttach
 	}
 	return kindSkip
+}
+
+// isIngestableText reports whether a curated/gathered file is a text
+// note we ingest as a body (issue #87). Originally only .md was loaded,
+// which silently skipped ~2.3k curated .txt notes that had no covering
+// PDF. .txt/.html have no frontmatter — processMarkdown handles that
+// (title falls back to the filename, body is the whole file).
+func isIngestableText(rel string) bool {
+	switch strings.ToLower(filepath.Ext(rel)) {
+	case ".md", ".txt", ".html", ".htm":
+		return true
+	}
+	return false
 }
 
 // --- runner -------------------------------------------------------
