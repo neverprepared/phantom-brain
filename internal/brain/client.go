@@ -409,6 +409,37 @@ func (c *Client) Forget(ctx context.Context, sha string) (*ForgetResponse, error
 	return &out, nil
 }
 
+// --- v3.4 re-synthesis backfill (issue #82) ----------------------------
+
+// ResynthSampleItem mirrors internal/server.ResynthSampleItem — one
+// preview row in a backlog report.
+type ResynthSampleItem struct {
+	SHA   string `json:"sha"`
+	Title string `json:"title"`
+}
+
+// ResynthResponse mirrors internal/server.ResynthResult — the report from
+// a resynth scan (and, on apply, the background work that was kicked off).
+type ResynthResponse struct {
+	BacklogCount int                 `json:"backlog_count"`
+	Sample       []ResynthSampleItem `json:"sample"`
+	Started      bool                `json:"started"`
+	Pending      int                 `json:"pending"`
+}
+
+// Resynth POSTs a re-synthesis request. dryRun reports the backlog of
+// Synthesised=false docs without mutating; apply (dryRun=false) starts a
+// background backfill that re-processes them. limit<=0 means all. The
+// fix-it apply-companion to Reflect (issue #82).
+func (c *Client) Resynth(ctx context.Context, dryRun bool, limit int) (*ResynthResponse, error) {
+	var out ResynthResponse
+	body := map[string]any{"dry_run": dryRun, "limit": limit}
+	if err := c.do(ctx, http.MethodPost, "/api/brain/resynth", body, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // do is the shared request helper. Encodes body as JSON when
 // non-nil, decodes the response into out when non-nil, and turns
 // non-2xx responses into typed APIErrors carrying the daemon's

@@ -2,6 +2,8 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 )
@@ -97,4 +99,65 @@ func (d *Daemon) handleForget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, ForgetResponse{SHA: req.SHA, Forgotten: true})
+}
+
+// ResynthRequest is the POST /api/brain/resynth body. Both fields are
+// optional — an empty body means dry_run=false, limit=0 (process all).
+type ResynthRequest struct {
+	DryRun bool `json:"dry_run"`
+	Limit  int  `json:"limit"`
+}
+
+// handleResynth is the fix-it apply-companion to handleReflect (issue
+// #82). It scans Synthesised=false summaries and, when not a dry run,
+// kicks a background backfill that re-processes them WITHOUT going
+// through the lossy SynthWorker.Enqueue channel — re-pushing dropped
+// jobs through Enqueue could just drop them again. The backfill
+// serializes with the live worker via processMu (entity-upsert safety).
+//
+//	POST /api/brain/resynth {"dry_run": true}   — report backlog, mutate nothing.
+//	POST /api/brain/resynth {"dry_run": false}  — start the backfill.
+func (d *Daemon) handleResynth(w http.ResponseWriter, r *http.Request) {
+	if d.osClient == nil {
+		WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
+			"opensearch not configured; resynth disabled", nil)
+		return
+	}
+	binding, _ := BindingFromContext(r.Context())
+	osc, err := d.resolveOS(binding)
+	if err != nil {
+		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
+		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
+		return
+	}
+
+	// Tolerate an empty body — both fields default. EOF (no body) is not
+	// an error; anything else malformed is a 400.
+	var req ResynthRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid JSON body", nil)
+		return
+	}
+
+	// resynth needs the real worker — the noop SynthQueue (tests / legacy
+	// single-process daemons) has no backfill machinery. Unavailable there,
+	// which is the correct answer.
+	worker, ok := d.synth.(*SynthWorker)
+	if !ok {
+		WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
+			"synth worker not available", nil)
+		return
+	}
+
+	result, err := worker.ResynthBacklog(r.Context(), osc, binding.Key.Profile, binding.Key.Vault, req.DryRun, req.Limit)
+	if err != nil {
+		if errors.Is(err, ErrResynthInProgress) {
+			WriteErrorEnvelope(w, http.StatusConflict, ErrCodeStorageBackendErr, err.Error(), nil)
+			return
+		}
+		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
+			"resynth failed: "+err.Error(), nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }

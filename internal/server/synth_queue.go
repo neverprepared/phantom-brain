@@ -2,9 +2,12 @@ package server
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/neverprepared/phantom-brain/internal/osearch"
@@ -35,6 +38,24 @@ type SynthWorker struct {
 	bufSize  int
 	stopOnce sync.Once
 	stopped  chan struct{}
+
+	// baseCtx is captured in Start. The live run() loop uses the ctx
+	// passed to Start directly, but the background backfill goroutine
+	// (ResynthBacklog apply path) outlives the HTTP request that kicks
+	// it — the request ctx dies when the handler returns, so backfill
+	// must run against this longer-lived daemon ctx instead.
+	baseCtx context.Context
+
+	// processMu serializes processJob across the live run() loop AND
+	// the backfill goroutine so they never run concurrently. upsertEntity
+	// is a read-modify-write on the OS entity doc, single-worker-safe
+	// only — concurrent processing would corrupt MentionedBy[].
+	processMu sync.Mutex
+
+	// backfilling caps the resynth backfill at one at a time. The apply
+	// path CompareAndSwaps this to true before spawning its goroutine and
+	// Stores false in the goroutine's defer.
+	backfilling atomic.Bool
 
 	// OnComplete is fired after each successfully synthesised job.
 	// Day 6 wires the debounced snapshot rebuild trigger here.
@@ -153,6 +174,7 @@ func (w *SynthWorker) Enqueue(profile, vault, sha string) {
 // flight work and exits the loop. Idempotent — repeat Starts are
 // no-ops once running.
 func (w *SynthWorker) Start(ctx context.Context) {
+	w.baseCtx = ctx
 	go w.run(ctx)
 }
 
@@ -160,6 +182,98 @@ func (w *SynthWorker) Start(ctx context.Context) {
 // Safe to call multiple times.
 func (w *SynthWorker) Stop() {
 	w.stopOnce.Do(func() { close(w.stopped) })
+}
+
+// ErrResynthInProgress is returned by ResynthBacklog when an apply is
+// already running. At most one backfill runs at a time so the
+// single-worker entity-upsert invariant holds; callers (handleResynth)
+// errors.Is this to map it onto an HTTP 409 Conflict.
+var ErrResynthInProgress = errors.New("resynth: a backfill is already in progress")
+
+// ResynthSampleItem is one preview row in a ResynthResult.
+type ResynthSampleItem struct {
+	SHA   string `json:"sha"`
+	Title string `json:"title"`
+}
+
+// ResynthResult is the report ResynthBacklog returns. On a dry run only
+// the count + sample are populated; on apply Started/Pending describe the
+// background work that was kicked off.
+type ResynthResult struct {
+	BacklogCount int                 `json:"backlog_count"` // total Synthesised=false found
+	Sample       []ResynthSampleItem `json:"sample"`        // capped preview (<=20)
+	Started      bool                `json:"started"`       // apply kicked off
+	Pending      int                 `json:"pending"`       // how many will be processed
+}
+
+// resynthSampleCap bounds the preview slice ResynthBacklog returns.
+const resynthSampleCap = 20
+
+// ResynthBacklog scrolls Synthesised=false summaries for (profile, vault).
+// dryRun: report count+sample, mutate nothing. apply: spawn ONE background
+// goroutine that re-processes each stuck doc serialized with the live
+// worker (non-lossy — bypasses the lossy Enqueue channel). limit<=0 means
+// all; limit>0 caps how many are processed (count still reflects the true total).
+//
+// This is the fix-it apply-companion to brain_reflect (issue #82): a bulk
+// ingest can outrun the single CLI-bound worker and overflow Enqueue's
+// buffer, leaving docs stuck at Synthesised=false. Re-pushing them through
+// Enqueue would risk dropping them again; instead the backfill calls
+// w.handle directly, which takes processMu and therefore can never run
+// concurrently with the live worker (preserving the entity-upsert invariant).
+func (w *SynthWorker) ResynthBacklog(ctx context.Context, osc osWriter, profile, vault string, dryRun bool, limit int) (ResynthResult, error) {
+	var stuck []synthJob
+	var sample []ResynthSampleItem
+	err := osc.ScrollSummaries(ctx, profile, vault, 0, func(doc osearch.SummaryDoc) error {
+		if doc.Synthesised {
+			return nil
+		}
+		stuck = append(stuck, synthJob{Profile: profile, Vault: vault, SHA: doc.SHA})
+		if len(sample) < resynthSampleCap {
+			sample = append(sample, ResynthSampleItem{SHA: doc.SHA, Title: doc.Title})
+		}
+		return nil
+	})
+	if err != nil {
+		return ResynthResult{}, fmt.Errorf("resynth: scroll: %w", err)
+	}
+
+	res := ResynthResult{BacklogCount: len(stuck), Sample: sample}
+	if dryRun || len(stuck) == 0 {
+		return res, nil
+	}
+
+	toProcess := stuck
+	if limit > 0 && limit < len(stuck) {
+		toProcess = stuck[:limit]
+	}
+
+	// At most one backfill at a time — the live worker + backfill already
+	// serialize on processMu, but two backfills would each spin a goroutine
+	// re-scanning the same backlog. CompareAndSwap rejects the second.
+	if !w.backfilling.CompareAndSwap(false, true) {
+		return res, ErrResynthInProgress
+	}
+
+	go func() {
+		defer w.backfilling.Store(false)
+		bctx := w.baseCtx
+		if bctx == nil {
+			bctx = context.Background()
+		}
+		for _, job := range toProcess {
+			select {
+			case <-bctx.Done():
+				return
+			default:
+			}
+			w.handle(bctx, job)
+		}
+	}()
+
+	res.Started = true
+	res.Pending = len(toProcess)
+	return res, nil
 }
 
 func (w *SynthWorker) run(ctx context.Context) {
@@ -177,18 +291,25 @@ func (w *SynthWorker) run(ctx context.Context) {
 			w.logger.Info("phantom-brain: synth worker exiting (stop)")
 			return
 		case job := <-w.queue:
-			if err := w.processJob(ctx, job); err != nil {
-				w.logger.Warn("phantom-brain: synth job failed",
-					slog.String("vault", job.Profile+"/"+job.Vault),
-					slog.String("sha", job.SHA),
-					slog.String("err", err.Error()),
-				)
-				continue
-			}
-			if w.OnComplete != nil {
-				w.OnComplete(job.Profile, job.Vault, job.SHA)
-			}
+			w.handle(ctx, job)
 		}
+	}
+}
+
+// handle runs one job under processMu (serialized with backfill) and
+// fires OnComplete on success. Shared by the live loop and backfill.
+func (w *SynthWorker) handle(ctx context.Context, job synthJob) {
+	w.processMu.Lock()
+	err := w.processJob(ctx, job)
+	w.processMu.Unlock()
+	if err != nil {
+		w.logger.Warn("phantom-brain: synth job failed",
+			slog.String("vault", job.Profile+"/"+job.Vault),
+			slog.String("sha", job.SHA), slog.String("err", err.Error()))
+		return
+	}
+	if w.OnComplete != nil {
+		w.OnComplete(job.Profile, job.Vault, job.SHA)
 	}
 }
 
