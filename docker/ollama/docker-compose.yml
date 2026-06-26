@@ -1,0 +1,65 @@
+# Ollama embedding worker — deploy on each LINUX GPU host.
+#
+# macOS / Apple Silicon: do NOT use this. Docker can't reach Metal, so a
+# containerized Ollama on a Mac is CPU-only. Run Ollama NATIVELY there
+# (`brew install ollama`, `ollama serve`) and just list that Mac's
+# address as a backend in the main stack's haproxy/haproxy.cfg.
+#
+# Requires the NVIDIA Container Toolkit on the host.
+#
+# Per GPU host:
+#   docker compose -f docker/ollama/docker-compose.yml up -d
+#   docker compose -f docker/ollama/docker-compose.yml logs -f ollama-pull
+# Then add this host to the main stack's haproxy/haproxy.cfg:
+#   server ollamaN <this-host-ip>:11434 check inter 5s fall 3 rise 2
+#
+# The main stack's `ollama-lb` (HAProxy) load-balances across all hosts
+# listed there — mixed Docker (Linux) + native (macOS) is fine.
+
+services:
+  ollama:
+    image: ollama/ollama:${OLLAMA_VERSION:-latest}
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    environment:
+      # Bind all interfaces so HAProxy on another host can reach it.
+      OLLAMA_HOST: 0.0.0.0
+      # Keep the embedding model resident so balanced requests never pay
+      # a cold model-load. -1 = never unload.
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:--1}
+      # Concurrent requests this instance serves before queueing.
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-4}
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
+    volumes:
+      - ./data/ollama:/root/.ollama        # persist pulled models
+    # GPU access via the NVIDIA Container Toolkit. Works with
+    # `docker compose up` (Compose v2). Set count to a number to pin
+    # specific GPUs, or "all".
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  # One-shot: pre-pull the embedding model so the instance is warm and
+  # ready before HAProxy routes to it. Idempotent — no-op if current.
+  ollama-pull:
+    image: ollama/ollama:${OLLAMA_VERSION:-latest}
+    container_name: ollama-pull
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_PULL_MODEL: ${OLLAMA_PULL_MODEL:-nomic-embed-text}
+    entrypoint: ["/bin/sh", "-c", "ollama pull \"$$OLLAMA_PULL_MODEL\" && echo \"pulled $$OLLAMA_PULL_MODEL\""]
+    restart: "no"

@@ -115,6 +115,53 @@ services:
       "
     restart: "no"
 
+  # Postgres — System of Record for the OpenSearch-native redesign
+  # (see docs/design/opensearch-native-memory-architecture.md, epic #92).
+  # Uses the pgvector image so embedding-similarity (entity resolution /
+  # near-dup reconciliation) is available at the SoR from day one.
+  # Not yet wired into the daemon — added bottom-up ahead of the schema
+  # + projection work. Mapped to host 5433 to avoid colliding with an
+  # operator-run Postgres on :5432 (mirrors opensearch on 9201).
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: pbrain-postgres
+    restart: unless-stopped
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-pbrain}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB:       ${POSTGRES_DB:-phantom_brain}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      # *.sql here run once, on first init of an empty data dir.
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-pbrain} -d $${POSTGRES_DB:-phantom_brain}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # HAProxy — HA / load balancing in front of N Ollama instances
+  # (epic #92; embedding is centralized in the OpenSearch-native design).
+  # HAProxy over nginx here for FREE active health checks (probes
+  # /api/version, routes around dead/cold instances). Backends are
+  # external + operator-specific — edit haproxy/haproxy.cfg.
+  # VIP: host 11435 (avoids colliding with a host Ollama on 11434);
+  # stats UI: host 8404. Point the OS connector + clients at :11435.
+  ollama-lb:
+    image: haproxy:lts
+    container_name: pbrain-ollama-lb
+    restart: unless-stopped
+    ports:
+      - "11435:11434"   # balanced Ollama endpoint
+      - "8404:8404"     # HAProxy stats UI
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    extra_hosts:
+      # lets HAProxy reach an Ollama running on the docker host
+      - "host.docker.internal:host-gateway"
+
   pbrainctl:
     build:
       context: ..
