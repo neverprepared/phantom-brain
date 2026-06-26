@@ -48,6 +48,22 @@ const (
 	KindManualCurate   Kind = "manual_curate"   // bulk loader: future/non-email formats
 )
 
+// SoRKind translates a legacy Kind to the Postgres SoR records.kind
+// enum (migrations/0001 records_kind_chk). The two enums agree on
+// every value EXCEPT the attachment shape: legacy uses
+// "attachment_stub" (the recall-sidecar name from the old
+// pb_summaries+pb_attachments split), while the SoR collapses it to a
+// single "attachment" record. Everything else passes through
+// unchanged. Both the live dual-write path (internal/server) and the
+// backfill (internal/backfill) MUST route Kind through here, or the
+// check constraint rejects attachment rows.
+func SoRKind(k Kind) string {
+	if k == KindAttachmentStub {
+		return "attachment"
+	}
+	return string(k)
+}
+
 // IsValid reports whether k is one of the recognised Kind values.
 // Daemon write handlers reject unknown kinds to catch typos at the
 // boundary. To allow new kinds in a rolling-deploy scenario, relax
