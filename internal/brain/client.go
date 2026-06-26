@@ -322,6 +322,53 @@ func (c *Client) Trace(ctx context.Context, req TraceRequest) error {
 	return c.do(ctx, http.MethodPost, "/api/brain/trace", req, nil)
 }
 
+// RecallRequest is the body of POST /api/brain/recall (Phase C online
+// recall). Only Query is required; Embedding + facet filters are
+// optional. The (profile, vault) scope is derived daemon-side from the
+// bearer token, so it is NOT sent. Mirrors server.RecallRequest.
+type RecallRequest struct {
+	Query       string    `json:"query"`
+	Embedding   []float32 `json:"embedding,omitempty"`
+	Limit       int       `json:"limit,omitempty"`
+	Kinds       []string  `json:"kinds,omitempty"`
+	Topic       string    `json:"topic,omitempty"`
+	MemoryType  string    `json:"memory_type,omitempty"`
+	Reliability []string  `json:"reliability,omitempty"`
+}
+
+// RecallHitDTO is one ranked recall result on the wire. Mirrors
+// server.RecallHitDTO field-for-field (identical JSON tags).
+type RecallHitDTO struct {
+	SHA              string  `json:"sha"`
+	Title            string  `json:"title"`
+	Kind             string  `json:"kind"`
+	MemoryType       string  `json:"memory_type,omitempty"`
+	Topic            string  `json:"topic,omitempty"`
+	Reliability      string  `json:"reliability,omitempty"`
+	SourceURL        string  `json:"source_url,omitempty"`
+	MimeType         string  `json:"mime_type,omitempty"`
+	OriginalFilename string  `json:"original_filename,omitempty"`
+	Snippet          string  `json:"snippet,omitempty"`
+	Score            float64 `json:"score"`
+}
+
+// RecallResponse is the 200 body of POST /api/brain/recall.
+type RecallResponse struct {
+	Hits []RecallHitDTO `json:"hits"`
+}
+
+// Recall POSTs an online-recall query to the daemon. Transport failures
+// wrap ErrDaemonUnreachable; non-2xx (e.g. 503 when online recall isn't
+// enabled for the binding) returns the decoded *APIError. Callers detect
+// either and fall back to the local snapshot.
+func (c *Client) Recall(ctx context.Context, req RecallRequest) (*RecallResponse, error) {
+	var out RecallResponse
+	if err := c.do(ctx, http.MethodPost, "/api/brain/recall", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // AttachGet retrieves a presigned URL the agent can fetch to pull
 // the binary. Returns *APIError 404 when the SHA isn't in this
 // vault's attachments index.
