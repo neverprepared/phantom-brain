@@ -63,6 +63,14 @@ type SynthWorker struct {
 	// Nil-safe; the worker checks before invoking.
 	OnComplete func(profile, vault, sha string)
 
+	// OnSynthesised is the Phase B1 seam: fired after a job's legacy
+	// UpsertSummary(Synthesised=true) succeeds, carrying the just-computed
+	// distilled state so the daemon can mirror it into the Postgres SoR
+	// (dualWriteSynth) WITHOUT coupling this file to Postgres types. Keeps
+	// synth_queue.go decoupled — mirrors the OnComplete callback pattern.
+	// Nil-safe; the worker checks before invoking.
+	OnSynthesised func(profile, vault, sha string, res synthResult)
+
 	// cliAvailable is snapshotted at construction so the worker
 	// behaves predictably across the run — toggling the CLI in/out
 	// of $PATH at runtime would otherwise produce mixed-mode output.
@@ -472,6 +480,8 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 	// real named entities; the regex stays as a resilient fallback.
 	entities := extractEntitiesBest(ctx, doc.Title, content, w.cliAvailable, w.logger)
 	entitySlugs := make([]string, 0, len(entities))
+	// entityNames maps slug → display name for the Phase B1 SoR mirror.
+	entityNames := make(map[string]string, len(entities))
 	for _, ent := range entities {
 		slug, err := w.upsertEntity(ctx, job, doc, ent, content, verdict, osc)
 		if err != nil {
@@ -480,6 +490,7 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 			continue
 		}
 		entitySlugs = append(entitySlugs, slug)
+		entityNames[slug] = ent
 	}
 
 	now := time.Now().UTC()
@@ -490,8 +501,33 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 	doc.Topic = string(verdict.Topic)
 	doc.GateReason = verdict.Reason
 	doc.Entities = entitySlugs
-	return osc.UpsertSummary(ctx, *doc, false)
+	if err := osc.UpsertSummary(ctx, *doc, false); err != nil {
+		return err
+	}
+
+	// Phase B1: mirror the distilled state into the Postgres SoR (the
+	// dual-write synth pass). Fired AFTER the legacy upsert succeeds; the
+	// callback is non-fatal and never changes this function's return. The
+	// embedding carried here is the doc's agent-computed vector (the daemon
+	// does not recompute) — empty for synth-only updates.
+	if w.OnSynthesised != nil {
+		w.OnSynthesised(job.Profile, job.Vault, job.SHA, synthResult{
+			Body:           summary,
+			Reliability:    string(doc.Reliability),
+			Topic:          doc.Topic,
+			GateReason:     doc.GateReason,
+			Embedding:      doc.Embedding,
+			EmbeddingModel: synthEmbeddingModel,
+			EntityNames:    entityNames,
+		})
+	}
+	return nil
 }
+
+// synthEmbeddingModel labels the agent-computed embedding the daemon
+// passes through. Phase 6 standardises on nomic-embed-text (768-dim); the
+// SoR records the model name so a future re-embed can detect drift.
+const synthEmbeddingModel = "nomic-embed-text"
 
 // gateSourceType maps the SummaryDoc shape onto the v5.0 GateOpts
 // SourceType field. Curated docs are stamped by handleLearn with

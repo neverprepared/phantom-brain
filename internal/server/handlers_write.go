@@ -324,6 +324,10 @@ func (d *Daemon) handlePerceive(w http.ResponseWriter, r *http.Request) {
 	}
 	d.synth.Enqueue(binding.Key.Profile, binding.Key.Vault, req.SHA)
 
+	// Phase B1: mirror the raw record into the Postgres SoR when the
+	// binding has dual_write on. Non-fatal — never affects the response.
+	d.dualWriteRaw(r.Context(), binding, doc)
+
 	writeWriteResponse(w, http.StatusAccepted, req.SHA, true)
 }
 
@@ -385,6 +389,10 @@ func (d *Daemon) handleLearn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.synth.Enqueue(binding.Key.Profile, binding.Key.Vault, req.SHA)
+
+	// Phase B1: mirror the raw record into the Postgres SoR (dual_write).
+	// Non-fatal — never affects the response.
+	d.dualWriteRaw(r.Context(), binding, doc)
 
 	writeWriteResponse(w, http.StatusAccepted, req.SHA, true)
 }
@@ -541,6 +549,11 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.synth.Enqueue(binding.Key.Profile, binding.Key.Vault, req.SHA)
+
+	// Phase B1: mirror the attachment's companion record (stub identity +
+	// the attachment's minio_key/mime/size/filename) into the Postgres SoR
+	// when dual_write is on. Non-fatal — never affects the response.
+	d.dualWriteAttachRaw(r.Context(), binding, stub, doc)
 
 	writeWriteResponse(w, http.StatusAccepted, req.SHA, true)
 }

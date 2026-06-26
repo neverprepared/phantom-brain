@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -68,6 +69,12 @@ type Daemon struct {
 	pgBaseDSN  string
 	pgMu       sync.Mutex
 	pgProfiles map[string]*pgProfileResources
+
+	// dualWriteFailures counts non-fatal Phase B1 dual-write failures
+	// (PG disabled errors aside) since daemon start. No Prometheus yet —
+	// this counter + the paired Warn logs are the "meter" for dual-write
+	// divergence. Read via DualWriteFailureCount.
+	dualWriteFailures atomic.Int64
 
 	// allowSharedFallback is the explicit opt-in that lets resolveOS /
 	// resolveAttach return the shared d.osClient / d.attach when no
@@ -361,6 +368,17 @@ func Start(opts StartOpts) (*Daemon, error) {
 		}
 		w.OnComplete = func(profile, vaultName, _ string) {
 			d.debouncer.Trigger(profile, vaultName)
+		}
+		// Phase B1: mirror the synthesised state into the Postgres SoR.
+		// Resolve the binding (for its DualWrite flag + PG view) by
+		// (profile, vault); dualWriteSynth is a no-op when the flag is
+		// off or PG is disabled, and non-fatal on any error.
+		w.OnSynthesised = func(profile, vaultName, sha string, res synthResult) {
+			b, ok := d.registry.LookupByVault(VaultKey{Profile: profile, Vault: vaultName})
+			if !ok {
+				return
+			}
+			d.dualWriteSynth(parentCtx, b, profile, vaultName, sha, res)
 		}
 		w.Start(parentCtx)
 		d.synth = w

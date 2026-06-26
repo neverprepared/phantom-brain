@@ -190,6 +190,14 @@ type VaultOverrides struct {
 	// fields fall through to the daemon-global defaults. See
 	// StorageOverrides for the per-field contract.
 	StorageOverrides StorageOverrides `toml:"storage_overrides"`
+
+	// DualWrite opts THIS binding into the Phase B1 parallel-run: every
+	// write (and the synth mirror) is additionally written to the
+	// Postgres System-of-Record. Defaults OFF — legacy pb_summaries stays
+	// authoritative and untouched until an operator flips this true.
+	// New-store failures during dual-write are non-fatal (logged +
+	// metered), never affecting the legacy write path.
+	DualWrite bool `toml:"dual_write"`
 }
 
 // StorageOverrides is the per-binding override block parsed from
