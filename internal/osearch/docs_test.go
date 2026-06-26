@@ -30,6 +30,25 @@ func TestEntitySlug(t *testing.T) {
 	}
 }
 
+func TestSoRKind(t *testing.T) {
+	// Only attachment_stub collapses to "attachment"; everything else
+	// passes through. The returned strings MUST all satisfy the SoR
+	// records_kind_chk constraint (migrations/0001).
+	cases := map[Kind]string{
+		KindAttachmentStub: "attachment",
+		KindNote:           "note",
+		KindWebScrape:      "web_scrape",
+		KindTaskSummary:    "task_summary",
+		KindEmailImport:    "email_import",
+		KindManualCurate:   "manual_curate",
+	}
+	for in, want := range cases {
+		if got := SoRKind(in); got != want {
+			t.Errorf("SoRKind(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestSHA256Hex(t *testing.T) {
 	got := SHA256Hex([]byte("hello"))
 	want := "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"

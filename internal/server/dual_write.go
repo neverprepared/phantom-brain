@@ -114,7 +114,7 @@ func summaryDocToUpsertParams(doc osearch.SummaryDoc) pgdb.UpsertRecordParams {
 		Profile:    doc.Profile,
 		Vault:      doc.Vault,
 		Sha:        doc.SHA,
-		Kind:       string(doc.Kind),
+		Kind:       osearch.SoRKind(doc.Kind),
 		MemoryType: optText(string(doc.MemoryType)),
 		Title:      doc.Title,
 		RawBody:    optText(doc.RawBody),
