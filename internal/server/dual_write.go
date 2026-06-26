@@ -116,7 +116,7 @@ func summaryDocToUpsertParams(doc osearch.SummaryDoc) pgdb.UpsertRecordParams {
 		Sha:        doc.SHA,
 		Kind:       osearch.SoRKind(doc.Kind),
 		MemoryType: optText(string(doc.MemoryType)),
-		Title:      doc.Title,
+		Title:      pgstore.SanitizeText(doc.Title),
 		RawBody:    optText(doc.RawBody),
 		SourceUrl:  optText(doc.SourceURL),
 		Source:     nonNilStrings(doc.Source),
@@ -266,8 +266,8 @@ func (d *Daemon) dualWriteSynth(ctx context.Context, b VaultBinding, profile, va
 		ent, err := q.UpsertEntity(ctx2, pgdb.UpsertEntityParams{
 			Profile: profile,
 			Vault:   vault,
-			Slug:    slug,
-			Name:    name,
+			Slug:    pgstore.SanitizeText(slug),
+			Name:    pgstore.SanitizeText(name),
 		})
 		if err != nil {
 			d.noteDualWriteFailure("synth-entity", profile, vault, sha, err)
@@ -306,6 +306,7 @@ func (d *Daemon) dualWriteSynth(ctx context.Context, b VaultBinding, profile, va
 // optText returns a NULL pgtype.Text for an empty string, else a valid
 // one. Keeps empty optional fields out of the SoR as SQL NULL.
 func optText(s string) pgtype.Text {
+	s = pgstore.SanitizeText(s)
 	if s == "" {
 		return pgtype.Text{}
 	}
@@ -337,8 +338,5 @@ func optVector(emb []float32) *pgvector.Vector {
 // columns (records.source / records.tags). A nil input becomes an empty
 // (non-nil) slice so pgx sends '{}' rather than NULL.
 func nonNilStrings(in []string) []string {
-	if in == nil {
-		return []string{}
-	}
-	return in
+	return pgstore.SanitizeTexts(in)
 }

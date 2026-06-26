@@ -16,6 +16,7 @@ package backfill
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,7 +121,7 @@ func embed(hot int) []float32 {
 // corpus the backfill will read. Returns the SHAs used so assertions can
 // reference them. prefix is the per-binding index prefix.
 type seeded struct {
-	synthSHA, rawSHA, attSHA, danglingSHA string
+	synthSHA, rawSHA, attSHA, danglingSHA, nulSHA string
 }
 
 func seedLegacy(ctx context.Context, t *testing.T, osc *osearch.Client, prefix, profile, vault string) seeded {
@@ -137,6 +138,7 @@ func seedLegacy(ctx context.Context, t *testing.T, osc *osearch.Client, prefix, 
 		rawSHA:      sha("b2"),
 		attSHA:      sha("c3"),
 		danglingSHA: sha("d4"), // referenced by an entity but never a record
+		nulSHA:      sha("e5"), // body/title carry a NUL byte (the prod failure)
 	}
 
 	// 1. A synthesised note (distilled body + verdict + embedding to reuse).
@@ -194,6 +196,23 @@ func seedLegacy(ctx context.Context, t *testing.T, osc *osearch.Client, prefix, 
 	}
 	if err := osc.UpsertAttachmentWithPrefix(ctx, prefix, att, true); err != nil {
 		t.Fatalf("seed attachment doc: %v", err)
+	}
+
+	// 3b. A synthesised doc whose title + body carry NUL bytes (0x00) —
+	//     OpenSearch/JSON tolerate them, Postgres TEXT rejects them
+	//     (SQLSTATE 22021). This is the exact production failure; the
+	//     backfill must SANITISE (strip NUL) and write it, not abort.
+	nul := osearch.SummaryDoc{
+		Profile: profile, Vault: vault, SHA: s.nulSHA,
+		Kind: osearch.KindNote, Title: "Bad\x00title",
+		RawBody:     "raw\x00body",
+		Body:        "distilled\x00body about widgets",
+		CreatedAt:   now, UpdatedAt: now,
+		Synthesised: true,
+		Embedding:   embed(7),
+	}
+	if err := osc.UpsertSummaryWithPrefix(ctx, prefix, nul, true); err != nil {
+		t.Fatalf("seed nul summary: %v", err)
 	}
 
 	// 4. Two entities. One ("acme-corp") has an alias + mentions the synth
@@ -260,11 +279,15 @@ func TestBackfill_Integration(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	total := stats.Total
-	if total.RecordsInserted != 3 {
-		t.Fatalf("expected 3 records inserted, got %d", total.RecordsInserted)
+	if total.RecordsInserted != 4 { // synth note + raw + attachment stub + nul doc
+		t.Fatalf("expected 4 records inserted, got %d", total.RecordsInserted)
 	}
-	if total.RecordsSynthed != 2 { // synth note + attachment stub
-		t.Fatalf("expected 2 synthesised, got %d", total.RecordsSynthed)
+	if total.RecordsSynthed != 3 { // synth note + attachment stub + nul doc
+		t.Fatalf("expected 3 synthesised, got %d", total.RecordsSynthed)
+	}
+	if total.Errors != 0 { // the NUL doc must be sanitised + written, NOT skipped
+		t.Fatalf("expected 0 errors (NUL sanitised, not aborted), got %d: %v",
+			total.Errors, stats.PerVault)
 	}
 	if total.EntitiesUpserted != 2 {
 		t.Fatalf("expected 2 entities, got %d", total.EntitiesUpserted)
@@ -298,6 +321,16 @@ func TestBackfill_Integration(t *testing.T) {
 	if attRec.MimeType.String != "application/pdf" || attRec.OriginalFilename.String != "contract.pdf" {
 		t.Fatalf("attachment metadata not joined: mime=%q filename=%q",
 			attRec.MimeType.String, attRec.OriginalFilename.String)
+	}
+	// The NUL doc landed, with every NUL stripped from its text fields.
+	nulRec := getRec(ctx, t, q, profile, vault, s.nulSHA)
+	for _, f := range []string{nulRec.Title, nulRec.Body.String, nulRec.RawBody.String} {
+		if strings.ContainsRune(f, 0) {
+			t.Fatalf("NUL byte survived into the SoR: %q", f)
+		}
+	}
+	if nulRec.Title != "Badtitle" || nulRec.Body.String != "distilledbody about widgets" {
+		t.Fatalf("NUL sanitisation wrong: title=%q body=%q", nulRec.Title, nulRec.Body.String)
 	}
 
 	// Entity graph: acme has the alias + a link to the synth record.
@@ -349,7 +382,7 @@ func TestBackfill_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("idempotent Run: %v", err)
 	}
-	if stats2.Total.RecordsInserted != 0 || stats2.Total.RecordsDup != 3 {
+	if stats2.Total.RecordsInserted != 0 || stats2.Total.RecordsDup != 4 {
 		t.Fatalf("re-run should be all-dup: inserted=%d dup=%d",
 			stats2.Total.RecordsInserted, stats2.Total.RecordsDup)
 	}
@@ -397,7 +430,7 @@ func TestBackfill_DryRun_Integration(t *testing.T) {
 		t.Fatalf("dry-run Run: %v", err)
 	}
 	// Would-be counts reflect the corpus...
-	if stats.Total.RecordsInserted != 3 || stats.Total.EntitiesUpserted != 2 {
+	if stats.Total.RecordsInserted != 4 || stats.Total.EntitiesUpserted != 2 {
 		t.Fatalf("dry-run counts wrong: inserted=%d entities=%d",
 			stats.Total.RecordsInserted, stats.Total.EntitiesUpserted)
 	}

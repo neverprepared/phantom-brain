@@ -78,6 +78,23 @@ type VaultStats struct {
 	AliasesAdded     int
 	LinksCreated     int
 	EntityLinkMisses int // MentionedBy SHA with no record in this vault
+
+	// Errors counts per-item failures that were LOGGED AND SKIPPED rather
+	// than aborting the whole run (a single pathological doc — e.g. one
+	// that still violates a constraint after sanitising — must not strand
+	// the other 3969). SampleErrors holds the first few for the operator.
+	Errors       int
+	SampleErrors []string
+}
+
+// maxSampleErrors caps the per-vault SampleErrors slice.
+const maxSampleErrors = 5
+
+func (v *VaultStats) noteErr(err error) {
+	v.Errors++
+	if len(v.SampleErrors) < maxSampleErrors {
+		v.SampleErrors = append(v.SampleErrors, err.Error())
+	}
 }
 
 // Stats aggregates the per-vault tallies + a Total roll-up.
@@ -95,6 +112,7 @@ func (s *Stats) add(v VaultStats) {
 	s.Total.AliasesAdded += v.AliasesAdded
 	s.Total.LinksCreated += v.LinksCreated
 	s.Total.EntityLinkMisses += v.EntityLinkMisses
+	s.Total.Errors += v.Errors
 }
 
 // Run loads the profile's legacy corpus into the SoR + projection, one
@@ -180,48 +198,60 @@ func backfillRecords(ctx context.Context, opts Options, q *pgdb.Queries, project
 			return nil
 		}
 
-		att, hasAtt := attMeta[d.SHA]
-		rec, inserted, err := upsertRecord(ctx, q, d, att, hasAtt)
-		if err != nil {
-			return err
-		}
-		if inserted {
-			vs.RecordsInserted++
-		} else {
-			vs.RecordsDup++
-		}
-
-		// Reuse the legacy embedding — NO re-embed. A legacy doc already
-		// past the gate/distill pass (Synthesised=true) carries its
-		// distilled body + verdict + (usually) a 768-dim vector.
-		if d.Synthesised {
-			if err := q.MarkRecordSynthesised(ctx, pgdb.MarkRecordSynthesisedParams{
-				Body:             optText(d.Body),
-				Reliability:      optText(string(d.Reliability)),
-				Topic:            optText(d.Topic),
-				GateReason:       optText(d.GateReason),
-				Embedding:        optVector(d.Embedding),
-				EmbeddingModel:   optText(embeddingModel),
-				EmbeddingVersion: pgtype.Text{},
-				ID:               rec.ID,
-			}); err != nil {
-				return fmt.Errorf("backfill: mark synthesised %s: %w", d.SHA, err)
-			}
-			vs.RecordsSynthed++
-		}
-
-		// Project the FRESH row (re-fetch so body/embedding from the
-		// MarkRecordSynthesised UPDATE are included — the row returned by
-		// UpsertRecord predates the mark, and on a dup it's the old row).
-		fresh, err := q.GetRecordByID(ctx, rec.ID)
-		if err != nil {
-			return fmt.Errorf("backfill: refetch record %d (%s): %w", rec.ID, d.SHA, err)
-		}
-		if err := projector.Project(ctx, fresh); err != nil {
-			return fmt.Errorf("backfill: project %s: %w", d.SHA, err)
+		// One pathological doc must not abort the whole run. Per-record
+		// failures are counted + sampled + skipped; only a scroll-level
+		// (OpenSearch transport) error propagates.
+		if err := backfillOneRecord(ctx, q, projector, d, attMeta, vs); err != nil {
+			vs.noteErr(fmt.Errorf("record %s: %w", d.SHA, err))
 		}
 		return nil
 	})
+}
+
+// backfillOneRecord upserts + (when synthesised) marks + projects a single
+// legacy doc. Returns the error for the caller to count/skip.
+func backfillOneRecord(ctx context.Context, q *pgdb.Queries, projector *osproject.Projector, d osearch.SummaryDoc, attMeta map[string]osearch.AttachmentDoc, vs *VaultStats) error {
+	att, hasAtt := attMeta[d.SHA]
+	rec, inserted, err := upsertRecord(ctx, q, d, att, hasAtt)
+	if err != nil {
+		return err
+	}
+	if inserted {
+		vs.RecordsInserted++
+	} else {
+		vs.RecordsDup++
+	}
+
+	// Reuse the legacy embedding — NO re-embed. A legacy doc already
+	// past the gate/distill pass (Synthesised=true) carries its
+	// distilled body + verdict + (usually) a 768-dim vector.
+	if d.Synthesised {
+		if err := q.MarkRecordSynthesised(ctx, pgdb.MarkRecordSynthesisedParams{
+			Body:             optText(d.Body),
+			Reliability:      optText(string(d.Reliability)),
+			Topic:            optText(d.Topic),
+			GateReason:       optText(d.GateReason),
+			Embedding:        optVector(d.Embedding),
+			EmbeddingModel:   optText(embeddingModel),
+			EmbeddingVersion: pgtype.Text{},
+			ID:               rec.ID,
+		}); err != nil {
+			return fmt.Errorf("mark synthesised: %w", err)
+		}
+		vs.RecordsSynthed++
+	}
+
+	// Project the FRESH row (re-fetch so body/embedding from the
+	// MarkRecordSynthesised UPDATE are included — the row returned by
+	// UpsertRecord predates the mark, and on a dup it's the old row).
+	fresh, err := q.GetRecordByID(ctx, rec.ID)
+	if err != nil {
+		return fmt.Errorf("refetch record %d: %w", rec.ID, err)
+	}
+	if err := projector.Project(ctx, fresh); err != nil {
+		return fmt.Errorf("project: %w", err)
+	}
+	return nil
 }
 
 // upsertRecord maps a SummaryDoc to UpsertRecordParams and inserts it. On
@@ -261,7 +291,7 @@ func summaryDocToUpsertParams(d osearch.SummaryDoc, att osearch.AttachmentDoc, h
 		Sha:        d.SHA,
 		Kind:       osearch.SoRKind(d.Kind),
 		MemoryType: optText(string(d.MemoryType)),
-		Title:      d.Title,
+		Title:      pgstore.SanitizeText(d.Title),
 		RawBody:    optText(d.RawBody),
 		SourceUrl:  optText(d.SourceURL),
 		Source:     nonNilStrings(d.Source),
@@ -322,55 +352,66 @@ func backfillEntities(ctx context.Context, opts Options, q *pgdb.Queries, vr Vau
 			return nil
 		}
 
-		ent, err := q.UpsertEntity(ctx, pgdb.UpsertEntityParams{
-			Profile:     opts.Profile,
-			Vault:       vr.Vault,
-			Slug:        slug,
-			Name:        name,
-			Description: optText(e.Body),
-			Embedding:   optVector(e.Embedding),
-		})
-		if err != nil {
-			return fmt.Errorf("backfill: upsert entity %s: %w", slug, err)
-		}
-		vs.EntitiesUpserted++
-
-		for _, alias := range e.Aliases {
-			if alias == "" {
-				continue
-			}
-			if err := q.AddEntityAlias(ctx, pgdb.AddEntityAliasParams{EntityID: ent.ID, Alias: alias}); err != nil {
-				return fmt.Errorf("backfill: add alias %q for %s: %w", alias, slug, err)
-			}
-			vs.AliasesAdded++
-		}
-
-		// Invert the denormalised backlink: each MentionedBy SHA → a
-		// record_entities link, when the record exists in this vault.
-		for _, sha := range e.MentionedBy {
-			if sha == "" {
-				continue
-			}
-			rec, err := q.GetRecordBySHA(ctx, pgdb.GetRecordBySHAParams{Profile: opts.Profile, Vault: vr.Vault, Sha: sha})
-			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					vs.EntityLinkMisses++
-					continue
-				}
-				return fmt.Errorf("backfill: lookup mentioned-by %s: %w", sha, err)
-			}
-			if err := q.LinkRecordEntity(ctx, pgdb.LinkRecordEntityParams{RecordID: rec.ID, EntityID: ent.ID}); err != nil {
-				return fmt.Errorf("backfill: link record %d ↔ entity %d: %w", rec.ID, ent.ID, err)
-			}
-			vs.LinksCreated++
+		// Per-entity failures count + skip rather than aborting the run.
+		if err := backfillOneEntity(ctx, q, opts, vr, slug, name, e, vs); err != nil {
+			vs.noteErr(fmt.Errorf("entity %s: %w", slug, err))
 		}
 		return nil
 	})
 }
 
+// backfillOneEntity upserts one entity, its aliases, and the inverted
+// MentionedBy[] links. Returns the error for the caller to count/skip.
+func backfillOneEntity(ctx context.Context, q *pgdb.Queries, opts Options, vr VaultRef, slug, name string, e osearch.EntityDoc, vs *VaultStats) error {
+	ent, err := q.UpsertEntity(ctx, pgdb.UpsertEntityParams{
+		Profile:     opts.Profile,
+		Vault:       vr.Vault,
+		Slug:        pgstore.SanitizeText(slug),
+		Name:        pgstore.SanitizeText(name),
+		Description: optText(e.Body),
+		Embedding:   optVector(e.Embedding),
+	})
+	if err != nil {
+		return fmt.Errorf("upsert entity: %w", err)
+	}
+	vs.EntitiesUpserted++
+
+	for _, alias := range e.Aliases {
+		if alias == "" {
+			continue
+		}
+		if err := q.AddEntityAlias(ctx, pgdb.AddEntityAliasParams{EntityID: ent.ID, Alias: pgstore.SanitizeText(alias)}); err != nil {
+			return fmt.Errorf("add alias %q: %w", alias, err)
+		}
+		vs.AliasesAdded++
+	}
+
+	// Invert the denormalised backlink: each MentionedBy SHA → a
+	// record_entities link, when the record exists in this vault.
+	for _, sha := range e.MentionedBy {
+		if sha == "" {
+			continue
+		}
+		rec, err := q.GetRecordBySHA(ctx, pgdb.GetRecordBySHAParams{Profile: opts.Profile, Vault: vr.Vault, Sha: sha})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				vs.EntityLinkMisses++
+				continue
+			}
+			return fmt.Errorf("lookup mentioned-by %s: %w", sha, err)
+		}
+		if err := q.LinkRecordEntity(ctx, pgdb.LinkRecordEntityParams{RecordID: rec.ID, EntityID: ent.ID}); err != nil {
+			return fmt.Errorf("link record %d: %w", rec.ID, err)
+		}
+		vs.LinksCreated++
+	}
+	return nil
+}
+
 // --- small mapping helpers (kept in step with internal/server/dual_write.go) ---
 
 func optText(s string) pgtype.Text {
+	s = pgstore.SanitizeText(s)
 	if s == "" {
 		return pgtype.Text{}
 	}
@@ -393,8 +434,5 @@ func optVector(emb []float32) *pgvector.Vector {
 }
 
 func nonNilStrings(in []string) []string {
-	if in == nil {
-		return []string{}
-	}
-	return in
+	return pgstore.SanitizeTexts(in)
 }

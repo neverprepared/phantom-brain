@@ -161,12 +161,12 @@ func printBackfillToPGStats(cmd *cobra.Command, profile string, dryRun bool, s b
 		mode = "DRY-RUN (no writes)"
 	}
 	fmt.Fprintf(out, "backfill-to-pg %s — %s\n", profile, mode)
-	fmt.Fprintf(out, "%-20s %8s %8s %8s %9s %8s %6s %7s\n",
-		"vault", "ins", "dup", "synth", "entities", "aliases", "links", "misses")
+	fmt.Fprintf(out, "%-20s %8s %8s %8s %9s %8s %6s %7s %7s\n",
+		"vault", "ins", "dup", "synth", "entities", "aliases", "links", "misses", "errors")
 	row := func(v backfill.VaultStats) {
-		fmt.Fprintf(out, "%-20s %8d %8d %8d %9d %8d %6d %7d\n",
+		fmt.Fprintf(out, "%-20s %8d %8d %8d %9d %8d %6d %7d %7d\n",
 			v.Vault, v.RecordsInserted, v.RecordsDup, v.RecordsSynthed,
-			v.EntitiesUpserted, v.AliasesAdded, v.LinksCreated, v.EntityLinkMisses)
+			v.EntitiesUpserted, v.AliasesAdded, v.LinksCreated, v.EntityLinkMisses, v.Errors)
 	}
 	for _, v := range s.PerVault {
 		row(v)
@@ -174,4 +174,16 @@ func printBackfillToPGStats(cmd *cobra.Command, profile string, dryRun bool, s b
 	total := s.Total
 	total.Vault = "TOTAL"
 	row(total)
+
+	// Surface sample errors (per-item failures that were skipped, not
+	// aborted) so the operator can see WHAT was dropped, not just a count.
+	for _, v := range s.PerVault {
+		if len(v.SampleErrors) == 0 {
+			continue
+		}
+		fmt.Fprintf(out, "\n%s: %d error(s) skipped; first %d:\n", v.Vault, v.Errors, len(v.SampleErrors))
+		for _, e := range v.SampleErrors {
+			fmt.Fprintf(out, "  - %s\n", e)
+		}
+	}
 }
