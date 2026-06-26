@@ -21,6 +21,7 @@ require (
 	github.com/riverqueue/river/rivertype v0.39.0
 	github.com/spf13/cobra v1.10.2
 	github.com/testcontainers/testcontainers-go v0.43.0
+	github.com/testcontainers/testcontainers-go/modules/opensearch v0.43.0
 	golang.org/x/sys v0.45.0
 	golang.org/x/text v0.38.0
 	gopkg.in/yaml.v3 v3.0.1
