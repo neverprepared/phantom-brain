@@ -184,6 +184,12 @@ services:
         condition: service_completed_successfully
       opensearch:
         condition: service_healthy
+      # Postgres SoR (epic #92). Daemon resolution is non-fatal when
+      # PG is absent, so this ordering is a convenience (the daemon
+      # won't briefly log PG-unreachable on a cold start), not a
+      # hard requirement. The daemon reaches it at postgres:5432.
+      postgres:
+        condition: service_healthy
     environment:
       PHANTOM_BRAIN_DATA_DIR:   /data
       PHANTOM_BRAIN_CONFIG_DIR: /config
