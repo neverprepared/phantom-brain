@@ -33,6 +33,30 @@ insecure_skip_verify = false
 index_prefix         = ""
 request_timeout_secs = 10
 
+# Postgres — System of Record for the OpenSearch-native redesign
+# (epic #92, docs/design/daemon-cutover-plan.md). OPTIONAL + DORMANT:
+# leave the whole block out and the daemon behaves exactly as before
+# (Phase A resolution is non-fatal when unconfigured). Uncomment to
+# make per-binding Postgres handles resolvable; nothing reads them
+# until you set `dual_write = true` on a binding's config.toml.
+#
+# `dsn` is the BASE / maintenance DSN. Per-profile databases
+# (pb_<profile>) are derived from it automatically. The HOST differs
+# by who connects:
+#   - the DAEMON (this file, inside the compose network) uses the
+#     compose service name + the INTERNAL port:  postgres:5432
+#   - `pbrainctl` run from the HOST (db provision / backfill-to-pg)
+#     uses the published host port:              localhost:5433
+# So this DSN uses postgres:5432; your host-shell --dsn uses :5433.
+#
+# Provision each profile's DB before the daemon relies on it:
+#   pbrainctl server db provision <profile> \
+#       --dsn postgres://pbrain:<pw>@localhost:5433/phantom_brain
+# then reload:  pbrainctl server vault reload
+#
+# [postgres]
+# dsn = "postgres://pbrain:replace_me_with_a_strong_password@postgres:5432/phantom_brain"
+
 # Phase 6: raw-source capture for brain_perceive. When enabled, the
 # daemon's SynthWorker fetches each perceived URL on synth and
 # stores the response bytes in MinIO at
