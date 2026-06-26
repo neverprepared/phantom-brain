@@ -20,9 +20,15 @@ LDFLAGS  := -X github.com/neverprepared/phantom-brain/internal/version.Version=$
             -X github.com/neverprepared/phantom-brain/internal/version.Commit=$(COMMIT) \
             -X github.com/neverprepared/phantom-brain/internal/version.BuildDate=$(DATE)
 
-.PHONY: build test test-race vet tidy clean fmt all
+.PHONY: build test test-race vet tidy clean fmt all sqlc
 
 all: vet test build
+
+# Regenerate the type-safe Postgres data-access layer from the migrations +
+# query files into internal/pgstore/pgdb. The generated code is checked in;
+# this is only needed after editing migrations or queries. NOT part of `all`.
+sqlc:
+	sqlc generate
 
 build:
 	go build -tags=$(TAGS) -ldflags="$(LDFLAGS)" -o pbrainctl ./cmd/pbrainctl
