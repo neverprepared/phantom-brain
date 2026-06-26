@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -57,6 +58,16 @@ type Daemon struct {
 	attach     AttachmentStore
 	debouncer  *SnapshotDebouncer
 	bindings   *bindingDepCache
+
+	// Phase A (dormant): per-profile Postgres System-of-Record. pgBaseDSN
+	// is the resolved base/maintenance DSN ("" = Postgres disabled).
+	// pgProfiles caches the per-PROFILE resources (one *pgxpool.Pool +
+	// one River client per pb_<profile> DB, SHARED across that profile's
+	// vaults); built by buildPGBindingDeps at Start + on reload, and
+	// guarded by pgMu. NOTHING consumes resolvePG yet — purely additive.
+	pgBaseDSN  string
+	pgMu       sync.Mutex
+	pgProfiles map[string]*pgProfileResources
 
 	// allowSharedFallback is the explicit opt-in that lets resolveOS /
 	// resolveAttach return the shared d.osClient / d.attach when no
@@ -209,6 +220,19 @@ func Start(opts StartOpts) (*Daemon, error) {
 			slog.Int("addresses", len(cfg.OpenSearch.Addresses)),
 			slog.String("index_prefix", cfg.OpenSearch.IndexPrefix),
 		)
+	}
+
+	// Phase A (dormant): resolve the base Postgres DSN. PB_POSTGRES_DSN
+	// overrides the [postgres] dsn in server.toml. Empty ⇒ disabled; the
+	// legacy path is fully untouched and buildPGBindingDeps short-circuits.
+	d.pgProfiles = map[string]*pgProfileResources{}
+	if v := strings.TrimSpace(os.Getenv("PB_POSTGRES_DSN")); v != "" {
+		d.pgBaseDSN = v
+	} else {
+		d.pgBaseDSN = strings.TrimSpace(cfg.Postgres.DSN)
+	}
+	if d.pgBaseDSN != "" {
+		opts.Logger.Info("phantom-brain: postgres base DSN configured (Phase A — dormant, per-profile SoR)")
 	}
 
 	// Load the registry BEFORE eager-ensure so we know which prefixes
@@ -566,6 +590,9 @@ func (d *Daemon) Shutdown(ctx context.Context) error {
 
 	d.parentCancel()
 	d.runners.StopAll()
+	// Phase A: stop every per-profile River client + close its pool. Logs
+	// warns on error; never blocks shutdown.
+	d.closePGProfiles()
 	if d.flock != nil {
 		if err := d.flock.Unlock(); err != nil {
 			d.Logger.Warn("phantom-brain: release global flock", slog.String("err", err.Error()))
@@ -613,6 +640,11 @@ func (d *Daemon) buildBindingDeps() {
 		}
 		d.bindings.Set(b.Key, deps)
 	}
+	// Phase A: build per-profile Postgres resources + per-binding PG
+	// views AFTER the OS/MinIO views are cached (the PG view borrows the
+	// just-set bindingDeps pointers). Non-fatal: a PG failure leaves PG
+	// nil and never disturbs the legacy views above.
+	d.buildPGBindingDeps()
 }
 
 // depsForBinding returns the per-binding view bundle. Handlers call

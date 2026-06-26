@@ -65,7 +65,22 @@ type ServerConfig struct {
 	// or disappear). See internal/server/capture.go.
 	Capture CaptureConfig `toml:"capture"`
 
+	// Postgres wires the (dormant, Phase A) per-profile System-of-Record.
+	// Empty DSN ⇒ Postgres disabled and the legacy path is fully
+	// untouched. See PostgresConfig + internal/server/pg_binding_views.go.
+	Postgres PostgresConfig `toml:"postgres"`
+
 	Defaults VaultDefaults `toml:"defaults"`
+}
+
+// PostgresConfig mirrors the [postgres] block in server.toml. DSN is the
+// BASE / maintenance DSN (e.g. postgres://user:pass@host:5432/phantom_brain);
+// per-profile databases (pb_<profile>) are derived from it via
+// pgstore.DSNForProfile. The env var PB_POSTGRES_DSN overrides this field.
+// Empty (after env resolution) ⇒ Postgres disabled (dormant; Phase A is
+// additive and must never break the legacy daemon).
+type PostgresConfig struct {
+	DSN string `toml:"dsn"`
 }
 
 // CaptureConfig mirrors the [capture] block in server.toml. All

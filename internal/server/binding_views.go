@@ -123,6 +123,13 @@ type bindingDeps struct {
 	OS       osWriter        // nil when OS is not configured
 	Exporter osExporter      // same underlying handle in production
 	Attach   AttachmentStore // nil when MinIO backend isn't wired
+
+	// PG is the Phase A per-binding Postgres view (System-of-Record +
+	// projection Recaller/Projector). nil when Postgres is not configured
+	// or its per-profile resources failed to build (non-fatal — legacy
+	// path is unaffected). Resolved via Daemon.resolvePG; NO handler
+	// consumes it yet (dormant, additive).
+	PG *pgBindingView
 }
 
 // bindingDepCache is a tiny rwmutex-guarded map keyed by VaultKey.
