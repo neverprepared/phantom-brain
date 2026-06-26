@@ -14,13 +14,18 @@ raw `psql` (in order). Each file is idempotent-safe where practical
 (`IF NOT EXISTS`), but they're meant to run once, in sequence.
 
 ```sh
-# golang-migrate
-migrate -path migrations -database "$DATABASE_URL" up
+# Recommended: provision a profile DB (create db + extensions + migrate) in
+# one step. --dsn points at the MAINTENANCE db; per-profile db is derived.
+pbrainctl server db provision <profile> --dsn postgres://pbrain:***@localhost:5433/phantom_brain
+pbrainctl server db migrate   <profile>     # migrate-only (db already exists)
 
-# or raw psql (the pgvector image already has the extensions from
-# docker/postgres-init/01-extensions.sql)
-for f in migrations/*.up.sql; do psql "$DATABASE_URL" -f "$f"; done
+# Or directly with golang-migrate against a specific profile DB:
+migrate -path migrations -database "pgx5://…/pb_<profile>" up
 ```
+
+The embedded copy of these files (`migrations/embed.go`) is what
+`pbrainctl server db ...` applies, so the binary always migrates the schema
+it shipped with.
 
 Requires the `vector` and `pg_trgm` extensions (the compose pgvector
 image enables them on init).
