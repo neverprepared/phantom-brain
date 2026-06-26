@@ -12,12 +12,22 @@
 package mcp
 
 import (
+	"context"
+
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/neverprepared/phantom-brain/internal/brain"
 	"github.com/neverprepared/phantom-brain/internal/index"
 	"github.com/neverprepared/phantom-brain/internal/working"
 )
+
+// recallClient is the minimal seam handleRecall needs from the daemon
+// HTTP client for online recall. *brain.Client satisfies it; tests
+// inject a fake so the online→fallback branch is exercisable without a
+// live daemon. Kept deliberately tiny — one method.
+type recallClient interface {
+	Recall(ctx context.Context, req brain.RecallRequest) (*brain.RecallResponse, error)
+}
 
 // ServerDeps is the dependency container the MCP tool handlers close
 // over.
@@ -55,6 +65,20 @@ type ServerDeps struct {
 	// daemon instead of writing locally. Wired in cmd/pbrainctl
 	// from Lifecycle.Client() at startup; tests may inject directly.
 	Client *brain.Client
+
+	// RecallClient is the seam brain_recall uses for online recall
+	// (Phase C). In production it is the same *brain.Client as Client;
+	// tests inject a fake. Kept separate from Client so the online
+	// recall path is mockable without faking the whole write client.
+	RecallClient recallClient
+
+	// OnlineRecall gates the Phase C always-online recall path. When
+	// true (and RecallClient is non-nil), brain_recall queries the
+	// daemon's live pb_records index instead of the birth-time local
+	// snapshot, falling back to the snapshot on ANY daemon failure.
+	// Wired from CL_BRAIN_ONLINE_RECALL; default false (no behavior
+	// change until an operator opts a binding in).
+	OnlineRecall bool
 }
 
 // Server is the MCP tool registry. Construct once per process, hand

@@ -441,6 +441,10 @@ func (d *Daemon) buildRouter() chi.Router {
 			// not configured; otherwise upsert + enqueue synth.
 			r.Post("/perceive", d.handlePerceive)
 			r.Post("/learn", d.handleLearn)
+			// Phase C: always-online recall over the pb_records
+			// Postgres projection. 503 when PG isn't enabled for the
+			// binding — the agent falls back to its local snapshot.
+			r.Post("/recall", d.handleRecall)
 			r.Post("/attach", d.handleAttach)
 			r.Post("/trace", d.handleTrace)
 			r.Get("/attach/{sha}", d.handleAttachGet)

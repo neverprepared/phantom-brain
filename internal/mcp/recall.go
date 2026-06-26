@@ -2,12 +2,16 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/neverprepared/phantom-brain/internal/brain"
 	"github.com/neverprepared/phantom-brain/internal/index"
 )
 
@@ -59,19 +63,46 @@ func (s *Server) handleRecall(ctx context.Context, req mcp.CallToolRequest) (*mc
 		limit = 50
 	}
 
-	// Embed the query. The embedder's Dims must match the index's.
-	if s.deps.Embedder.Dims() != s.deps.Index.Dims() {
-		return mcp.NewToolResultError(fmt.Sprintf(
-			"embedder/index dim mismatch: embedder=%d index=%d",
-			s.deps.Embedder.Dims(), s.deps.Index.Dims(),
-		)), nil
-	}
+	// Embed the query. Needed by both paths: the snapshot kNN and the
+	// online vector half of the daemon's hybrid query.
 	embs, err := s.deps.Embedder.Embed(ctx, []string{query})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("embed query: %v", err)), nil
 	}
 	if len(embs) != 1 {
 		return mcp.NewToolResultError(fmt.Sprintf("embedder returned %d vectors, want 1", len(embs))), nil
+	}
+
+	// Phase C: always-online recall. When enabled, query the daemon's
+	// live pb_records index — fresh, no snapshot lag. ANY failure
+	// (daemon unreachable, 503 PG-not-enabled, decode error) degrades
+	// gracefully to the local-snapshot path below; recall NEVER fails
+	// solely because the daemon recall failed.
+	var onlineFallbackNote string
+	if s.deps.OnlineRecall && s.deps.RecallClient != nil {
+		resp, oErr := s.deps.RecallClient.Recall(ctx, brain.RecallRequest{
+			Query:     query,
+			Embedding: embs[0],
+			Limit:     limit,
+		})
+		if oErr == nil {
+			return mcp.NewToolResultText(renderOnlineRecallHits(query, resp.Hits)), nil
+		}
+		onlineFallbackNote = fmt.Sprintf(
+			"\n_(online recall unavailable: %s; served from local snapshot, may be stale)_\n",
+			onlineRecallReason(oErr),
+		)
+		slog.Debug("brain_recall: online recall failed, falling back to snapshot",
+			"err", oErr)
+	}
+
+	// Local-snapshot path (default; also the online fallback). The
+	// embedder's Dims must match the index's for the kNN half.
+	if s.deps.Embedder.Dims() != s.deps.Index.Dims() {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"embedder/index dim mismatch: embedder=%d index=%d",
+			s.deps.Embedder.Dims(), s.deps.Index.Dims(),
+		)), nil
 	}
 
 	// Phrase-quote so FTS5 treats user input literally. Without this,
@@ -95,7 +126,93 @@ func (s *Server) handleRecall(ctx context.Context, req mcp.CallToolRequest) (*mc
 			snapGen = *pg
 		}
 	}
-	return mcp.NewToolResultText(renderRecallHits(query, hits, snapGen, snapAge)), nil
+	return mcp.NewToolResultText(renderRecallHits(query, hits, snapGen, snapAge) + onlineFallbackNote), nil
+}
+
+// onlineRecallReason renders a short, human reason for an online-recall
+// failure to embed in the fallback note. Daemon-unreachable and the
+// 503 "not enabled" envelope are the common cases; everything else
+// falls through to the raw error string.
+func onlineRecallReason(err error) string {
+	if errors.Is(err, brain.ErrDaemonUnreachable) {
+		return "daemon unreachable"
+	}
+	var apiErr *brain.APIError
+	if errors.As(err, &apiErr) {
+		if apiErr.StatusCode == http.StatusServiceUnavailable {
+			return "not enabled for this binding"
+		}
+		return fmt.Sprintf("daemon error %d", apiErr.StatusCode)
+	}
+	return err.Error()
+}
+
+// renderOnlineRecallHits formats live daemon recall results, mirroring
+// renderRecallHits' style (title + kind indicator + snippet + score).
+// Attachment hits surface a fetch hint built from mime_type /
+// original_filename. The footer announces the results are live (always
+// fresh), distinct from the snapshot-staleness footer of the local path.
+func renderOnlineRecallHits(query string, hits []brain.RecallHitDTO) string {
+	const liveFooter = "\n_— live results from daemon (always fresh)_\n"
+	if len(hits) == 0 {
+		return fmt.Sprintf("No results for %q.%s", query, liveFooter)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d result(s) for %q:\n\n", len(hits), query)
+	for i, h := range hits {
+		heading := h.Title
+		if heading == "" {
+			heading = h.SHA
+		}
+		fmt.Fprintf(&b, "## %d. %s %s\n", i+1, heading, onlineKindIndicator(h))
+		fmt.Fprintf(&b, "- SHA: `%s`\n", h.SHA)
+		fmt.Fprintf(&b, "- Score: %.4f\n", h.Score)
+		if h.Kind == "attachment_stub" {
+			fmt.Fprintf(&b, "- Fetch via `GET /api/brain/attach/%s`", h.SHA)
+			if h.OriginalFilename != "" {
+				fmt.Fprintf(&b, " (%s)", h.OriginalFilename)
+			}
+			b.WriteString("\n")
+		}
+		if h.Snippet != "" {
+			fmt.Fprintf(&b, "- Snippet: %s\n", h.Snippet)
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString(liveFooter)
+	return b.String()
+}
+
+// onlineKindIndicator renders the short bracketed label for an online
+// hit. Mirrors kindIndicator, but the MIME for attachments comes from
+// the structured mime_type field (the projection carries it directly)
+// rather than the "mime:" tag the snapshot path parses out of tags.
+func onlineKindIndicator(h brain.RecallHitDTO) string {
+	switch h.Kind {
+	case "note":
+		return "[note]"
+	case "web_scrape":
+		return "[web]"
+	case "task_summary":
+		return "[task]"
+	case "email_import":
+		return "[email]"
+	case "manual_curate":
+		return "[curated]"
+	case "attachment_stub":
+		mime := h.MimeType
+		if mime == "" {
+			return "[attachment]"
+		}
+		if slash := strings.LastIndex(mime, "/"); slash >= 0 && slash < len(mime)-1 {
+			return "[attachment " + mime[slash+1:] + "]"
+		}
+		return "[attachment " + mime + "]"
+	case "":
+		return "[unknown]"
+	default:
+		return "[" + h.Kind + "]"
+	}
 }
 
 // renderRecallHits formats search results for the agent. The output is
