@@ -47,11 +47,22 @@ image enables them on init).
 | 0001 | `records` (+ `set_updated_at()` trigger helper) |
 | 0002 | `entities`, `entity_aliases`, `record_entities` |
 | 0003 | `facts`, `fact_history` |
+| 0004 | `embedding_model` + `embedding_version` on records/entities (versioned vectors) |
+
+## Tenant isolation
+
+Per the design (§13.4): the SoR is isolated **per profile** to match the existing
+dedicated-MinIO-bucket + OpenSearch-token boundary. The recommended deployment runs
+**a Postgres database per profile** (`pb_personal`, `pb_gsa`, …), so these
+migrations are applied **once per profile DB**. `(profile, vault)` columns remain
+on every table (vault is a sub-scope within a profile's DB, and the columns keep
+the schema portable if you ever consolidate). Run migrations against each profile's
+`DATABASE_URL`.
 
 ## Open decisions (intentionally deferred)
 
-- Multi-tenant strategy beyond `(profile, vault)` columns (e.g. row-level
-  security) — columns + indexes for now.
+- Row-level security as an *additional* guard within a profile DB (defense in
+  depth) — columns + per-DB isolation for now.
 - `references[]` between records — modeled as a join later if needed.
 - Embedding dim is fixed at **768** (`nomic-embed-text`); a model change
   means a re-embed + an `ALTER`.

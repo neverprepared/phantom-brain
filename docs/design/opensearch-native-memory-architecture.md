@@ -126,7 +126,9 @@ immutable history.
 - **Records** (append-only, content-addressed): the durable knowledge units —
   raw + synthesized fields, embedding, provenance (`source`/`source_url`),
   `memory_type`/`kind`, blob pointer (`minio_key`) for attachments. Most of the
-  corpus lives here and simply accretes + dedups.
+  corpus lives here and simply accretes + dedups. Each embedding carries
+  `embedding_model` + `embedding_version` (§13) so a model change is an
+  incremental re-embed, not a big-bang reindex.
 - **State / facts**: `(entity, attribute, value)` with a version history table.
   `UNIQUE(entity_id, attribute)` → a new value **UPSERTs** and supersedes the old
   (kept as history). Relational integrity makes "the current value of X" a row you
@@ -141,7 +143,8 @@ immutable history.
   `extracted_text` + embedding), not today's stub-in-summaries + doc-in-
   attachments pair.
 - **OpenSearch projection**: index the searchable fields (title, body,
-  extracted_text, tags) + `knn_vector`. Pure derivation from Postgres.
+  extracted_text, tags) + `knn_vector`. Pure derivation from Postgres, kept in
+  sync via the **transactional outbox** (§13) — never a dual-write.
 
 **OpenSearch is a search engine, not a graph DB.** Shallow one-hop entity facets
 ("what mentions X", co-occurrence) → OpenSearch aggregations or a Postgres join.
@@ -185,8 +188,9 @@ have "no Ollama" *or* "no model behind OS," not both.
 client-side embedding — accepting that recall is online. Keep **(A)/local sqlite**
 as an *optional* offline fallback to design later if offline turns out to matter.
 
-**Ollama operations:** put instances **behind nginx** (the neural path centralizes
-embedding load onto a shared Ollama). Only helps across **separate hardware**
+**Ollama operations:** put instances **behind HAProxy** (over nginx — free active
+health checks). The neural path centralizes embedding load onto a shared Ollama.
+Only helps across **separate hardware**
 (same-GPU instances just contend). Co-locate OS + Ollama (LAN), keep models warm
 (`OLLAMA_KEEP_ALIVE`), use keepalive, point the connector at the nginx VIP. Note:
 load-balancing Ollama does **not** speed up synthesis — that bottleneck is the
@@ -201,8 +205,10 @@ load-balancing Ollama does **not** speed up synthesis — that bottleneck is the
 | **Reconciliation** (entity resolution, supersede, near-dup → mutable-state projection) | **async, batch / scheduled, idempotent** | `brain_reflect` generalized. Continuous worker, scheduled sweep, or on-demand. Isolated from the interactive path. |
 
 **Durable queue replaces the in-memory channel.** It absorbs bursts, never drops,
-applies backpressure — the real fix for the dropped-jobs failure. (Use any
-standard durable queue; the queue *is* the wheel we were reinventing.)
+applies backpressure — the real fix for the dropped-jobs failure. Recommended:
+**River** (a Postgres-backed Go job queue) — it reuses the Postgres we're already
+standing up, so no Redis/NATS, and queue state lives in the same transaction as
+the write (pairs naturally with the outbox in §13).
 
 The write path just **appends the immutable record and enqueues** — it never
 blocks on synthesis or reconciliation. Everything downstream is eventually-
@@ -312,6 +318,97 @@ read-time merge for that one query rather than making the pipeline synchronous.
 - **Phase 5 — search modernization:** OpenSearch native hybrid; the embedding
   decision (neural connector vs hybrid); Ollama behind nginx.
 - **Later / optional:** offline fallback; graph layer.
+
+## 13. Design hardening (review additions)
+
+Items an adversarial review surfaced. Ordered by importance; all are standard
+patterns/tools (consistent with the "compose primitives" philosophy).
+
+### 13.1 Index consistency — the transactional outbox (load-bearing)
+
+"Project to OpenSearch" must NOT be a dual-write (write PG, then write OS): if PG
+commits and the OS write fails or the process dies between them, the index
+silently disagrees with the SoR — the same class of silent inconsistency that
+defined the migration session.
+
+**Pattern:** in ONE Postgres transaction, write the record **and** an `outbox`
+row. A relay worker reads the outbox, projects to OpenSearch (idempotent upsert by
+SHA), and marks the row done. Guarantees every committed record eventually reaches
+the index, exactly-once-effective, no race. **River** drives the relay (same DB).
+This is the backbone of "OS is a derived projection" and deserves first-class
+treatment, not a verb.
+
+### 13.2 Observability from day one (fixes the session's root pain)
+
+The dropped-jobs / staleness pain was, at root, **invisibility** — you couldn't
+see the 1,078 backlog without building a tool to look. Don't repeat it:
+- **Prometheus** metrics: synth queue depth, **outbox lag**, reconciliation lag,
+  recall latency (p50/p95), embedding latency, per-profile doc counts.
+- **OpenTelemetry** traces across gateway → PG → OS → Ollama.
+- The backlog should be a **dashboard number + alert**, not a tool you remember to
+  run. The next "silently stranded" must fire an alert, not surface weeks later.
+
+### 13.3 Embedding model versioning (one column, saves a big-bang)
+
+`embedding vector(768)` hardcodes `nomic-embed-text`. Add `embedding_model` +
+`embedding_version` per record/entity (migration 0004). A model swap becomes an
+incremental, detectable re-embed instead of an all-or-nothing reindex. Cheap now,
+brutal to retrofit.
+
+### 13.4 Tenant isolation per profile (sensitive data — financial, GSA/gov)
+
+Data is isolated **per profile** today: each profile has a dedicated MinIO bucket
+and OpenSearch token (v3.2 also gives per-binding index prefixes). **The SoR should
+match that boundary** — don't weaken isolation by pooling all profiles into shared
+Postgres tables.
+
+**Recommended: a Postgres database per profile** (`pb_personal`, `pb_gsa`,
+`pb_lakeview`, …), resolved by the **same per-binding storage resolution** that
+already maps a binding → (OS index prefix, MinIO bucket). Extend it to
+(OS prefix, MinIO bucket, **Postgres DSN/database**); the gateway routes each
+profile to its own DB/pool. This gives **physical isolation** — a missing
+`WHERE profile=…` literally cannot cross profiles because it's a different database
+— consistent with your bucket/token model, plus clean per-profile backup/DR.
+
+- `vault` stays a **column** within a profile's DB (vaults inside one profile are a
+  softer boundary than across profiles).
+- Cost: N migration runs (tooling handles), per-profile backups, a pool per DB
+  (PgBouncer). Trivial at a handful of profiles.
+- Lighter alternative — one DB + **row-level security** + `profile` column — is
+  viable but a softer boundary (a bad policy / superuser bypasses it) and less
+  consistent with the physical isolation you already run. Prefer DB-per-profile.
+
+**A2A changes the threat model.** Exposing memory as an agent other agents can call
+means the Agent Card + task surface needs real authN/authZ, scoped per profile —
+the same rigor as MCP's per-binding token, or it's an open door to the corpus.
+
+### 13.5 Backup & disaster recovery
+
+Splitting SoR from index makes **Postgres + MinIO the irreplaceable pair** (OS is
+rebuildable). Therefore: Postgres WAL archiving / PITR (not just `pg_dump`), MinIO
+backup/replication, and — the upside — treat **"rebuild OS from Postgres" as a
+*tested* DR drill**. The migration session already proved rebuild-from-source
+works; formalize it into a documented, exercised "nuke OS, re-project from PG in
+minutes" runbook. It's both the fastest recovery and the migration mechanism.
+
+### 13.6 Testing — testcontainers-go
+
+Formalize the real-stack validation (spin up Postgres + OpenSearch + MinIO in
+integration tests via **testcontainers-go**) so the subtle parts — outbox
+projection, reconciliation, tenant isolation — are tested against the real engines,
+not mocks. Exactly the schema validation already done, made permanent.
+
+### 13.7 Smaller items
+
+- **Chunking** for retrieval — records are embedded whole; long PDFs/docs retrieve
+  better chunked (sibling to the reranking point in §6).
+- **Degraded-mode behavior** — specify per-component failure: OS down (writes still
+  append to PG, project later), Ollama down, PG down. The online design needs
+  *explicit* failure semantics where the old design had offline resilience.
+- **Deletion / right-to-be-forgotten** — immutable content-addressed records make
+  "delete everything about X" genuinely hard. Fine for a personal brain; a real
+  question for the GSA tenant. Define a hard-delete path that spans records + facts
+  + blobs + index.
 
 ## Appendix — one-paragraph summary
 
