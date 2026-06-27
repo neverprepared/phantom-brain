@@ -1,5 +1,28 @@
 # Changelog
 
+## [3.8.0](https://github.com/neverprepared/phantom-brain/compare/v3.7.0...v3.8.0) (2026-06-27)
+
+
+### Features
+
+* hybrid recall query over pb_records ([#92](https://github.com/neverprepared/phantom-brain/issues/92)) ([#101](https://github.com/neverprepared/phantom-brain/issues/101)) ([71f0037](https://github.com/neverprepared/phantom-brain/commit/71f0037c941a8b32ee12a194c4a98ad7f7ef619e))
+* OpenSearch projection index (pb_records) + OSProjector ([#92](https://github.com/neverprepared/phantom-brain/issues/92)) ([#100](https://github.com/neverprepared/phantom-brain/issues/100)) ([318fd85](https://github.com/neverprepared/phantom-brain/commit/318fd853f0f04347b20f024dc4468e7d41517195))
+* Phase A — per-binding Postgres resolution (dormant) ([#92](https://github.com/neverprepared/phantom-brain/issues/92)) ([#103](https://github.com/neverprepared/phantom-brain/issues/103)) ([3e6d571](https://github.com/neverprepared/phantom-brain/commit/3e6d57100d935c9523db88cffef0dbe4df698aaf))
+* Phase B1 — dual-write to the Postgres SoR (flag-gated, default off) ([#92](https://github.com/neverprepared/phantom-brain/issues/92)) ([#104](https://github.com/neverprepared/phantom-brain/issues/104)) ([6c94d80](https://github.com/neverprepared/phantom-brain/commit/6c94d8054cacf2a06cf3b5b0f1ec368cb623356e))
+* Phase B2 — backfill-to-pg command + fix latent attachment-kind bug ([#92](https://github.com/neverprepared/phantom-brain/issues/92)) ([#106](https://github.com/neverprepared/phantom-brain/issues/106)) ([1242160](https://github.com/neverprepared/phantom-brain/commit/12421603b86dfc6256885e6ee3b74c0d6c067e97))
+* Phase C — online recall via daemon (flag-gated, snapshot fallback) ([#92](https://github.com/neverprepared/phantom-brain/issues/92)) ([#108](https://github.com/neverprepared/phantom-brain/issues/108)) ([5eaf974](https://github.com/neverprepared/phantom-brain/commit/5eaf974aeac0665f01037e2d6613ad7dd22e4897))
+* Phase D1 — Postgres SoR as the sole authoritative store ([#92](https://github.com/neverprepared/phantom-brain/issues/92)) ([#109](https://github.com/neverprepared/phantom-brain/issues/109)) ([68f3cd3](https://github.com/neverprepared/phantom-brain/commit/68f3cd35905a8c99e0dc67fa02f24d8c54706f68))
+* Phase D2a — migrate read paths to the Postgres SoR ([#92](https://github.com/neverprepared/phantom-brain/issues/92), [#110](https://github.com/neverprepared/phantom-brain/issues/110)) ([#111](https://github.com/neverprepared/phantom-brain/issues/111)) ([c0a7598](https://github.com/neverprepared/phantom-brain/commit/c0a75981d331eb149cca8b515e1ee254242085ce))
+* Postgres data-access layer via sqlc ([#92](https://github.com/neverprepared/phantom-brain/issues/92)) ([#98](https://github.com/neverprepared/phantom-brain/issues/98)) ([0f827ca](https://github.com/neverprepared/phantom-brain/commit/0f827ca9e770e7d1ae8905aa0ca35bff09ffae1b))
+* Postgres per-profile DB provisioning + migration tooling ([#92](https://github.com/neverprepared/phantom-brain/issues/92)) ([#97](https://github.com/neverprepared/phantom-brain/issues/97)) ([f81e77e](https://github.com/neverprepared/phantom-brain/commit/f81e77e62ad392b8e86b338fe00b3a291e0c45e1))
+* Postgres SoR schema — records / entities / facts ([#92](https://github.com/neverprepared/phantom-brain/issues/92)) ([#94](https://github.com/neverprepared/phantom-brain/issues/94)) ([eb8abdf](https://github.com/neverprepared/phantom-brain/commit/eb8abdfd4840d60b19b8cac8daddc49e53605700))
+* transactional outbox + River projection worker ([#92](https://github.com/neverprepared/phantom-brain/issues/92)) ([#99](https://github.com/neverprepared/phantom-brain/issues/99)) ([8c13901](https://github.com/neverprepared/phantom-brain/commit/8c1390183c161eb6a0d33bf15936d33cb7e9b02d))
+
+
+### Bug Fixes
+
+* sanitize NUL bytes before Postgres writes + make backfill resilient ([#92](https://github.com/neverprepared/phantom-brain/issues/92)) ([#107](https://github.com/neverprepared/phantom-brain/issues/107)) ([3dec835](https://github.com/neverprepared/phantom-brain/commit/3dec8358ff98a43650034c65da21cb7c9dd11f5c))
+
 ## [3.7.0](https://github.com/neverprepared/phantom-brain/compare/v3.6.0...v3.7.0) (2026-06-25)
 
 
