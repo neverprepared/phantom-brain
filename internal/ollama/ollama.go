@@ -30,6 +30,13 @@ const (
 	DefaultModel   = "nomic-embed-text"
 	DefaultDims    = 768
 	DefaultTimeout = 60 * time.Second
+
+	// DefaultGenModel is the fallback text-generation model for the
+	// daemon-side synth backend (gate / distill / entity extraction)
+	// when the operator doesn't configure one. Distinct from DefaultModel
+	// (an embedding model that cannot generate). Must be pulled locally
+	// on the Ollama host: `ollama pull qwen2.5:7b`.
+	DefaultGenModel = "qwen2.5:7b"
 )
 
 // Options configures a Client. Use OptionsFromEnv() to populate from
@@ -172,6 +179,70 @@ func (c *Client) Embed(ctx context.Context, inputs []string) ([][]float32, error
 	}
 
 	return out.Embeddings, nil
+}
+
+type generateRequest struct {
+	Model  string `json:"model"`
+	Prompt string `json:"prompt"`
+	Stream bool   `json:"stream"`
+	// Format is Ollama's structured-output constraint. "json" forces the
+	// model to emit a single valid JSON value — used for the gate verdict
+	// so small local models don't wrap their output in prose. Empty for
+	// free-form prose (the distill pass).
+	Format string `json:"format,omitempty"`
+}
+
+type generateResponse struct {
+	Response string `json:"response"`
+	Done     bool   `json:"done"`
+}
+
+// Generate runs a single non-streaming completion against /api/generate
+// and returns the model's response text. An empty model falls back to
+// the client's configured Model. When jsonFormat is true it pins
+// format:"json" so the response is guaranteed-parseable JSON.
+//
+// The supplied ctx governs the deadline. Build the generation client
+// without an http.Client timeout (Options.HTTP = &http.Client{}) so a
+// slow local distillation isn't truncated by the transport — the caller's
+// ctx is the single source of timeout truth.
+func (c *Client) Generate(ctx context.Context, model, prompt string, jsonFormat bool) (string, error) {
+	if strings.TrimSpace(model) == "" {
+		model = c.opts.Model
+	}
+	reqBody := generateRequest{Model: model, Prompt: prompt, Stream: false}
+	if jsonFormat {
+		reqBody.Format = "json"
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("ollama generate: marshal: %w", err)
+	}
+
+	url := strings.TrimRight(c.opts.BaseURL, "/") + "/api/generate"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("ollama generate: new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ollama generate: do: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("ollama generate: %s: %s",
+			resp.Status, strings.TrimSpace(string(errBody)))
+	}
+
+	var out generateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("ollama generate: decode: %w", err)
+	}
+	return out.Response, nil
 }
 
 // Health probes the Ollama server's /api/version endpoint. Returns

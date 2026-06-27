@@ -87,7 +87,7 @@ func TestExtractEntitiesBest_FallsBackOnCLIError(t *testing.T) {
 	writeFailingClaude(t)
 
 	body := "## Real Section\n\nThis is **LangGraph** doing things."
-	got := extractEntitiesBest(context.Background(), "Title", body, true,
+	got := extractEntitiesBest(context.Background(), claudeBackend{}, "Title", body,
 		slog.New(slog.DiscardHandler))
 	// Regex extractor's behaviour: catches the H2 "Real Section" and
 	// the bold "LangGraph". We just need at least one of the
@@ -110,26 +110,26 @@ func TestExtractEntitiesBest_UsesLLMOutput(t *testing.T) {
 	writeFakeClaude(t, `["LangGraph", "ReAct"]`)
 
 	body := "## Core Concept\n\nThe **ReAct** pattern uses **LangGraph** under the hood."
-	got := extractEntitiesBest(context.Background(), "Title", body, true,
+	got := extractEntitiesBest(context.Background(), claudeBackend{}, "Title", body,
 		slog.New(slog.DiscardHandler))
 	if !reflect.DeepEqual(got, []string{"LangGraph", "ReAct"}) {
 		t.Errorf("got %v, want [LangGraph ReAct] from LLM path", got)
 	}
 }
 
-// TestExtractEntitiesBest_CLIUnavailable confirms cliAvailable=false
-// skips the LLM call entirely and goes straight to the regex.
-func TestExtractEntitiesBest_CLIUnavailable(t *testing.T) {
-	// Even with a working fake claude on PATH, cliAvailable=false
+// TestExtractEntitiesBest_NoBackend confirms a nil backend skips the LLM
+// call entirely and goes straight to the regex extractor.
+func TestExtractEntitiesBest_NoBackend(t *testing.T) {
+	// Even with a working fake claude on PATH, a nil backend
 	// short-circuits the LLM call.
 	writeFakeClaude(t, `["should-be-ignored"]`)
 
 	body := "## Real Heading\n\nbody **TermOne** more"
-	got := extractEntitiesBest(context.Background(), "Title", body, false,
+	got := extractEntitiesBest(context.Background(), nil, "Title", body,
 		slog.New(slog.DiscardHandler))
 	for _, e := range got {
 		if e == "should-be-ignored" {
-			t.Error("LLM path was reached despite cliAvailable=false")
+			t.Error("LLM path was reached despite a nil backend")
 		}
 	}
 }
@@ -137,7 +137,7 @@ func TestExtractEntitiesBest_CLIUnavailable(t *testing.T) {
 func TestExtractEntitiesLLM_TimeoutSurfaces(t *testing.T) {
 	// Write a slow claude that sleeps longer than timeout.
 	writeSlowClaude(t, 2*time.Second)
-	_, err := ExtractEntitiesLLM(context.Background(), "T", "body", "", 200*time.Millisecond)
+	_, err := ExtractEntitiesLLM(context.Background(), claudeBackend{}, "T", "body", "", 200*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
