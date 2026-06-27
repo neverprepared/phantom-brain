@@ -48,11 +48,14 @@ func TestExtractedDylibIsStable(t *testing.T) {
 	if err := Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	a, err := extractDylib()
+	// Isolated dir so this never touches the shared production dylib that
+	// sibling packages load concurrently under `go test ./...`.
+	dir := t.TempDir()
+	a, err := extractDylib(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := extractDylib()
+	b, err := extractDylib(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
