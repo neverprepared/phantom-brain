@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.9.1](https://github.com/neverprepared/phantom-brain/compare/v3.9.0...v3.9.1) (2026-06-27)
+
+
+### Bug Fixes
+
+* audit set A — restore semantic recall + repoint forget/reflect at the SoR ([#115](https://github.com/neverprepared/phantom-brain/issues/115)) ([244de5a](https://github.com/neverprepared/phantom-brain/commit/244de5a29f3327fb086989f35e35999e3ae61fc0))
+
 ## [3.9.0](https://github.com/neverprepared/phantom-brain/compare/v3.8.0...v3.9.0) (2026-06-27)
 
 
