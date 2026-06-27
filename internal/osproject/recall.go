@@ -187,7 +187,14 @@ func (r *Recaller) Recall(ctx context.Context, q RecallQuery) ([]RecallHit, erro
 			// entire recall 400s. Set at query level, OS instead stops
 			// analyzing past the offset (partial/no snippet for the giant doc)
 			// and the query still succeeds. Must be <= the index-level setting.
-			"max_analyzed_offset": 1000000,
+			//
+			// NOTE: the query-level highlight field is "max_analyzer_offset"
+			// (with an 'r') on OpenSearch 2.x — deliberately NOT the same
+			// spelling as the index-level "max_analyzed_offset" setting above.
+			// This is an OpenSearch naming inconsistency; using the index-level
+			// spelling here is rejected with x_content_parse_exception
+			// ("unknown field [max_analyzed_offset]"). Verified on OS 2.18.
+			"max_analyzer_offset": 1000000,
 		},
 	}
 
