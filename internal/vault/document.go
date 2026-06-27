@@ -5,7 +5,7 @@
 //
 // This package does NOT include canonicalization (see
 // internal/canonicalize for SHA-stable byte form), the vector or FTS
-// indexes (internal/index), or working memory (internal/working).
+// indexes (the local sqlite-vec index), or working memory (internal/working).
 package vault
 
 import (

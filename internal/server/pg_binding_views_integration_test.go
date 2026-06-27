@@ -200,7 +200,6 @@ func TestPGBindingResolution_NonFatalUnreachable(t *testing.T) {
 	d := newPGTestDaemon(t, b)
 	d.osBase = osc
 	d.osClient = osc
-	d.osExport = osc
 	// Unreachable Postgres (port 1).
 	d.pgBaseDSN = "postgres://pbrain:pbrain@127.0.0.1:1/phantom_brain?sslmode=disable"
 
@@ -234,7 +233,6 @@ func TestPGBindingResolution_Integration(t *testing.T) {
 		d := newPGTestDaemon(t, b)
 		d.osBase = osc
 		d.osClient = osc
-		d.osExport = osc
 		d.pgBaseDSN = baseDSN
 
 		d.buildBindingDeps()
@@ -270,7 +268,6 @@ func TestPGBindingResolution_Integration(t *testing.T) {
 		d := newPGTestDaemon(t, b1, b2)
 		d.osBase = osc
 		d.osClient = osc
-		d.osExport = osc
 		d.pgBaseDSN = baseDSN
 
 		d.buildBindingDeps()
@@ -308,7 +305,6 @@ func TestPGBindingResolution_Integration(t *testing.T) {
 		d := newPGTestDaemon(t, b)
 		d.osBase = osc
 		d.osClient = osc
-		d.osExport = osc
 		d.pgBaseDSN = baseDSN
 
 		d.buildBindingDeps()
@@ -332,7 +328,6 @@ func TestPGBindingResolution_Integration(t *testing.T) {
 		d := newPGTestDaemon(t, b)
 		d.osBase = osc
 		d.osClient = osc
-		d.osExport = osc
 		d.pgBaseDSN = baseDSN
 
 		// First build.

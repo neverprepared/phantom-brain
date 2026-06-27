@@ -91,12 +91,9 @@ func (d *Daemon) handleForget(w http.ResponseWriter, r *http.Request) {
 			"opensearch delete failed: "+err.Error(), nil)
 		return
 	}
-	// Rebuild the snapshot so the forget reaches agents on their next
-	// birth. The debouncer collapses bursts; a single forget still
-	// kicks a rebuild. Nil in legacy / test daemons that don't run it.
-	if d.debouncer != nil {
-		d.debouncer.Trigger(binding.Key.Profile, binding.Key.Vault)
-	}
+	// Phase D2b: the forget takes effect on the next online recall —
+	// the pb_records projection is the canonical read path now, so there
+	// is no snapshot to rebuild.
 
 	writeJSON(w, http.StatusOK, ForgetResponse{SHA: req.SHA, Forgotten: true})
 }

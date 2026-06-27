@@ -61,7 +61,7 @@ func newHandlerWriteDaemon(t *testing.T, baseDSN string, osc *osearch.Client, b 
 	t.Helper()
 	d := newPGTestDaemon(t, b)
 	d.Logger = slog.New(slog.DiscardHandler)
-	d.osBase, d.osClient, d.osExport = osc, osc, osc
+	d.osBase, d.osClient = osc, osc
 	d.pgBaseDSN = baseDSN
 	d.synth = noopSynthQueue{}
 	if err := d.buildBindingDeps(); err != nil {

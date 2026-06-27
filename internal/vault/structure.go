@@ -29,7 +29,7 @@ const (
 // already-skeletoned vault is a no-op aside from a few stat()s.
 //
 // Does NOT create the _index dir; that lives under brainDir/_index/,
-// outside the vault tree, and is owned by internal/index.
+// outside the vault tree, and is owned by the local sqlite-vec index layer.
 //
 // Does NOT seed any files. File seeding (CLAUDE.md template, Wiki/_log.md,
 // etc.) is the caller's concern.

@@ -95,11 +95,6 @@ type SynthWorker struct {
 	// Stores false in the goroutine's defer.
 	backfilling atomic.Bool
 
-	// OnComplete is fired after each successfully synthesised job.
-	// Wires the debounced snapshot rebuild trigger here. Nil-safe; the
-	// worker checks before invoking.
-	OnComplete func(profile, vault, sha string)
-
 	// cliAvailable is snapshotted at construction so the worker
 	// behaves predictably across the run — toggling the CLI in/out
 	// of $PATH at runtime would otherwise produce mixed-mode output.
@@ -364,8 +359,8 @@ func (w *SynthWorker) run(ctx context.Context) {
 	}
 }
 
-// handle runs one job under processMu (serialized with backfill) and
-// fires OnComplete on success. Shared by the live loop and backfill.
+// handle runs one job under processMu (serialized with backfill).
+// Shared by the live loop and backfill.
 func (w *SynthWorker) handle(ctx context.Context, job synthJob) {
 	w.processMu.Lock()
 	err := w.processJob(ctx, job)
@@ -374,10 +369,6 @@ func (w *SynthWorker) handle(ctx context.Context, job synthJob) {
 		w.logger.Warn("phantom-brain: synth job failed",
 			slog.String("vault", job.Profile+"/"+job.Vault),
 			slog.String("sha", job.SHA), slog.String("err", err.Error()))
-		return
-	}
-	if w.OnComplete != nil {
-		w.OnComplete(job.Profile, job.Vault, job.SHA)
 	}
 }
 

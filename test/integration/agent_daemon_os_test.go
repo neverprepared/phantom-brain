@@ -1,6 +1,10 @@
-// Package integration_test exercises the Phase 6 round-trip:
-// agent → daemon HTTP → OpenSearch → snapshot tarball → agent's
-// local sqlite-vec cache.
+// Package integration_test exercises the agent → daemon HTTP → storage
+// path against a live OpenSearch cluster.
+//
+// Phase D2b: the Phase 6 snapshot round-trip test (agent → daemon → OS →
+// snapshot tarball → local sqlite-vec cache) was removed along with the
+// snapshot + local-index machinery. The cross-vault auth isolation test
+// remains.
 //
 // Gated on OPENSEARCH_INTEGRATION=1 + OPENSEARCH_URL so the dev
 // loop stays fast when no OS cluster is reachable. CI / smoke runs
@@ -24,7 +28,6 @@ import (
 	"time"
 
 	"github.com/neverprepared/phantom-brain/internal/brain"
-	"github.com/neverprepared/phantom-brain/internal/index"
 	"github.com/neverprepared/phantom-brain/internal/osearch"
 	pbserver "github.com/neverprepared/phantom-brain/internal/server"
 )
@@ -135,105 +138,11 @@ func cleanupSandboxedIndices(osURL, prefix string) {
 	_ = c // suppress unused-warning when this path is skipped
 }
 
-// TestPhase6_RoundTrip_AgentDaemonOS exercises the full Phase 6
-// pipeline:
-//
-//  1. Agent POSTs /perceive (raw doc + embedding) via brain.Client
-//  2. Daemon indexes into OS (raw, synthesised=false)
-//  3. Test code stamps synthesised=true via a direct osearch.Client
-//     (simulates what SynthWorker would do; bypassing CLI keeps the
-//     test fast + deterministic)
-//  4. BuildSnapshotFromOS produces a tarball
-//  5. Extract + open the tarball with internal/index.Open
-//  6. Verify the doc is findable via SearchText
-func TestPhase6_RoundTrip_AgentDaemonOS(t *testing.T) {
-	osURL := requireLiveOS(t)
-	d, baseURL, tok, cleanup := sandboxedDaemon(t, osURL, "personal", "memory")
-	defer cleanup()
-
-	// --- step 1: agent POST /perceive --------------------------------
-	client, err := brain.NewClient(brain.ClientOpts{BaseURL: baseURL, Token: tok})
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-	sha := strings.Repeat("a", 64)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if _, err := client.Perceive(ctx, brain.PerceiveRequest{
-		SHA: sha, Title: "Kubernetes basics",
-		Body:      "Pods are the smallest deployable unit in Kubernetes.",
-		URL:       "https://example.com/k8s",
-		Tags:      []string{"k8s", "infra"},
-		Embedding: nonZeroEmbedding(1),
-	}); err != nil {
-		t.Fatalf("Perceive: %v", err)
-	}
-
-	// --- step 2: verify OS doc landed (raw-only) ----------------------
-	osc := mustOpenLiveOS(t, osURL, sandboxPrefixFromDaemon(t, d))
-	if err := osc.Refresh(ctx); err != nil {
-		t.Fatalf("OS refresh: %v", err)
-	}
-	doc, err := osc.GetSummary(ctx, "personal", "memory", sha)
-	if err != nil || doc == nil {
-		t.Fatalf("OS GetSummary: doc=%v err=%v", doc, err)
-	}
-	if doc.Synthesised {
-		t.Errorf("expected raw-only doc; got Synthesised=true")
-	}
-	if doc.Title != "Kubernetes basics" {
-		t.Errorf("title round-trip mismatch: %q", doc.Title)
-	}
-
-	// --- step 3: simulate synth completion ----------------------------
-	// Real SynthWorker runs claude CLI for gate + distill; tests
-	// stamp synthesised=true directly so the rebuild path picks the
-	// doc up. Embedding stays — exporter requires non-empty vec.
-	doc.Synthesised = true
-	doc.Body = "Distilled: Pods are k8s' smallest deployable unit."
-	doc.Reliability = osearch.ReliabilityMedium
-	doc.Topic = "infrastructure"
-	if err := osc.UpsertSummary(ctx, *doc, true); err != nil {
-		t.Fatalf("simulate synth: %v", err)
-	}
-
-	// --- step 4: build snapshot from OS -------------------------------
-	exp := osearchExporterFromDaemon(t, d)
-	info, err := pbserver.BuildSnapshotFromOS(ctx, d.DataDir, exp, "personal", "memory", 30)
-	if err != nil {
-		t.Fatalf("BuildSnapshotFromOS: %v", err)
-	}
-	if info == nil {
-		t.Fatal("snapshot info nil; expected publish")
-	}
-	if info.Manifest.SHA256 == "" {
-		t.Errorf("snapshot manifest missing SHA256: %+v", info.Manifest)
-	}
-
-	// --- step 5+6: extract + verify findable via local index ---------
-	extract := t.TempDir()
-	if err := osearch.ExtractTarZst(info.TarballPath, extract); err != nil {
-		t.Fatalf("extract tarball: %v", err)
-	}
-	idx, err := index.Open(filepath.Join(extract, "_index"), osearch.EmbeddingDim)
-	if err != nil {
-		t.Fatalf("index.Open: %v", err)
-	}
-	defer idx.Close()
-	hits, err := idx.SearchText(ctx, "kubernetes", 5)
-	if err != nil {
-		t.Fatalf("SearchText: %v", err)
-	}
-	found := false
-	for _, h := range hits {
-		if h.SHA == sha {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("SearchText('kubernetes') did not find seeded doc %s; hits=%+v", sha, hits)
-	}
-}
+// Phase D2b: TestPhase6_RoundTrip_AgentDaemonOS was removed — it built a
+// snapshot tarball (BuildSnapshotFromOS) and opened it with the local sqlite-vec index,
+// both of which are gone. Online recall against the Postgres SoR replaces
+// the snapshot round-trip; its integration coverage lives in the PG-backed
+// suites under internal/server.
 
 // TestPhase6_CrossVaultIsolation verifies an agent on profile A
 // cannot perceive into profile B (auth middleware rejects the token
@@ -265,42 +174,3 @@ func TestPhase6_CrossVaultIsolation(t *testing.T) {
 	}
 }
 
-// mustOpenLiveOS builds a direct osearch.Client that targets the
-// same per-test index prefix as the daemon, so the test can inspect
-// what the daemon wrote without piggybacking on a daemon read API.
-func mustOpenLiveOS(t *testing.T, osURL, prefix string) *osearch.Client {
-	t.Helper()
-	c, err := osearch.Open(context.Background(), osearch.Config{
-		Addresses:      []string{osURL},
-		IndexPrefix:    prefix,
-		RequestTimeout: 5 * time.Second,
-	})
-	if err != nil {
-		t.Fatalf("osearch.Open: %v", err)
-	}
-	return c
-}
-
-// sandboxPrefixFromDaemon recovers the IndexPrefix the daemon was
-// configured with. Daemon doesn't expose this directly; we go
-// through the loaded config.
-func sandboxPrefixFromDaemon(t *testing.T, d *pbserver.Daemon) string {
-	t.Helper()
-	if d.Config == nil {
-		t.Fatal("daemon config nil")
-	}
-	return d.Config.OpenSearch.IndexPrefix
-}
-
-// osearchExporterFromDaemon constructs a fresh osearch.Client
-// (sharing the same prefix as the daemon's wired client) so the
-// test can call BuildSnapshotFromOS without reaching into private
-// daemon fields. Equivalent to what d.osExport holds internally.
-func osearchExporterFromDaemon(t *testing.T, d *pbserver.Daemon) *osearch.Client {
-	t.Helper()
-	osURL := os.Getenv("OPENSEARCH_URL")
-	if osURL == "" {
-		t.Fatal("OPENSEARCH_URL empty")
-	}
-	return mustOpenLiveOS(t, osURL, sandboxPrefixFromDaemon(t, d))
-}

@@ -77,7 +77,7 @@ func (s *Server) handleResynth(ctx context.Context, req mcp.CallToolRequest) (*m
 	} else if resp.Started {
 		fmt.Fprintf(&b, "\nStarted re-synthesis of %d doc(s) in the background. They synthesize "+
 			"over time (CLI-bound); re-run brain_resynth with dry_run=true to watch backlog_count "+
-			"fall. New snapshot publishes when done.", resp.Pending)
+			"fall. Results appear in online brain_recall as each doc finishes.", resp.Pending)
 	} else {
 		b.WriteString("\nNothing to re-synthesize — long-term memory looks fully synthesized.")
 	}

@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	pbbrain "github.com/neverprepared/phantom-brain/internal/brain"
 	"github.com/neverprepared/phantom-brain/internal/brain/wqueue"
@@ -37,7 +36,7 @@ func setupWithQueue(t *testing.T, dims int, plan map[string][]float32, handler h
 		t.Fatalf("wqueue.Open: %v", err)
 	}
 
-	lc := pbbrain.NewLifecycleForTest(q, client, time.Time{})
+	lc := pbbrain.NewLifecycleForTest(q, client)
 
 	_, deps := setup(t, dims, plan)
 	deps.Client = client
@@ -220,8 +219,10 @@ func TestBrainStatus_ReportsConnectivityAndQueueDepth(t *testing.T) {
 	if _, ok := got["last_daemon_contact_secs"]; !ok {
 		t.Errorf("missing last_daemon_contact_secs field")
 	}
-	if _, ok := got["snapshot_age_secs"]; !ok {
-		t.Errorf("missing snapshot_age_secs field")
+	// Phase D2b: snapshot_age_secs was removed from brain_status (no
+	// local snapshot cache anymore).
+	if _, ok := got["snapshot_age_secs"]; ok {
+		t.Errorf("snapshot_age_secs should be gone from brain_status")
 	}
 }
 

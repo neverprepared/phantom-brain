@@ -76,9 +76,9 @@ func clientForgetCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "forget <sha>",
 		Short: "Delete one long-term-memory summary by SHA",
-		Long: `Deletes the summary doc at <sha> and triggers a snapshot rebuild on
-the daemon. The doc stays visible to brain_recall until a new snapshot
-publishes and a fresh brain births.`,
+		Long: `Deletes the summary doc at <sha> on the daemon. The removal takes
+effect on the next online brain_recall (Phase D2b: recall reads the
+daemon's Postgres store).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sha := strings.TrimSpace(args[0])
@@ -94,7 +94,7 @@ publishes and a fresh brain births.`,
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(),
-				"forgot %s (forgotten=%t)\nstays visible to brain_recall until a new snapshot publishes\n",
+				"forgot %s (forgotten=%t)\ntakes effect on the next online brain_recall\n",
 				resp.SHA, resp.Forgotten)
 			return nil
 		},

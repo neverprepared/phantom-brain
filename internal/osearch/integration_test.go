@@ -35,10 +35,7 @@ func testClient(t *testing.T) (*Client, context.Context, func()) {
 		cancel()
 		t.Fatalf("Open: %v", err)
 	}
-	if err := c.EnsureIndices(ctx); err != nil {
-		cancel()
-		t.Fatalf("EnsureIndices: %v", err)
-	}
+	ensureLegacyIndices(t, ctx, c, c.prefix)
 
 	cleanup := func() {
 		// Drop the per-test indices so re-runs start clean.

@@ -22,7 +22,6 @@ import (
 
 	"github.com/neverprepared/phantom-brain/internal/brain"
 	"github.com/neverprepared/phantom-brain/internal/config"
-	"github.com/neverprepared/phantom-brain/internal/index"
 	pbmcp "github.com/neverprepared/phantom-brain/internal/mcp"
 	"github.com/neverprepared/phantom-brain/internal/ollama"
 	pbserver "github.com/neverprepared/phantom-brain/internal/server"
@@ -38,7 +37,7 @@ func main() {
 		Long: `pbrainctl is a single binary with two top-level groups:
 
   pbrainctl client <cmd>   agent-side commands (MCP server, brain dirs, ingest)
-  pbrainctl server <cmd>   daemon-side commands (HTTP serve, vault/snapshot/maintenance)
+  pbrainctl server <cmd>   daemon-side commands (HTTP serve, vault/maintenance)
 
 v3.0 restructured the previously-flat command tree into these explicit
 groups so a workstation install isn't surfacing daemon-only commands
@@ -85,19 +84,18 @@ func clientCmd() *cobra.Command {
 
 // serverCmd groups every command that lives on the daemon host:
 // the daemon itself plus the operator levers that poke its state
-// directly (vault registry, snapshot publisher, maintenance flag,
-// backfill jobs). These commands need PHANTOM_BRAIN_CONFIG_DIR /
-// PHANTOM_BRAIN_DATA_DIR access — they will not work on a
-// workstation that doesn't host the daemon's data dir.
+// directly (vault registry, maintenance flag, backfill jobs). These
+// commands need PHANTOM_BRAIN_CONFIG_DIR / PHANTOM_BRAIN_DATA_DIR
+// access — they will not work on a workstation that doesn't host the
+// daemon's data dir.
 func serverCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "server",
-		Short: "Daemon-side commands (HTTP serve, vault/snapshot/maintenance)",
+		Short: "Daemon-side commands (HTTP serve, vault/maintenance)",
 	}
 	c.AddCommand(serveCmd())
 	c.AddCommand(configCmd())
 	c.AddCommand(vaultCmd())
-	c.AddCommand(snapshotCmd())
 	c.AddCommand(queueCmd())
 	c.AddCommand(maintenanceCmd())
 	c.AddCommand(backfillAttachmentStubsCmd())
@@ -205,11 +203,6 @@ func runMCPLegacyMode() error {
 	_, _ = working.ReapOrphanedShards(indexDir)
 
 	oll := ollama.New(ollama.OptionsFromEnv())
-	idx, err := index.Open(indexDir, oll.Dims())
-	if err != nil {
-		return fmt.Errorf("open index: %w", err)
-	}
-	defer idx.Close()
 
 	wm, err := working.Open(indexDir)
 	if err != nil {
@@ -219,7 +212,6 @@ func runMCPLegacyMode() error {
 
 	srv := server.NewMCPServer("phantom-brain", version.Version, server.WithToolCapabilities(false))
 	pbmcp.NewServer(pbmcp.ServerDeps{
-		Index:    idx,
 		Working:  wm,
 		Embedder: oll,
 		VaultDir: vaultDir,
@@ -281,11 +273,6 @@ func runMCPAgentMode() error {
 	_, _ = working.ReapOrphanedShards(indexDir)
 
 	oll := ollama.New(ollama.OptionsFromEnv())
-	idx, err := index.Open(indexDir, oll.Dims())
-	if err != nil {
-		return fmt.Errorf("open index: %w", err)
-	}
-	defer idx.Close()
 
 	wm, err := working.Open(indexDir)
 	if err != nil {
@@ -296,7 +283,6 @@ func runMCPAgentMode() error {
 	srv := server.NewMCPServer("phantom-brain", version.Version, server.WithToolCapabilities(false))
 	daemonClient := lc.Client()
 	pbmcp.NewServer(pbmcp.ServerDeps{
-		Index:     idx,
 		Working:   wm,
 		Embedder:  oll,
 		VaultDir:  lc.VaultDir(),
@@ -393,8 +379,8 @@ brain dir under $XDG_DATA_HOME/phantom-brain/{profile}/{vault}/brains/<brain_id>
 Stamps a manifest with seed_source = "legacy-migration". Refuses if a brain
 already exists for this (profile, vault) — delete the existing brain dir
 first if you want to force a fresh migration. The source vault is NOT
-deleted; remove it manually after verifying the next snapshot picks up
-the migrated content.`,
+deleted; remove it manually after verifying the migrated content is
+reachable.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			legacyPath := strings.TrimSpace(os.Getenv("BRAIN_LEGACY_VAULT_PATH"))
 			if legacyPath == "" {
@@ -424,7 +410,7 @@ func serveCmd() *cobra.Command {
 		Use:   "serve",
 		Short: "Run as the HTTP daemon (Phase 2)",
 		Long: `Starts the phantom-brain HTTP daemon: per-(profile, vault) reaper +
-synthesizer + snapshot publisher, plus the v4.4 §8 API.
+synthesizer, plus the v4.4 §8 API.
 
 Required config dir layout (default ~/.config/phantom-brain-server):
 

@@ -1,7 +1,6 @@
 package mcp
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,27 +8,16 @@ import (
 )
 
 // --- brain_learn ---
-
-func TestLearnSingleItemWritesToCurated(t *testing.T) {
-	plan := map[string][]float32{
-		"Curated Note\n\nbody contents": {1, 0, 0},
-	}
-	s, deps := setup(t, 3, plan)
-
-	text, isErr := callTool(t, s.handleLearn, map[string]any{
-		"content": "body contents",
-		"title":   "Curated Note",
-	})
-	if isErr {
-		t.Fatalf("err: %s", text)
-	}
-	if !strings.Contains(text, "1 stored") {
-		t.Errorf("expected '1 stored' header; got %q", text)
-	}
-	if _, err := os.Stat(filepath.Join(deps.VaultDir, "Raw", "curated", "curated-note.md")); err != nil {
-		t.Errorf("expected Raw/curated/curated-note.md: %v", err)
-	}
-}
+//
+// Phase D2b: writes are daemon-only. Single-item learn over the daemon is
+// covered by daemon_post_test.go's TestLearn_PostsToDaemon. The batch path
+// is exercised below against the recording daemon. Removed as
+// testing-removed-behavior:
+//
+//   - TestLearnSingleItemWritesToCurated (redundant w/ TestLearn_PostsToDaemon)
+//   - TestLearnBatchReportsDuplicates    (local dedup removed; daemon SHA-dedups)
+//   - TestAttachWritesBlobAndStub        (redundant w/ TestAttach_PostsToDaemon)
+//   - TestAttachDuplicateOnSameInput     (local dedup removed)
 
 func TestLearnBatchMode(t *testing.T) {
 	plan := map[string][]float32{
@@ -37,7 +25,8 @@ func TestLearnBatchMode(t *testing.T) {
 		"B\n\nb body": {0, 1, 0},
 		"C\n\nc body": {0, 0, 1},
 	}
-	s, deps := setup(t, 3, plan)
+	s, _, daemon, cleanup := setupWithDaemon(t, 3, plan)
+	defer cleanup()
 
 	items := []any{
 		map[string]any{"content": "a body", "title": "A"},
@@ -51,29 +40,8 @@ func TestLearnBatchMode(t *testing.T) {
 	if !strings.Contains(text, "3 stored") {
 		t.Errorf("header should report 3 stored: %q", text)
 	}
-	for _, name := range []string{"a.md", "b.md", "c.md"} {
-		if _, err := os.Stat(filepath.Join(deps.VaultDir, "Raw", "curated", name)); err != nil {
-			t.Errorf("missing %s: %v", name, err)
-		}
-	}
-}
-
-func TestLearnBatchReportsDuplicates(t *testing.T) {
-	plan := map[string][]float32{
-		"Solo\n\nbody": {1, 0, 0},
-	}
-	s, _ := setup(t, 3, plan)
-
-	items := []any{
-		map[string]any{"content": "body", "title": "Solo"},
-		map[string]any{"content": "body", "title": "Solo"}, // exact dup
-	}
-	text, isErr := callTool(t, s.handleLearn, map[string]any{"items": items})
-	if isErr {
-		t.Fatalf("err: %s", text)
-	}
-	if !strings.Contains(text, "1 stored") || !strings.Contains(text, "1 duplicate") {
-		t.Errorf("header should report 1 stored + 1 duplicate: %q", text)
+	if got := len(daemon.calls("/api/brain/learn")); got != 3 {
+		t.Errorf("daemon learn calls = %d, want 3", got)
 	}
 }
 
@@ -98,90 +66,6 @@ func TestLearnRejectsEmptyInvocation(t *testing.T) {
 }
 
 // --- brain_attach ---
-
-func TestAttachWritesBlobAndStub(t *testing.T) {
-	plan := map[string][]float32{
-		"My PDF\n\na useful research paper": {1, 0, 0},
-	}
-	s, deps := setup(t, 3, plan)
-
-	// Make a small "binary" file. Content doesn't matter; the test
-	// only checks SHA stability and write semantics.
-	src := filepath.Join(t.TempDir(), "paper.pdf")
-	if err := os.WriteFile(src, []byte("%PDF-1.4 not really a pdf"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	text, isErr := callTool(t, s.handleAttach, map[string]any{
-		"file_path":   src,
-		"title":       "My PDF",
-		"description": "a useful research paper",
-		"source_url":  "https://example.com/paper.pdf",
-	})
-	if isErr {
-		t.Fatalf("err: %s", text)
-	}
-	if !strings.Contains(text, "Attached") {
-		t.Errorf("status should start with Attached; got %q", text)
-	}
-
-	// Find the stub: Raw/attachments/<sha>.md
-	entries, err := os.ReadDir(filepath.Join(deps.VaultDir, "Raw", "attachments"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var stub, blob string
-	for _, e := range entries {
-		switch {
-		case strings.HasSuffix(e.Name(), ".md"):
-			stub = e.Name()
-		case strings.HasSuffix(e.Name(), ".pdf"):
-			blob = e.Name()
-		}
-	}
-	if stub == "" {
-		t.Error("expected a .md stub")
-	}
-	if blob == "" {
-		t.Error("expected a .pdf blob")
-	}
-
-	// FTS hit on description.
-	hits, err := deps.Index.SearchText(context.Background(), "research", 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(hits) != 1 {
-		t.Errorf("FTS hits = %d, want 1", len(hits))
-	}
-}
-
-func TestAttachDuplicateOnSameInput(t *testing.T) {
-	plan := map[string][]float32{
-		"Dup\n\nsame description": {1, 0, 0},
-	}
-	s, _ := setup(t, 3, plan)
-
-	src := filepath.Join(t.TempDir(), "file.bin")
-	if err := os.WriteFile(src, []byte("bytes"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	args := map[string]any{
-		"file_path":   src,
-		"title":       "Dup",
-		"description": "same description",
-	}
-	if _, isErr := callTool(t, s.handleAttach, args); isErr {
-		t.Fatal("first attach should succeed")
-	}
-	text, isErr := callTool(t, s.handleAttach, args)
-	if isErr {
-		t.Fatalf("duplicate should not be error: %s", text)
-	}
-	if !strings.Contains(text, "Duplicate") {
-		t.Errorf("expected Duplicate; got %q", text)
-	}
-}
 
 func TestAttachRejectsMissingFile(t *testing.T) {
 	s, _ := setup(t, 3, nil)

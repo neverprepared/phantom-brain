@@ -197,14 +197,9 @@ func TestSynthWorker_EnrichesRawDoc(t *testing.T) {
 	w, cleanup := newWorkerWithFakes(t, store, nil, cap, nil)
 	defer cleanup()
 
-	var completedFor string
-	var cmu sync.Mutex
-	w.OnComplete = func(_, _, sha string) {
-		cmu.Lock()
-		completedFor = sha
-		cmu.Unlock()
-	}
-
+	// Phase D2b: the worker's OnComplete hook (snapshot rebuild trigger)
+	// was removed; WriteSynth landing in the capture is the completion
+	// signal now.
 	w.Enqueue("p", "v", sha)
 	waitUntil(t, 5*time.Second, func() bool { _, ok := cap.result(sha); return ok })
 
@@ -217,12 +212,6 @@ func TestSynthWorker_EnrichesRawDoc(t *testing.T) {
 	}
 	if res.Topic == "" {
 		t.Error("Topic not set after synth")
-	}
-	cmu.Lock()
-	got := completedFor
-	cmu.Unlock()
-	if got != sha {
-		t.Errorf("OnComplete fired for %q, want %q", got, sha)
 	}
 }
 
@@ -238,15 +227,13 @@ func TestSynthWorker_SkipsAlreadySynthesised(t *testing.T) {
 	w, cleanup := newWorkerWithFakes(t, store, nil, cap, nil)
 	defer cleanup()
 
-	completed := make(chan string, 1)
-	w.OnComplete = func(_, _, sha string) { completed <- sha }
-
+	// Phase D2b: with OnComplete gone, drive a sentinel job through the
+	// single FIFO worker. When the sentinel's WriteSynth lands, the
+	// already-synthesised job ahead of it has been processed (and skipped).
+	store.put(noteRecord("p", "v", "sentinel", "x", "fresh content", 2))
 	w.Enqueue("p", "v", sha)
-	select {
-	case <-completed:
-	case <-time.After(2 * time.Second):
-		t.Fatal("worker never reached OnComplete")
-	}
+	w.Enqueue("p", "v", "sentinel")
+	waitUntil(t, 5*time.Second, func() bool { _, ok := cap.result("sentinel"); return ok })
 
 	// The worker skips the wasted gate/distill: WriteSynth must NOT fire
 	// for an already-synthesised record.
@@ -262,27 +249,19 @@ func TestSynthWorker_MissingDocIsNotError(t *testing.T) {
 	w, cleanup := newWorkerWithFakes(t, store, nil, cap, nil)
 	defer cleanup()
 
-	completed := make(chan string, 1)
-	w.OnComplete = func(_, _, sha string) { completed <- sha }
-
 	// A missing-record enqueue is not an error; processJob returns nil
-	// WITHOUT calling WriteSynth, but still fires OnComplete (no error).
+	// WITHOUT calling WriteSynth. Phase D2b: OnComplete is gone, so we
+	// verify the worker still drains a subsequent good job — when the
+	// "real" job's WriteSynth lands, the ghost ahead of it was processed
+	// without poisoning the queue.
+	store.put(noteRecord("p", "v", "real", "x", "some content", 2))
 	w.Enqueue("p", "v", "ghost")
-	select {
-	case <-completed:
-		// fine — handle() fires OnComplete on a nil error.
-	case <-time.After(2 * time.Second):
-		t.Fatal("worker stalled on a missing record")
-	}
+	w.Enqueue("p", "v", "real")
+	waitUntil(t, 5*time.Second, func() bool { _, ok := cap.result("real"); return ok })
+
 	if _, ok := cap.result("ghost"); ok {
 		t.Error("WriteSynth fired for a missing record")
 	}
-
-	// Verify the worker still drains a subsequent good job — the missing
-	// one didn't poison the queue.
-	store.put(noteRecord("p", "v", "real", "x", "some content", 2))
-	w.Enqueue("p", "v", "real")
-	waitUntil(t, 5*time.Second, func() bool { _, ok := cap.result("real"); return ok })
 }
 
 func TestSynthWorker_EnqueueDropsOnFullQueue(t *testing.T) {

@@ -3,8 +3,6 @@ package brain
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -64,76 +62,6 @@ func NewClient(opts ClientOpts) (*Client, error) {
 		token:   opts.Token,
 		http:    hc,
 	}, nil
-}
-
-// SnapshotManifestResponse mirrors the daemon's snapshot manifest
-// JSON shape. Kept as its own type rather than reusing the server's
-// internal SnapshotManifest so internal/brain doesn't import
-// internal/server (which would also pull chi + the storage backends).
-type SnapshotManifestResponse struct {
-	Profile           string `json:"profile"`
-	Vault             string `json:"vault"`
-	Gen               uint64 `json:"gen"`
-	SHA256            string `json:"sha256"`
-	SizeBytes         int64  `json:"size_bytes"`
-	BuiltAt           string `json:"built_at"`
-	ParentSynthesisID string `json:"parent_synthesis_id,omitempty"`
-}
-
-// GetCurrentSnapshot fetches /api/brain/snapshot/current. Returns
-// the manifest or an error; gen=0 in the result means the daemon's
-// vault is empty (brand-new) and the agent should birth greenfield.
-func (c *Client) GetCurrentSnapshot(ctx context.Context) (*SnapshotManifestResponse, error) {
-	var out SnapshotManifestResponse
-	if err := c.do(ctx, http.MethodGet, "/api/brain/snapshot/current", nil, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
-// DownloadSnapshotTarball streams /api/brain/snapshot/{gen}/tarball
-// into dst, verifying the SHA256 against wantSHA256 as bytes pass
-// through. Returns the size received on success; deletes dst's
-// contents on hash mismatch so the agent doesn't keep a corrupted
-// cache copy.
-func (c *Client) DownloadSnapshotTarball(ctx context.Context, gen uint64, wantSHA256 string, dst io.Writer) (int64, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("%s/api/brain/snapshot/%d/tarball", c.baseURL, gen), nil)
-	if err != nil {
-		return 0, err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("brain: download snapshot gen=%d: %w", gen, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return 0, decodeErrorEnvelope(resp)
-	}
-	h := sha256.New()
-	mw := io.MultiWriter(dst, h)
-	n, err := io.Copy(mw, resp.Body)
-	if err != nil {
-		return n, fmt.Errorf("brain: stream snapshot gen=%d: %w", gen, err)
-	}
-	got := hex.EncodeToString(h.Sum(nil))
-	if wantSHA256 != "" && got != wantSHA256 {
-		return n, fmt.Errorf("brain: snapshot gen=%d sha mismatch: got=%s want=%s", gen, got, wantSHA256)
-	}
-	return n, nil
-}
-
-// ClaimBirth posts /api/brain/birth/claim. The daemon drops a
-// .claims/<brain_id> marker that protects the gen from retention
-// pruning while the agent finishes birthing.
-func (c *Client) ClaimBirth(ctx context.Context, brainID string, gen uint64, ttlSecs int) error {
-	body := map[string]any{
-		"brain_id":  brainID,
-		"gen":       gen,
-		"ttl_secs":  ttlSecs,
-	}
-	return c.do(ctx, http.MethodPost, "/api/brain/birth/claim", body, nil)
 }
 
 // MergeInitResponse mirrors the daemon's mergeInitResponse JSON.

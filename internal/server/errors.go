@@ -13,7 +13,6 @@ const (
 	ErrCodeInvalidToken       = "INVALID_TOKEN"
 	ErrCodeVaultNotFound      = "VAULT_NOT_FOUND"
 	ErrCodeMaintenanceMode    = "MAINTENANCE_MODE"
-	ErrCodeStaleSnapshot      = "STALE_SNAPSHOT"
 	ErrCodeMergeInProgress    = "MERGE_IN_PROGRESS"
 	ErrCodePayloadTooLarge    = "PAYLOAD_TOO_LARGE"
 	ErrCodeStorageBackendErr  = "STORAGE_BACKEND_ERROR"

@@ -48,15 +48,11 @@ type Lifecycle struct {
 
 	// v3.1 (#61): write-ahead queue + connectivity state + drainer
 	// goroutine. queue and conn are nil in legacy BRAIN_VAULT_PATH
-	// mode — call sites MUST nil-guard before use. snapshotBuiltAt
-	// records the daemon-side build timestamp of the parent_gen
-	// snapshot the agent currently has; refreshed by the drainer.
-	queue           *wqueue.Queue
-	conn            *Connectivity
-	drainStop       context.CancelFunc
-	drainDone       chan struct{}
-	snapshotBuiltAt time.Time
-	snapshotMu      sync.RWMutex
+	// mode — call sites MUST nil-guard before use.
+	queue     *wqueue.Queue
+	conn      *Connectivity
+	drainStop context.CancelFunc
+	drainDone chan struct{}
 }
 
 // StartOpts narrows what callers must supply to instantiate a
@@ -123,13 +119,6 @@ func Start(opts StartOpts) (*Lifecycle, error) {
 		logger:   opts.Logger,
 		brainDir: dir,
 		manifest: m,
-	}
-	// Stamp the daemon-side built-at for the snapshot we just pulled
-	// so brain_recall's staleness footer reflects reality from birth.
-	if m != nil && m.ParentSnapshotBuiltAt != "" {
-		if t, perr := time.Parse(time.RFC3339, m.ParentSnapshotBuiltAt); perr == nil {
-			lc.snapshotBuiltAt = t
-		}
 	}
 	// Phase 6: a Lifecycle started under the agent contract has a
 	// daemon API + bearer; construct the shared HTTP client once
@@ -215,38 +204,6 @@ func (l *Lifecycle) Connectivity() *Connectivity {
 	}
 	return l.conn
 }
-
-// SetSnapshotBuiltAt records the daemon-side built_at timestamp for
-// the snapshot this brain was birthed from (refreshed by the drainer
-// each cycle so the recall footer stays accurate after rebuilds).
-// Zero means unknown.
-func (l *Lifecycle) SetSnapshotBuiltAt(t time.Time) {
-	if l == nil {
-		return
-	}
-	l.snapshotMu.Lock()
-	defer l.snapshotMu.Unlock()
-	l.snapshotBuiltAt = t
-}
-
-// SnapshotAge returns how long ago the parent snapshot was built on
-// the daemon. Returns 0 when unknown.
-func (l *Lifecycle) SnapshotAge(now time.Time) time.Duration {
-	if l == nil {
-		return 0
-	}
-	l.snapshotMu.RLock()
-	defer l.snapshotMu.RUnlock()
-	if l.snapshotBuiltAt.IsZero() {
-		return 0
-	}
-	d := now.Sub(l.snapshotBuiltAt)
-	if d < 0 {
-		return 0
-	}
-	return d
-}
-
 
 // RecordWrite is the hook ingest handlers (brain_perceive,
 // brain_learn, brain_attach) call after a successful write so the

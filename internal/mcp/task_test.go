@@ -151,20 +151,15 @@ func TestTaskUpdateRejectsMissingTask(t *testing.T) {
 }
 
 func TestTaskCompleteWritesPromotedNote(t *testing.T) {
-	plan := map[string][]float32{
-		// The promoted note's embed input is title + body. We log a few
-		// findings; expected embed input includes the rendered body.
-		// Use a wildcard: match any input by pre-registering a single
-		// vector. Since the fakeEmbedder only sees one Embed call per
-		// task_complete, we just need ANY plan entry to match.
-	}
-	plan = map[string][]float32{}
-	s, deps := setup(t, 3, plan)
+	// Phase D2b: task_complete's promote step is a daemon brain_learn —
+	// there is no local note/index write. Assert against the recording
+	// daemon instead of the local vault.
+	s, deps, daemon, cleanup := setupWithDaemon(t, 3, map[string][]float32{})
+	defer cleanup()
 	// Re-wire: we don't know the exact embed string ahead of time
-	// because timestamps and IDs vary. Easier to pre-fill with a
-	// catch-all by replacing the embedder.
+	// because timestamps and IDs vary. Pre-fill with a catch-all by
+	// replacing the embedder.
 	s.deps.Embedder = &openEmbedder{dims: 3, fixed: []float32{1, 0, 0}}
-	deps.Embedder = s.deps.Embedder
 
 	id := startTask(t, s, "design the loader")
 	if _, isErr := callTool(t, s.handleTaskUpdate, map[string]any{
@@ -191,33 +186,30 @@ func TestTaskCompleteWritesPromotedNote(t *testing.T) {
 		t.Errorf("status missing summary: %q", text)
 	}
 
-	// Promoted note exists.
-	want := filepath.Join(deps.VaultDir, "Raw", "curated", "task-"+id+".md")
-	body, err := os.ReadFile(want)
-	if err != nil {
-		t.Fatalf("expected promoted note: %v", err)
+	// The promoted note was POSTed to the daemon as a brain_learn with
+	// the task-<id> source_path and the high-importance content.
+	calls := daemon.calls("/api/brain/learn")
+	if len(calls) != 1 {
+		t.Fatalf("daemon learn calls = %d, want 1", len(calls))
 	}
-	s_ := string(body)
-	if !strings.Contains(s_, "WAL mode is mandatory") {
+	body, _ := calls[0]["body"].(string)
+	if !strings.Contains(body, "WAL mode is mandatory") {
 		t.Error("high-importance finding missing from promoted note")
 	}
-	if strings.Contains(s_, "trivial detail") {
+	if strings.Contains(body, "trivial detail") {
 		t.Error("low-importance finding leaked into promoted note")
 	}
-	if !strings.Contains(s_, "Wiki/loader-spec.md") {
+	if !strings.Contains(body, "Wiki/loader-spec.md") {
 		t.Error("artifact missing from promoted note")
+	}
+	if got := calls[0]["source_path"]; got != "Raw/curated/task-"+id+".md" {
+		t.Errorf("source_path = %v, want Raw/curated/task-%s.md", got, id)
 	}
 
 	// Task is marked complete.
 	got, _ := deps.Working.GetTask(id)
 	if got.Status != working.StatusCompleted {
 		t.Errorf("status = %q, want completed", got.Status)
-	}
-
-	// Promoted note is indexed.
-	hits, _ := deps.Index.SearchText(context.Background(), "loader", 5)
-	if len(hits) != 1 {
-		t.Errorf("FTS hits for completed task = %d, want 1", len(hits))
 	}
 }
 

@@ -117,7 +117,7 @@ func TestSoRWrite_Integration(t *testing.T) {
 	t.Run("RawWrite", func(t *testing.T) {
 		b := binding("tctest", "main", "pbd_raw_")
 		d := newPGTestDaemon(t, b)
-		d.osBase, d.osClient, d.osExport = osc, osc, osc
+		d.osBase, d.osClient = osc, osc
 		d.pgBaseDSN = baseDSN
 		if err := d.buildBindingDeps(); err != nil {
 			t.Fatalf("buildBindingDeps: %v", err)
@@ -154,7 +154,7 @@ func TestSoRWrite_Integration(t *testing.T) {
 	t.Run("SynthWrite", func(t *testing.T) {
 		b := binding("tctest", "main", "pbd_synth_")
 		d := newPGTestDaemon(t, b)
-		d.osBase, d.osClient, d.osExport = osc, osc, osc
+		d.osBase, d.osClient = osc, osc
 		d.pgBaseDSN = baseDSN
 		if err := d.buildBindingDeps(); err != nil {
 			t.Fatalf("buildBindingDeps: %v", err)
@@ -231,7 +231,7 @@ func TestSoRWrite_Integration(t *testing.T) {
 		// raw write never landed; a re-enqueue reconciles).
 		b := binding("tctest", "main", "pbd_miss_")
 		d := newPGTestDaemon(t, b)
-		d.osBase, d.osClient, d.osExport = osc, osc, osc
+		d.osBase, d.osClient = osc, osc
 		d.pgBaseDSN = baseDSN
 		if err := d.buildBindingDeps(); err != nil {
 			t.Fatalf("buildBindingDeps: %v", err)

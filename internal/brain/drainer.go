@@ -105,25 +105,6 @@ func dispatch(ctx context.Context, client *Client, it *wqueue.Item) error {
 	}
 }
 
-// refreshSnapshotBuiltAt polls the daemon's /api/brain/snapshot/current
-// and updates the Lifecycle's snapshotBuiltAt with the current gen's
-// build time. Cheap (one small JSON GET); ignores errors — connectivity
-// state from DrainOnce already covers the "daemon's gone" UX.
-func (l *Lifecycle) refreshSnapshotBuiltAt(ctx context.Context) {
-	if l == nil || l.client == nil {
-		return
-	}
-	mf, err := l.client.GetCurrentSnapshot(ctx)
-	if err != nil || mf == nil || mf.BuiltAt == "" {
-		return
-	}
-	t, perr := time.Parse(time.RFC3339, mf.BuiltAt)
-	if perr != nil {
-		return
-	}
-	l.SetSnapshotBuiltAt(t)
-}
-
 // runDrainer is the per-Lifecycle background goroutine. Polls every
 // DefaultDrainInterval; calls DrainOnce; sweeps orphan staging files
 // once per cycle. Exits on ctx cancellation.
@@ -147,10 +128,6 @@ func (l *Lifecycle) runDrainer(ctx context.Context) {
 				l.logger.Warn("phantom-brain: wqueue cleanup failed",
 					slog.String("err", err.Error()))
 			}
-			// Refresh snapshot metadata so brain_recall's staleness
-			// footer reflects daemon-side rebuilds without requiring
-			// a mid-session full snapshot re-pull (Phase 7).
-			l.refreshSnapshotBuiltAt(ctx)
 		}
 	}
 }

@@ -17,9 +17,22 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/neverprepared/phantom-brain/internal/brain"
-	"github.com/neverprepared/phantom-brain/internal/index"
 	"github.com/neverprepared/phantom-brain/internal/working"
 )
+
+// Embedder is the minimal interface the MCP write tools need from an
+// embedding backend. Production wires *internal/ollama.Client; tests
+// pass a deterministic fake. Phase D2b: the local sqlite-vec read cache
+// package was removed, so this interface now lives here rather
+// than being borrowed from that package. brain_perceive / brain_learn /
+// brain_attach embed the content to send to the daemon; brain_recall
+// embeds the query.
+type Embedder interface {
+	// Dims returns the embedding dimensionality.
+	Dims() int
+	// Embed returns one vector per input string.
+	Embed(ctx context.Context, inputs []string) ([][]float32, error)
+}
 
 // recallClient is the minimal seam handleRecall needs from the daemon
 // HTTP client for online recall. *brain.Client satisfies it; tests
@@ -39,10 +52,6 @@ type fetchClient interface {
 // ServerDeps is the dependency container the MCP tool handlers close
 // over.
 type ServerDeps struct {
-	// Index is the per-brain vectors.db handle. Tools that read or
-	// write the vector + FTS5 search index go through it.
-	Index *index.Index
-
 	// Working is the per-process working memory database. The
 	// task_* tools own most of its surface; brain_* tools may
 	// optionally log into it.
@@ -50,7 +59,7 @@ type ServerDeps struct {
 
 	// Embedder is whatever produces embedding vectors for text. In
 	// production this is *internal/ollama.Client; tests pass a fake.
-	Embedder index.Embedder
+	Embedder Embedder
 
 	// VaultDir is the absolute path to the brain's vault/ dir —
 	// where Wiki/, Raw/{gathered,curated,attachments}/, _queue/

@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -214,58 +213,6 @@ func (d *Daemon) handleMergeStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound,
 		"brain_id not pending and not merged", nil)
-}
-
-// --- POST /birth/claim -----------------------------------------------
-
-type birthClaimRequest struct {
-	BrainID string `json:"brain_id"`
-	Gen     uint64 `json:"gen"`
-	TTLSecs int    `json:"ttl_secs,omitempty"`
-}
-
-// handleBirthClaim drops a .claims/<brain_id> marker under
-// staged/snapshot-<gen>/ so the snapshot prune logic knows that gen
-// is in use. Returns 409 STALE_SNAPSHOT if the gen has already been
-// pruned (it would be a race with retention; the brain should re-call
-// snapshot/current and try the new gen).
-func (d *Daemon) handleBirthClaim(w http.ResponseWriter, r *http.Request) {
-	binding, _ := BindingFromContext(r.Context())
-	var req birthClaimRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid JSON body", nil)
-		return
-	}
-	if req.BrainID == "" || req.Gen == 0 {
-		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, "brain_id + gen required", nil)
-		return
-	}
-	stagedGen := filepath.Join(d.DataDir.StagedDir(binding.Key.Profile, binding.Key.Vault),
-		fmt.Sprintf("snapshot-%d", req.Gen))
-	if _, err := os.Stat(stagedGen); errors.Is(err, os.ErrNotExist) {
-		WriteErrorEnvelope(w, http.StatusConflict, ErrCodeStaleSnapshot,
-			fmt.Sprintf("snapshot gen %d has been pruned; re-fetch snapshot/current", req.Gen), nil)
-		return
-	}
-	claimsDir := filepath.Join(stagedGen, ".claims")
-	if err := os.MkdirAll(claimsDir, 0o755); err != nil {
-		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeInternal, err.Error(), nil)
-		return
-	}
-	marker := filepath.Join(claimsDir, req.BrainID)
-	if err := os.WriteFile(marker, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o644); err != nil {
-		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeInternal, err.Error(), nil)
-		return
-	}
-	ttl := req.TTLSecs
-	if ttl < 3600 {
-		ttl = 3600
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"brain_id": req.BrainID,
-		"gen":      req.Gen,
-		"expires":  time.Now().Add(time.Duration(ttl) * time.Second).Unix(),
-	})
 }
 
 // --- maintenance ------------------------------------------------------

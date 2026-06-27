@@ -69,9 +69,8 @@ Idempotent: stubs are keyed by the AttachmentDoc's SHA, so re-running
 against an already-backfilled vault is a no-op (each candidate is
 checked via GetSummary before write).
 
-Run once per vault after upgrading the daemon to v2.5.1. Then either
-restart the daemon (snapshot rebuild on next write) or trigger one
-manually so agents pull a snapshot that contains the new stubs.`,
+Run once per vault after upgrading the daemon to v2.5.1. The new stubs
+become visible to online brain_recall once the daemon synthesises them.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if profile == "" || vault == "" {
 				return errors.New("--profile and --vault are required")

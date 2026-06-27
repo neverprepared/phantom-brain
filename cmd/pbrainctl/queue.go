@@ -39,8 +39,8 @@ func clientQueueCmd() *cobra.Command {
 		Long: `The agent write-ahead queue persists writes that couldn't reach the
 daemon synchronously. Items remain in the queue until the drainer
 posts them successfully; queued items are deliberately invisible to
-brain_recall until the daemon synthesises them and the next snapshot
-ships.
+brain_recall until the drainer syncs them and the daemon synthesises
+them into its online store.
 
   queue list                 print queued items, newest first
   queue drain-now            attempt one synchronous drain pass

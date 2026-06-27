@@ -11,7 +11,8 @@ import (
 // brain_forget (issue #72, Phase 1). The apply half of
 // propose-then-apply: delete one long-term summary by SHA. The SHA is
 // the handle — typically one the operator copied out of brain_reflect.
-// The daemon deletes the doc and triggers a snapshot rebuild.
+// The daemon deletes the doc; the removal takes effect on the next
+// online recall (Phase D2b: recall reads the daemon's Postgres SoR).
 //
 // Forget is a delete, not an ingest — it does NOT go through the
 // write-ahead queue. (If the daemon is unreachable the call simply
@@ -20,8 +21,8 @@ func forgetTool() mcp.Tool {
 	return mcp.NewTool("brain_forget",
 		mcp.WithDescription(
 			`Delete one long-term-memory summary by SHA (the apply step of brain_reflect). `+
-				`Pass the SHA of an approved forget-candidate. The doc won't disappear from `+
-				`brain_recall until a new snapshot publishes and a fresh brain births.`,
+				`Pass the SHA of an approved forget-candidate. The delete takes effect on the `+
+				`next online brain_recall against the daemon.`,
 		),
 		mcp.WithString("sha",
 			mcp.Required(),
@@ -45,8 +46,8 @@ func (s *Server) handleForget(ctx context.Context, req mcp.CallToolRequest) (*mc
 		return mcp.NewToolResultError(fmt.Sprintf("brain_forget: %v", err)), nil
 	}
 	return mcp.NewToolResultText(fmt.Sprintf(
-		"brain_forget: forgot %s.\nNote: it stays visible to brain_recall until a new snapshot "+
-			"publishes and a fresh brain births (the local read cache is snapshot-canonical).",
+		"brain_forget: forgot %s.\nNote: the removal takes effect on the next online "+
+			"brain_recall against the daemon's Postgres store.",
 		resp.SHA,
 	)), nil
 }

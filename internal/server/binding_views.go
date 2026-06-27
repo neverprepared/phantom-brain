@@ -41,7 +41,7 @@ func newOSBindingView(base *osearch.Client, prefix string) *osBindingView {
 
 // Client returns the underlying prefixed *osearch.Client. Used by
 // callers that need to invoke methods not on the osWriter slice
-// (notably Export + ScrollAttachments + Refresh).
+// (notably ScrollAttachments + Refresh).
 func (v *osBindingView) Client() *osearch.Client { return v.client }
 
 // --- osWriter ----------------------------------------------------------
@@ -74,12 +74,6 @@ func (v *osBindingView) DeleteSummary(ctx context.Context, profile, vault, sha s
 }
 func (v *osBindingView) ScrollSummaries(ctx context.Context, profile, vault string, batchSize int, fn func(osearch.SummaryDoc) error) error {
 	return v.client.ScrollSummaries(ctx, profile, vault, batchSize, fn)
-}
-
-// --- osExporter --------------------------------------------------------
-
-func (v *osBindingView) Export(ctx context.Context, opts osearch.ExportOptions) (osearch.ExportManifest, error) {
-	return v.client.Export(ctx, opts)
 }
 
 // --- AttachmentStore (per-binding bucket) ------------------------------
@@ -117,11 +111,9 @@ func (v *minioBindingView) GetAttachmentBytes(ctx context.Context, key string, m
 //
 // OS is the osWriter interface (not the concrete *osBindingView) so
 // tests can inject in-memory fakes without bringing up an osearch
-// client. Exporter holds the concrete view for snapshot rebuilds,
-// which need the *osearch.Client surface (Export).
+// client.
 type bindingDeps struct {
 	OS       osWriter        // nil when OS is not configured
-	Exporter osExporter      // same underlying handle in production
 	Attach   AttachmentStore // nil when MinIO backend isn't wired
 
 	// PG is the Phase A per-binding Postgres view (System-of-Record +

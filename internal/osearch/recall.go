@@ -11,7 +11,7 @@ import (
 	osapi "github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 )
 
-// Hit mirrors internal/index.Hit so callers can swap recall backends.
+// Hit mirrors the legacy local-index Hit so callers can swap recall backends.
 // DocID is the OS document ID (profile/vault/key); Index identifies
 // which logical index produced the hit (pb_summaries, pb_entities,
 // pb_attachments).
@@ -24,7 +24,7 @@ type Hit struct {
 	TextRank   int
 }
 
-// rrfK matches internal/index/search.go — Cormack-Buettcher-Clarke (2009).
+// rrfK matches the legacy local-index search — Cormack-Buettcher-Clarke (2009).
 const rrfK = 60.0
 
 // RecallOptions configures a hybrid recall query.

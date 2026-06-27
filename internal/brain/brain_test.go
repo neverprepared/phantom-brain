@@ -20,14 +20,13 @@ import (
 
 func TestManifest_WriteThenRead_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	parentGen := uint64(42)
+	// Phase D2b: snapshots are gone, so the parent_gen / parent_snapshot_*
+	// manifest fields were removed; births are always greenfield.
 	want := &Manifest{
 		BrainID:              "brain-1",
 		ContributorID:        "personal/memory@host1",
 		Profile:              "personal",
 		Vault:                "memory",
-		ParentGen:            &parentGen,
-		ParentSnapshotSHA256: "abc123",
 		BornAt:               "2026-01-01T00:00:00Z",
 		Status:               StatusAlive,
 		Host:                 "host1",
@@ -51,8 +50,8 @@ func TestManifest_WriteThenRead_RoundTrip(t *testing.T) {
 	if got.BrainID != want.BrainID || got.ContributorID != want.ContributorID {
 		t.Errorf("identity mismatch: got %+v", got)
 	}
-	if got.ParentGen == nil || *got.ParentGen != 42 {
-		t.Errorf("ParentGen round-trip lost: got %v", got.ParentGen)
+	if got.SeedSource != SeedGreenfield {
+		t.Errorf("SeedSource round-trip lost: got %v", got.SeedSource)
 	}
 }
 
@@ -206,12 +205,10 @@ func TestBirth_Greenfield_AllocatesUUIDAndWritesManifest(t *testing.T) {
 			t.Errorf("expected directory %s, err=%v", sub, err)
 		}
 	}
-	// Phase 2.5: snapshot fetch attempts the daemon and degrades to
-	// greenfield on failure (which happens here because CL_BRAIN_API
-	// points at example.invalid). The fallback message is what
-	// operators see when their daemon is unreachable.
-	if !strings.Contains(buf.String(), "snapshot fetch failed") {
-		t.Errorf("expected snapshot-failure warning in logs, got: %s", buf.String())
+	// Phase D2b: birth no longer contacts the daemon for a snapshot —
+	// it is always greenfield, so there is no snapshot-fetch warning.
+	if strings.Contains(buf.String(), "snapshot") {
+		t.Errorf("birth should not mention snapshots anymore, got: %s", buf.String())
 	}
 }
 

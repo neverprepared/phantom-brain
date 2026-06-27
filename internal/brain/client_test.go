@@ -8,8 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"strings"
 	"testing"
 )
 
@@ -25,66 +23,23 @@ func TestNewClient_RequiresFields(t *testing.T) {
 	}
 }
 
-func TestClient_GetCurrentSnapshot(t *testing.T) {
-	want := SnapshotManifestResponse{Profile: "p", Vault: "v", Gen: 7, SHA256: "abc", SizeBytes: 100}
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/brain/snapshot/current" {
-			t.Errorf("path = %q", r.URL.Path)
-		}
-		if r.Header.Get("Authorization") != "Bearer tok" {
-			t.Errorf("missing bearer; got %q", r.Header.Get("Authorization"))
-		}
-		_ = json.NewEncoder(w).Encode(want)
-	}))
-	defer ts.Close()
-	c, _ := NewClient(ClientOpts{BaseURL: ts.URL, Token: "tok"})
-	got, err := c.GetCurrentSnapshot(context.Background())
-	if err != nil {
-		t.Fatalf("GetCurrentSnapshot: %v", err)
-	}
-	if got.Gen != 7 || got.SHA256 != "abc" {
-		t.Errorf("got %+v", got)
-	}
-}
-
-func TestClient_DownloadSnapshotTarball_SHAVerify(t *testing.T) {
-	body := []byte("fake-tarball-bytes")
-	// SHA of body (precomputed once for the test).
-	// echo -n "fake-tarball-bytes" | sha256sum
-	wantSHA := "2579179b569448f4025b6d6dd852f00ffff49c9f29d54c17cd9a4f762df403eb"
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(body)
-	}))
-	defer ts.Close()
-	c, _ := NewClient(ClientOpts{BaseURL: ts.URL, Token: "tok"})
-
-	// Happy path with correct expected SHA.
-	var buf bytes.Buffer
-	n, err := c.DownloadSnapshotTarball(context.Background(), 1, wantSHA, &buf)
-	if err != nil {
-		t.Fatalf("Download: %v", err)
-	}
-	if n != int64(len(body)) {
-		t.Errorf("size = %d, want %d", n, len(body))
-	}
-
-	// Wrong SHA → error.
-	buf.Reset()
-	_, err = c.DownloadSnapshotTarball(context.Background(), 1, "deadbeef"+wantSHA[8:], &buf)
-	if err == nil || !strings.Contains(err.Error(), "sha mismatch") {
-		t.Errorf("expected sha mismatch, got %v", err)
-	}
-}
+// Phase D2b: the snapshot client methods (GetCurrentSnapshot,
+// DownloadSnapshotTarball, ClaimBirth) and SnapshotManifestResponse were
+// removed with the snapshot machinery. Their tests
+// (TestClient_GetCurrentSnapshot, TestClient_DownloadSnapshotTarball_SHAVerify,
+// TestSnapcache_FetchFromDaemonHappyPath) are gone. The error-envelope
+// decoding they exercised is retained below, now driven through a live
+// POST method (Forget).
 
 func TestClient_APIErrorEnvelopeDecoded(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
-		_, _ = io.WriteString(w, `{"error":{"code":"STALE_SNAPSHOT","message":"gone","details":{"gen":42}}}`)
+		_, _ = io.WriteString(w, `{"error":{"code":"CONFLICT","message":"gone","details":{"sha":"x"}}}`)
 	}))
 	defer ts.Close()
 	c, _ := NewClient(ClientOpts{BaseURL: ts.URL, Token: "tok"})
-	err := c.ClaimBirth(context.Background(), "brain-1", 42, 60)
+	_, err := c.Forget(context.Background(), "sha-1")
 	if err == nil {
 		t.Fatal("expected err")
 	}
@@ -92,10 +47,10 @@ func TestClient_APIErrorEnvelopeDecoded(t *testing.T) {
 	if !errors.As(err, &apiErr) {
 		t.Fatalf("err is not *APIError: %T %v", err, err)
 	}
-	if apiErr.Code != "STALE_SNAPSHOT" || apiErr.StatusCode != http.StatusConflict {
+	if apiErr.Code != "CONFLICT" || apiErr.StatusCode != http.StatusConflict {
 		t.Errorf("got %+v", apiErr)
 	}
-	if !IsAPIErrorCode(err, "STALE_SNAPSHOT") {
+	if !IsAPIErrorCode(err, "CONFLICT") {
 		t.Error("IsAPIErrorCode should match")
 	}
 }
@@ -220,38 +175,3 @@ func TestClient_Fetch_NotFound(t *testing.T) {
 // ShipQueue + /merge tests removed in Phase 6 — agents POST writes
 // to the daemon during life, so death produces no payload and the
 // /merge handshake is retired.
-
-func TestSnapcache_FetchFromDaemonHappyPath(t *testing.T) {
-	// Build a tiny tar.zst that extractSnapshotTarball can chew on.
-	// We don't actually extract here — we only verify FetchSnapshotFromDaemon
-	// downloads + caches the tarball + writes the metadata sidecar.
-	body := []byte("fake-tarball-bytes")
-	wantSHA := "2579179b569448f4025b6d6dd852f00ffff49c9f29d54c17cd9a4f762df403eb"
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/brain/snapshot/current", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(SnapshotManifestResponse{
-			Profile: "personal", Vault: "memory", Gen: 5, SHA256: wantSHA, SizeBytes: int64(len(body)),
-		})
-	})
-	mux.HandleFunc("/api/brain/snapshot/5/tarball", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write(body)
-	})
-	ts := httptest.NewServer(mux)
-	defer ts.Close()
-
-	agent := agentForTest(t)
-	agent.API = ts.URL
-
-	cs, err := FetchSnapshotFromDaemon(context.Background(), agent, nil)
-	if err != nil {
-		t.Fatalf("FetchSnapshotFromDaemon: %v", err)
-	}
-	if cs == nil || cs.Gen != 5 {
-		t.Fatalf("got %+v", cs)
-	}
-	// Tarball should exist on disk under SnapshotCacheDir.
-	if data, err := os.ReadFile(cs.TarballPath); err != nil || !bytes.Equal(data, body) {
-		t.Errorf("cached tarball mismatch: err=%v len=%d", err, len(data))
-	}
-}

@@ -129,9 +129,10 @@ func seedLegacy(ctx context.Context, t *testing.T, osc *osearch.Client, prefix, 
 	// Create the legacy indices with their real mappings (knn_vector
 	// embedding etc.) BEFORE writing docs — otherwise OS auto-maps
 	// `embedding` as long from the first numeric and rejects the vectors.
-	if err := osc.EnsurePrefixes(ctx, []string{prefix}); err != nil {
-		t.Fatalf("ensure legacy indices: %v", err)
-	}
+	// Phase D2b: the EnsureIndices* wrappers + legacy mappings were removed
+	// from production; create the indices for this migration test via the
+	// retained EnsureIndexWithMapping primitive with inline mappings.
+	ensureLegacyIndicesForTest(ctx, t, osc, prefix)
 	now := time.Now().UTC()
 	s := seeded{
 		synthSHA:    sha("a1"),
@@ -459,4 +460,78 @@ func hasSHA(hits []osproject.RecallHit, sha string) bool {
 		}
 	}
 	return false
+}
+
+// ensureLegacyIndicesForTest creates the legacy pb_summaries / pb_entities /
+// pb_attachments indices under prefix with knn_vector embedding mappings,
+// using the retained osearch.Client.EnsureIndexWithMapping primitive. The
+// legacy mappings live here (test-only) because Phase D2b removed them from
+// production — they are only needed to stage a corpus for the migration test.
+func ensureLegacyIndicesForTest(ctx context.Context, t *testing.T, osc *osearch.Client, prefix string) {
+	t.Helper()
+	knn := map[string]any{
+		"type":      "knn_vector",
+		"dimension": osearch.EmbeddingDim,
+		"method": map[string]any{
+			"name":       "hnsw",
+			"space_type": "cosinesimil",
+			"engine":     "lucene",
+			"parameters": map[string]any{"ef_construction": 128, "m": 16},
+		},
+	}
+	settings := map[string]any{
+		"index": map[string]any{
+			"knn":                true,
+			"number_of_shards":   1,
+			"number_of_replicas": 0,
+			"refresh_interval":   "1s",
+		},
+	}
+	mk := func(props map[string]any) map[string]any {
+		props["embedding"] = knn
+		return map[string]any{"settings": settings, "mappings": map[string]any{"properties": props}}
+	}
+	indices := []struct {
+		logical string
+		mapping map[string]any
+	}{
+		{osearch.IndexSummaries, mk(map[string]any{
+			"profile": map[string]any{"type": "keyword"}, "vault": map[string]any{"type": "keyword"},
+			"sha": map[string]any{"type": "keyword"}, "kind": map[string]any{"type": "keyword"},
+			"memory_type": map[string]any{"type": "keyword"}, "source_path": map[string]any{"type": "keyword"},
+			"source_url": map[string]any{"type": "keyword"}, "source": map[string]any{"type": "keyword"},
+			"created_at": map[string]any{"type": "date"}, "updated_at": map[string]any{"type": "date"},
+			"captured_at": map[string]any{"type": "date"}, "title": map[string]any{"type": "text"},
+			"body": map[string]any{"type": "text"}, "raw_body": map[string]any{"type": "text"},
+			"tags": map[string]any{"type": "keyword"}, "topic": map[string]any{"type": "keyword"},
+			"reliability": map[string]any{"type": "keyword"}, "entities": map[string]any{"type": "keyword"},
+			"attachments": map[string]any{"type": "keyword"}, "references": map[string]any{"type": "keyword"},
+			"capture_minio_key": map[string]any{"type": "keyword"}, "capture_size_bytes": map[string]any{"type": "long"},
+			"synthesised": map[string]any{"type": "boolean"},
+		})},
+		{osearch.IndexEntities, mk(map[string]any{
+			"profile": map[string]any{"type": "keyword"}, "vault": map[string]any{"type": "keyword"},
+			"slug": map[string]any{"type": "keyword"}, "name": map[string]any{"type": "text"},
+			"aliases": map[string]any{"type": "keyword"}, "body": map[string]any{"type": "text"},
+			"tags": map[string]any{"type": "keyword"}, "topic": map[string]any{"type": "keyword"},
+			"mentioned_by": map[string]any{"type": "keyword"}, "created_at": map[string]any{"type": "date"},
+			"updated_at": map[string]any{"type": "date"},
+		})},
+		{osearch.IndexAttachments, mk(map[string]any{
+			"profile": map[string]any{"type": "keyword"}, "vault": map[string]any{"type": "keyword"},
+			"sha": map[string]any{"type": "keyword"}, "kind": map[string]any{"type": "keyword"},
+			"memory_type": map[string]any{"type": "keyword"}, "original_filename": map[string]any{"type": "text"},
+			"title": map[string]any{"type": "text"}, "mime_type": map[string]any{"type": "keyword"},
+			"size_bytes": map[string]any{"type": "long"}, "created_at": map[string]any{"type": "date"},
+			"captured_at": map[string]any{"type": "date"}, "minio_key": map[string]any{"type": "keyword"},
+			"extracted_text": map[string]any{"type": "text"}, "summary_sha": map[string]any{"type": "keyword"},
+			"source": map[string]any{"type": "keyword"}, "references": map[string]any{"type": "keyword"},
+			"tags": map[string]any{"type": "keyword"},
+		})},
+	}
+	for _, idx := range indices {
+		if err := osc.EnsureIndexWithMapping(ctx, prefix, idx.logical, idx.mapping); err != nil {
+			t.Fatalf("ensure legacy %s: %v", idx.logical, err)
+		}
+	}
 }

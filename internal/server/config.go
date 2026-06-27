@@ -112,8 +112,6 @@ func (c OpenSearchConfig) Enabled() bool { return len(c.Addresses) > 0 }
 // profiles/{p}/vaults/{v}/config.toml; nonzero fields there override
 // the global defaults.
 type VaultDefaults struct {
-	RetentionGens                 int   `toml:"retention_gens"`
-	SnapshotRebuildDebounceSecs   int   `toml:"snapshot_rebuild_debounce_secs"`
 	ReaperPollIntervalSecs        int   `toml:"reaper_poll_interval_secs"`
 	MaxTarballBytes               int64 `toml:"max_tarball_bytes"`
 	MaxUncompressedBytes          int64 `toml:"max_uncompressed_bytes"`
@@ -154,12 +152,6 @@ func applyServerDefaults(cfg *ServerConfig) {
 		cfg.Storage.Backend = "local"
 	}
 	d := &cfg.Defaults
-	if d.RetentionGens == 0 {
-		d.RetentionGens = 30
-	}
-	if d.SnapshotRebuildDebounceSecs == 0 {
-		d.SnapshotRebuildDebounceSecs = 300
-	}
 	if d.ReaperPollIntervalSecs == 0 {
 		d.ReaperPollIntervalSecs = 5
 	}
@@ -178,8 +170,6 @@ func applyServerDefaults(cfg *ServerConfig) {
 // Every field is optional — only nonzero values override the global
 // defaults via MergedDefaults.
 type VaultOverrides struct {
-	RetentionGens                int   `toml:"retention_gens"`
-	SnapshotRebuildDebounceSecs  int   `toml:"snapshot_rebuild_debounce_secs"`
 	ReaperPollIntervalSecs       int   `toml:"reaper_poll_interval_secs"`
 	MaxTarballBytes              int64 `toml:"max_tarball_bytes"`
 	MaxUncompressedBytes         int64 `toml:"max_uncompressed_bytes"`
@@ -271,12 +261,6 @@ func LoadVaultFiles(configDir, profile, vault string) (VaultOverrides, VaultAuth
 // sense in this domain).
 func MergedDefaults(global VaultDefaults, overrides VaultOverrides) VaultDefaults {
 	out := global
-	if overrides.RetentionGens != 0 {
-		out.RetentionGens = overrides.RetentionGens
-	}
-	if overrides.SnapshotRebuildDebounceSecs != 0 {
-		out.SnapshotRebuildDebounceSecs = overrides.SnapshotRebuildDebounceSecs
-	}
 	if overrides.ReaperPollIntervalSecs != 0 {
 		out.ReaperPollIntervalSecs = overrides.ReaperPollIntervalSecs
 	}

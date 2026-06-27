@@ -102,7 +102,6 @@ func TestRecallEndpoint_Integration(t *testing.T) {
 	d := newPGTestDaemon(t, b)
 	d.osBase = osc
 	d.osClient = osc
-	d.osExport = osc
 	d.pgBaseDSN = baseDSN
 
 	d.buildBindingDeps()
@@ -167,7 +166,6 @@ func TestRecallEndpoint_Integration(t *testing.T) {
 		d2 := newPGTestDaemon(t, nopg)
 		d2.osBase = osc
 		d2.osClient = osc
-		d2.osExport = osc
 		// pgBaseDSN intentionally empty ⇒ PG disabled.
 		d2.buildBindingDeps()
 

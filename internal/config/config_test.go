@@ -246,9 +246,6 @@ func TestPathsUseXDGDataHome(t *testing.T) {
 	if a.BrainDir("xyz") != want+"/brains/xyz" {
 		t.Errorf("BrainDir(xyz) = %q", a.BrainDir("xyz"))
 	}
-	if a.SnapshotCacheDir() != want+"/_snapshot-cache" {
-		t.Errorf("SnapshotCacheDir = %q", a.SnapshotCacheDir())
-	}
 	if a.ShipPendingDir() != want+"/_pending" {
 		t.Errorf("ShipPendingDir = %q", a.ShipPendingDir())
 	}

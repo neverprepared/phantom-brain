@@ -16,9 +16,7 @@ import (
 	"github.com/neverprepared/phantom-brain/internal/brain"
 	"github.com/neverprepared/phantom-brain/internal/brain/wqueue"
 	"github.com/neverprepared/phantom-brain/internal/canonicalize"
-	"github.com/neverprepared/phantom-brain/internal/index"
 	"github.com/neverprepared/phantom-brain/internal/osearch"
-	"github.com/neverprepared/phantom-brain/internal/vault"
 )
 
 // attachTool defines the brain_attach MCP tool schema.
@@ -109,74 +107,29 @@ func (s *Server) handleAttach(ctx context.Context, req mcp.CallToolRequest) (*mc
 	blobSHA := hex.EncodeToString(h[:])
 
 	ext := strings.ToLower(filepath.Ext(filePath))
-	blobName := blobSHA + ext
-	blobRel := filepath.Join("Raw", "attachments", blobName)
-	blobAbs := filepath.Join(s.deps.VaultDir, blobRel)
-	stubRel := filepath.Join("Raw", "attachments", blobSHA+".md")
-	stubAbs := filepath.Join(s.deps.VaultDir, stubRel)
 
-	// Build the stub markdown first so its canonical SHA is the
-	// index key (consistent with how brain_perceive / brain_learn key
-	// off the rendered markdown SHA). The blob SHA goes into
-	// frontmatter as metadata.
-	fm := map[string]any{
-		"title":       title,
-		"attached_at": time.Now().UTC().Format(time.RFC3339),
-		"blob_sha":    blobSHA,
-		"blob_path":   blobRel,
-		"bytes":       st.Size(),
-	}
-	if sourceURL != "" {
-		fm["source_url"] = sourceURL
-	}
-	if ext != "" {
-		fm["ext"] = ext
-	}
-
-	doc := &vault.Document{Frontmatter: fm, Body: description}
-	rendered, err := doc.Render()
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("render stub: %v", err)), nil
-	}
-
-	stubSHA, err := canonicalize.Sum(rendered)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("canonicalize stub: %v", err)), nil
-	}
-
-	// Dedup by blob — bytes are content-addressed; the stub SHA
-	// depends on attached_at (RFC3339, second precision), so two
-	// back-to-back attaches that straddle a second boundary would
-	// generate different stub SHAs and bypass the index-based check.
-	// A stat on the blob path is cheap and exact.
-	if _, err := os.Stat(blobAbs); err == nil {
-		return mcp.NewToolResultText(fmt.Sprintf("Duplicate (blob already stored). Blob SHA: %s. Stub: %s.", blobSHA, stubSHA)), nil
-	}
-	if has, err := s.deps.Index.Has(stubSHA); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("index has: %v", err)), nil
-	} else if has {
-		return mcp.NewToolResultText(fmt.Sprintf("Duplicate (stub already indexed). SHA: %s. Blob: %s.", stubSHA, blobSHA)), nil
-	}
+	// Phase D2b: no local read cache, so no local stub markdown and no
+	// local dedup. The daemon builds the searchable record from the
+	// metadata + bytes below and SHA-dedups idempotently, so a re-attach
+	// lands as a benign no-op upsert daemon-side.
 
 	// Embed (title + description). Empty description doesn't trip the
 	// embedder — title-only is a valid (if weak) input.
-	if s.deps.Embedder.Dims() != s.deps.Index.Dims() {
-		return mcp.NewToolResultError(fmt.Sprintf("embedder/index dim mismatch: embedder=%d index=%d",
-			s.deps.Embedder.Dims(), s.deps.Index.Dims())), nil
-	}
 	embInput := strings.TrimSpace(title + "\n\n" + description)
 	embs, err := s.deps.Embedder.Embed(ctx, []string{embInput})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("embed: %v", err)), nil
 	}
 
-	// Phase 6: hand the blob + metadata to the daemon. Daemon stores
-	// the bytes in MinIO and indexes metadata + extracted text (if
-	// any) in OS. Day 7 keeps text extraction agent-side as empty —
-	// the daemon's gate pass can later run pdftotext/textutil on the
-	// stored blob. For now the description carries the only
-	// searchable text.
-	if client := lifecycleClient(s); client != nil {
+	// Phase D2b: writes are daemon-only. The daemon stores the bytes in
+	// MinIO and indexes metadata + extracted text (if any) in the
+	// Postgres SoR. A nil client means the agent contract isn't
+	// configured — return a clear error rather than dropping the write.
+	client := lifecycleClient(s)
+	if client == nil {
+		return mcp.NewToolResultError("daemon client not configured (set CL_BRAIN_API / CL_BRAIN_API_TOKEN); writes are daemon-only"), nil
+	}
+	{
 		mimeType := strings.TrimSpace(contentType)
 		if mimeType == "" {
 			mimeType = guessMIMEType(ext)
@@ -225,31 +178,6 @@ func (s *Server) handleAttach(ctx context.Context, req mcp.CallToolRequest) (*mc
 			st.Size(), blobSHA, res.Notice,
 		)), nil
 	}
-
-	// Legacy fallback: no daemon — old local file + index pipeline.
-	if err := vault.WriteAtomicFile(blobAbs, raw, 0o644); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("write blob: %v", err)), nil
-	}
-	if err := vault.WriteAtomicFile(stubAbs, rendered, 0o644); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("write stub: %v", err)), nil
-	}
-	if err := s.deps.Index.Upsert(ctx, index.Record{
-		SHA:        stubSHA,
-		SourcePath: stubRel,
-		Title:      title,
-		Tags:       "attachment " + strings.TrimPrefix(ext, "."),
-		Body:       description,
-		Embedding:  embs[0],
-	}); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("index upsert: %v", err)), nil
-	}
-	if s.deps.Lifecycle != nil {
-		s.deps.Lifecycle.RecordWrite()
-	}
-	return mcp.NewToolResultText(fmt.Sprintf(
-		"Attached %d bytes to %s. Stub: %s. Blob SHA: %s.",
-		st.Size(), stubRel, stubSHA, blobSHA,
-	)), nil
 }
 
 // timePtr returns a pointer to t. Used so callers can pass a non-nil

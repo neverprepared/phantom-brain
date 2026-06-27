@@ -36,7 +36,6 @@ func TestEnsureCollectiveSkeleton_Idempotent(t *testing.T) {
 		"personal/memory/collective/vault/Wiki/summaries",
 		"personal/memory/collective/vault/Raw/curated",
 		"personal/memory/collective/_index",
-		"personal/memory/collective/_published/staged",
 		"personal/memory/collective/brains/_pending",
 		"personal/memory/collective/ledger",
 	} {
@@ -78,8 +77,8 @@ port = 0
 	if cfg.Storage.Backend != "local" {
 		t.Errorf("storage backend default = %q", cfg.Storage.Backend)
 	}
-	if cfg.Defaults.RetentionGens != 30 {
-		t.Errorf("retention default = %d", cfg.Defaults.RetentionGens)
+	if cfg.Defaults.ReaperPollIntervalSecs != 5 {
+		t.Errorf("reaper poll default = %d", cfg.Defaults.ReaperPollIntervalSecs)
 	}
 }
 
@@ -90,8 +89,8 @@ port = 12345
 host = "127.0.0.1"
 
 [defaults]
-retention_gens = 50
 reaper_poll_interval_secs = 60
+max_tarball_bytes = 123456
 `)
 	cfg, err := LoadServerConfig(dir)
 	if err != nil {
@@ -100,20 +99,22 @@ reaper_poll_interval_secs = 60
 	if cfg.Server.Port != 12345 || cfg.Server.Host != "127.0.0.1" {
 		t.Errorf("explicit server values dropped: %+v", cfg.Server)
 	}
-	if cfg.Defaults.RetentionGens != 50 || cfg.Defaults.ReaperPollIntervalSecs != 60 {
+	if cfg.Defaults.ReaperPollIntervalSecs != 60 || cfg.Defaults.MaxTarballBytes != 123456 {
 		t.Errorf("explicit defaults dropped: %+v", cfg.Defaults)
 	}
 }
 
 func TestMergedDefaults_OverrideZeroLeavesGlobal(t *testing.T) {
-	g := VaultDefaults{RetentionGens: 30, ReaperPollIntervalSecs: 5}
-	o := VaultOverrides{RetentionGens: 50} // ReaperPollIntervalSecs stays zero
+	// Phase D2b: retention_gens was removed; exercise the merge with two
+	// surviving knobs — one overridden, one left zero (keeps the global).
+	g := VaultDefaults{ReaperPollIntervalSecs: 5, MaxTarballBytes: 99}
+	o := VaultOverrides{ReaperPollIntervalSecs: 50} // MaxTarballBytes stays zero
 	out := MergedDefaults(g, o)
-	if out.RetentionGens != 50 {
-		t.Errorf("override not applied: %d", out.RetentionGens)
+	if out.ReaperPollIntervalSecs != 50 {
+		t.Errorf("override not applied: %d", out.ReaperPollIntervalSecs)
 	}
-	if out.ReaperPollIntervalSecs != 5 {
-		t.Errorf("zero override clobbered global: %d", out.ReaperPollIntervalSecs)
+	if out.MaxTarballBytes != 99 {
+		t.Errorf("zero override clobbered global: %d", out.MaxTarballBytes)
 	}
 }
 
@@ -143,10 +144,10 @@ func seedVault(t *testing.T, configDir, profile, vault, overrides string) string
 func TestRegistry_LoadAndLookup(t *testing.T) {
 	dir := t.TempDir()
 	tokA := seedVault(t, dir, "personal", "memory", "")
-	tokB := seedVault(t, dir, "work", "core", "retention_gens = 100\n")
+	tokB := seedVault(t, dir, "work", "core", "reaper_poll_interval_secs = 100\n")
 
 	r := NewRegistry()
-	n, err := r.Load(LoadOpts{ConfigDir: dir, Defaults: VaultDefaults{RetentionGens: 30}})
+	n, err := r.Load(LoadOpts{ConfigDir: dir, Defaults: VaultDefaults{ReaperPollIntervalSecs: 5}})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -158,7 +159,7 @@ func TestRegistry_LoadAndLookup(t *testing.T) {
 		t.Errorf("token A lookup failed: %+v", a)
 	}
 	b, ok := r.LookupByToken(tokB)
-	if !ok || b.Defaults.RetentionGens != 100 {
+	if !ok || b.Defaults.ReaperPollIntervalSecs != 100 {
 		t.Errorf("token B overrides not applied: %+v", b.Defaults)
 	}
 }

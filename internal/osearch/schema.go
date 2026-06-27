@@ -12,66 +12,18 @@ import (
 	osapi "github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 )
 
-// EnsureIndices is idempotent: creates pb_summaries, pb_entities,
-// pb_attachments with the schemas defined below if they don't exist.
-// Called once at daemon startup. Returns the first error encountered;
-// no rollback — a partial create leaves the cluster in a usable but
-// degraded state and the next startup completes it.
-//
-// Mappings:
-//   - profile/vault: keyword, for term filters
-//   - sha/slug: keyword, doc-ID hint
-//   - title/body/raw_body/extracted_text: text with standard analyser
-//     + fields.raw keyword sub-field for exact-match lookups
-//   - tags/entities/attachments/mentioned_by/aliases: keyword arrays
-//   - topic/reliability: keyword (low-cardinality, faceted)
-//   - embedding: knn_vector with HNSW, cosine similarity, dim=768
-//   - created_at/updated_at: date
-//   - size_bytes: long
-func (c *Client) EnsureIndices(ctx context.Context) error {
-	return c.EnsureIndicesWithPrefix(ctx, c.prefix)
-}
+// Phase D2b: the legacy create-if-missing entry points (EnsureIndices /
+// EnsureIndicesWithPrefix / EnsurePrefixes) and the pb_summaries /
+// pb_entities / pb_attachments mappings were removed — those indices are
+// no longer written. The lower-level ensureIndex create-if-missing
+// helper remains: it is the engine behind generic.go's
+// EnsureIndexWithMapping, which the pb_records projection
+// (internal/osproject) uses to ensure its index at startup.
 
-// EnsureIndicesWithPrefix runs the same idempotent create-if-missing
-// pass as EnsureIndices, but resolves index names against the
-// supplied prefix instead of the client's stored default. Daemon
-// startup calls this once per distinct binding prefix so every
-// (profile, vault) backed by an override gets its own physical
-// indices created before HTTP serves.
-func (c *Client) EnsureIndicesWithPrefix(ctx context.Context, prefix string) error {
-	for _, idx := range []struct {
-		logical string
-		mapping map[string]any
-	}{
-		{IndexSummaries, summariesMapping()},
-		{IndexEntities, entitiesMapping()},
-		{IndexAttachments, attachmentsMapping()},
-	} {
-		if err := c.ensureIndex(ctx, prefix, idx.logical, idx.mapping); err != nil {
-			return fmt.Errorf("ensure %s: %w", idx.logical, err)
-		}
-	}
-	return nil
-}
-
-// EnsurePrefixes ensures the index set exists for every distinct
-// prefix in the supplied slice. Duplicates are dropped; order is
-// irrelevant. Used by daemon startup once the binding registry is
-// loaded.
-func (c *Client) EnsurePrefixes(ctx context.Context, prefixes []string) error {
-	seen := make(map[string]struct{}, len(prefixes))
-	for _, p := range prefixes {
-		if _, ok := seen[p]; ok {
-			continue
-		}
-		seen[p] = struct{}{}
-		if err := c.EnsureIndicesWithPrefix(ctx, p); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
+// ensureIndex is the idempotent create-if-missing primitive. It resolves
+// the physical index name from prefix + logical, probes for existence,
+// and creates it with the supplied mapping when absent. Tolerates the
+// concurrent-create race (two daemons probing then creating).
 func (c *Client) ensureIndex(ctx context.Context, prefix, logical string, mapping map[string]any) error {
 	name := IndexNameWithPrefix(prefix, logical)
 
@@ -172,125 +124,4 @@ func statusFromErr(err error) int {
 		n = n*10 + int(ch-'0')
 	}
 	return n
-}
-
-// commonSettings enables k-NN at the index level (required for the
-// knn_vector field type) and uses sane defaults for a single-node
-// dev cluster.
-func commonSettings() map[string]any {
-	return map[string]any{
-		"index": map[string]any{
-			"knn":                  true,
-			"number_of_shards":     1,
-			"number_of_replicas":   0,
-			"refresh_interval":     "1s",
-		},
-	}
-}
-
-func textWithRawKeyword() map[string]any {
-	return map[string]any{
-		"type": "text",
-		"fields": map[string]any{
-			"raw": map[string]any{"type": "keyword", "ignore_above": 256},
-		},
-	}
-}
-
-func knnVectorField() map[string]any {
-	return map[string]any{
-		"type":      "knn_vector",
-		"dimension": EmbeddingDim,
-		"method": map[string]any{
-			"name":       "hnsw",
-			"space_type": "cosinesimil",
-			"engine":     "lucene",
-			"parameters": map[string]any{"ef_construction": 128, "m": 16},
-		},
-	}
-}
-
-func summariesMapping() map[string]any {
-	return map[string]any{
-		"settings": commonSettings(),
-		"mappings": map[string]any{
-			"properties": map[string]any{
-				"profile":     map[string]any{"type": "keyword"},
-				"vault":       map[string]any{"type": "keyword"},
-				"sha":         map[string]any{"type": "keyword"},
-				"kind":        map[string]any{"type": "keyword"},
-				"memory_type": map[string]any{"type": "keyword"},
-				"source_path": map[string]any{"type": "keyword"},
-				"source_url":  map[string]any{"type": "keyword"},
-				"source":      map[string]any{"type": "keyword"},
-				"created_at":  map[string]any{"type": "date"},
-				"updated_at":  map[string]any{"type": "date"},
-				"captured_at": map[string]any{"type": "date"},
-				"title":       textWithRawKeyword(),
-				"body":        map[string]any{"type": "text"},
-				"raw_body":    map[string]any{"type": "text"},
-				"tags":        map[string]any{"type": "keyword"},
-				"topic":       map[string]any{"type": "keyword"},
-				"reliability": map[string]any{"type": "keyword"},
-				"gate_reason": map[string]any{"type": "text", "index": false},
-				"entities":           map[string]any{"type": "keyword"},
-				"attachments":        map[string]any{"type": "keyword"},
-				"references":         map[string]any{"type": "keyword"},
-				"capture_minio_key":  map[string]any{"type": "keyword"},
-				"capture_size_bytes": map[string]any{"type": "long"},
-				"synthesised":        map[string]any{"type": "boolean"},
-				"embedding":          knnVectorField(),
-			},
-		},
-	}
-}
-
-func entitiesMapping() map[string]any {
-	return map[string]any{
-		"settings": commonSettings(),
-		"mappings": map[string]any{
-			"properties": map[string]any{
-				"profile":      map[string]any{"type": "keyword"},
-				"vault":        map[string]any{"type": "keyword"},
-				"slug":         map[string]any{"type": "keyword"},
-				"name":         textWithRawKeyword(),
-				"aliases":      map[string]any{"type": "keyword"},
-				"body":         map[string]any{"type": "text"},
-				"tags":         map[string]any{"type": "keyword"},
-				"topic":        map[string]any{"type": "keyword"},
-				"mentioned_by": map[string]any{"type": "keyword"},
-				"created_at":   map[string]any{"type": "date"},
-				"updated_at":   map[string]any{"type": "date"},
-				"embedding":    knnVectorField(),
-			},
-		},
-	}
-}
-
-func attachmentsMapping() map[string]any {
-	return map[string]any{
-		"settings": commonSettings(),
-		"mappings": map[string]any{
-			"properties": map[string]any{
-				"profile":           map[string]any{"type": "keyword"},
-				"vault":             map[string]any{"type": "keyword"},
-				"sha":               map[string]any{"type": "keyword"},
-				"kind":              map[string]any{"type": "keyword"},
-				"memory_type":       map[string]any{"type": "keyword"},
-				"original_filename": textWithRawKeyword(),
-				"title":             textWithRawKeyword(),
-				"mime_type":         map[string]any{"type": "keyword"},
-				"size_bytes":        map[string]any{"type": "long"},
-				"created_at":        map[string]any{"type": "date"},
-				"captured_at":       map[string]any{"type": "date"},
-				"minio_key":         map[string]any{"type": "keyword"},
-				"extracted_text":    map[string]any{"type": "text"},
-				"summary_sha":       map[string]any{"type": "keyword"},
-				"source":            map[string]any{"type": "keyword"},
-				"references":        map[string]any{"type": "keyword"},
-				"tags":              map[string]any{"type": "keyword"},
-				"embedding":         knnVectorField(),
-			},
-		},
-	}
 }

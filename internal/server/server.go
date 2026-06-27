@@ -52,12 +52,10 @@ type Daemon struct {
 	// (built at Start + on reload). Handlers / synth resolve through
 	// depsForBinding which falls back to the shared views.
 	osClient   osWriter
-	osExport   osExporter // same underlying *osearch.Client when wired
 	osBase     *osearch.Client // raw client, used to derive WithPrefix views
 	minioBase  *MinIOBackend   // raw MinIO backend, used to derive per-bucket views
 	synth      SynthQueue
 	attach     AttachmentStore
-	debouncer  *SnapshotDebouncer
 	bindings   *bindingDepCache
 
 	// Phase A (dormant): per-profile Postgres System-of-Record. pgBaseDSN
@@ -221,7 +219,6 @@ func Start(opts StartOpts) (*Daemon, error) {
 			return nil, fmt.Errorf("server: opensearch open: %w", oerr)
 		}
 		d.osClient = oc
-		d.osExport = oc
 		d.osBase = oc
 		opts.Logger.Info("phantom-brain: opensearch wired",
 			slog.Int("addresses", len(cfg.OpenSearch.Addresses)),
@@ -315,31 +312,14 @@ func Start(opts StartOpts) (*Daemon, error) {
 	}
 
 	if d.osBase != nil {
-		// Day 6: debounced snapshot rebuild. Each successful synth
-		// completion triggers Trigger; the debouncer collapses
-		// bursts into one rebuild per vault per delay window.
-		debounce := time.Duration(d.Config.Defaults.SnapshotRebuildDebounceSecs) * time.Second
-		d.debouncer = NewSnapshotDebouncer(
-			func(ctx context.Context, profile, vaultName string) error {
-				b, ok := d.registry.LookupByVault(VaultKey{Profile: profile, Vault: vaultName})
-				if !ok {
-					return fmt.Errorf("snapshot rebuild: unknown vault %s/%s", profile, vaultName)
-				}
-				exp := d.exporterForBinding(b)
-				_, err := BuildSnapshotFromOS(ctx, d.DataDir, exp, profile, vaultName, b.Defaults.RetentionGens)
-				return err
-			},
-			debounce,
-			opts.Logger,
-		)
-		d.debouncer.Start(parentCtx)
-
 		// Spawn the synth worker now that OS + Postgres are reachable.
 		// Phase D1: the worker reads raw records from the Postgres SoR
 		// and writes synth results back to it (the pb_records projection
 		// follows via River). Resolve threads the per-binding PG view +
 		// AttachmentStore in; WriteSynth persists the distilled result.
-		// OnComplete → debouncer kicks the snapshot rebuild timer.
+		// Phase D2b: there is no longer a snapshot rebuild — the
+		// projection is the canonical read path, so the worker has no
+		// OnComplete hook.
 		w := NewSynthWorker(SynthWorkerOpts{
 			Logger:  opts.Logger,
 			Capture: cfg.Capture,
@@ -360,9 +340,6 @@ func Start(opts StartOpts) (*Daemon, error) {
 				return fmt.Errorf("synth: no binding for %s/%s", profile, vaultName)
 			}
 			return d.writeSynthResult(ctx, b, profile, vaultName, sha, res)
-		}
-		w.OnComplete = func(profile, vaultName, _ string) {
-			d.debouncer.Trigger(profile, vaultName)
 		}
 		w.Start(parentCtx)
 		d.synth = w
@@ -411,10 +388,6 @@ func (d *Daemon) buildRouter() chi.Router {
 		// Everything else requires bearer auth.
 		r.Group(func(r chi.Router) {
 			r.Use(AuthMiddleware(d.registry))
-			r.Get("/snapshot/current", d.handleSnapshotCurrent)
-			r.Get("/snapshot/{gen}", d.handleSnapshotByGen)
-			r.Get("/snapshot/{gen}/tarball", d.handleSnapshotTarball)
-			r.Post("/birth/claim", d.handleBirthClaim)
 			r.Post("/merge/init", d.handleMergeInit)
 			r.Post("/merge/complete/{uploadID}", d.handleMergeComplete)
 			r.Get("/merge/{brainID}", d.handleMergeStatus)
@@ -631,7 +604,6 @@ func (d *Daemon) buildBindingDeps() error {
 		if d.osBase != nil {
 			view := newOSBindingView(d.osBase, b.Storage.IndexPrefix)
 			deps.OS = view
-			deps.Exporter = view
 		}
 		if d.minioBase != nil {
 			deps.Attach = newMinIOBindingView(d.minioBase, b.Storage.Bucket)
@@ -664,7 +636,6 @@ func (d *Daemon) depsForBinding(b VaultBinding) *bindingDeps {
 	if d.osBase != nil {
 		view := newOSBindingView(d.osBase, b.Storage.IndexPrefix)
 		deps.OS = view
-		deps.Exporter = view
 	}
 	if d.minioBase != nil {
 		deps.Attach = newMinIOBindingView(d.minioBase, b.Storage.Bucket)
@@ -672,20 +643,6 @@ func (d *Daemon) depsForBinding(b VaultBinding) *bindingDeps {
 		deps.Attach = d.attach
 	}
 	return deps
-}
-
-// exporterForBinding returns the osExporter targeting this binding's
-// resolved OS index prefix. Snapshot rebuilds need the prefixed pb_
-// indices, not the daemon-default ones.
-func (d *Daemon) exporterForBinding(b VaultBinding) osExporter {
-	if d.osBase == nil {
-		return d.osExport
-	}
-	deps := d.depsForBinding(b)
-	if deps != nil && deps.Exporter != nil {
-		return deps.Exporter
-	}
-	return d.osExport
 }
 
 // LookupBindingForTest exposes the registry's vault-keyed lookup so

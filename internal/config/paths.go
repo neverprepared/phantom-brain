@@ -36,17 +36,6 @@ func (a *Agent) BrainDir(brainID string) string {
 	return filepath.Join(a.BrainsRoot(), brainID)
 }
 
-// SnapshotCacheDir returns the per-vault directory holding the last
-// successfully fetched snapshot tarball. Used by birth's degraded-mode
-// path (Phase 3) when the daemon is unreachable; write-through happens
-// from Phase 1 so the cache is always warm before Phase 3 enables the
-// read path.
-//
-//	$XDG_DATA_HOME/phantom-brain/{profile}/{vault}/_snapshot-cache/
-func (a *Agent) SnapshotCacheDir() string {
-	return filepath.Join(a.VaultBaseDir(), "_snapshot-cache")
-}
-
 // ShipPendingDir returns the local ship-queue directory where brains
 // drop their death tarballs while waiting for the daemon to be
 // reachable. Bounded by CL_BRAIN_MAX_PENDING_MB in Phase 1.5+.

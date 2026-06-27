@@ -12,14 +12,14 @@ import (
 )
 
 // brainStatusTool exposes the brain's manifest + heartbeat freshness
-// + connectivity / queued-writes + snapshot age. Used by operators
-// (and the agent itself) to introspect "am I healthy right now?"
-// without reading manifest.json off disk.
+// + connectivity / queued-writes. Used by operators (and the agent
+// itself) to introspect "am I healthy right now?" without reading
+// manifest.json off disk.
 func brainStatusTool() mcp.Tool {
 	return mcp.NewTool("brain_status",
 		mcp.WithDescription(
 			`Return the running brain's manifest, heartbeat age, daemon connectivity, `+
-				`queued-write depth, and snapshot age (all in seconds). Returns an error in `+
+				`and queued-write depth (ages in seconds). Returns an error in `+
 				`legacy BRAIN_VAULT_PATH mode where no Lifecycle has been started.`,
 		),
 	)
@@ -36,7 +36,6 @@ type brainStatusResponse struct {
 	Connectivity         string `json:"connectivity"`             // online|degraded|offline
 	LastDaemonContactSec int64  `json:"last_daemon_contact_secs"` // -1 if never contacted
 	QueuedWrites         int    `json:"queued_writes"`
-	SnapshotAgeSecs      int64  `json:"snapshot_age_secs"` // -1 if unknown
 }
 
 func (s *Server) handleBrainStatus(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -70,10 +69,6 @@ func (s *Server) handleBrainStatus(ctx context.Context, req mcp.CallToolRequest)
 			queued = n
 		}
 	}
-	snapAgeSecs := int64(-1)
-	if age := lc.SnapshotAge(time.Now()); age > 0 {
-		snapAgeSecs = int64(age.Seconds())
-	}
 
 	resp := brainStatusResponse{
 		BrainID:              m.BrainID,
@@ -83,7 +78,6 @@ func (s *Server) handleBrainStatus(ctx context.Context, req mcp.CallToolRequest)
 		Connectivity:         connState,
 		LastDaemonContactSec: lastContact,
 		QueuedWrites:         queued,
-		SnapshotAgeSecs:      snapAgeSecs,
 	}
 	body, err := json.MarshalIndent(resp, "", "  ")
 	if err != nil {

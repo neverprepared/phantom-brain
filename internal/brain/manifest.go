@@ -74,11 +74,11 @@ type Manifest struct {
 	Profile       string `json:"profile"`
 	Vault         string `json:"vault"`
 
-	// Parentage. Absent on a greenfield birth (no daemon).
-	ParentGen              *uint64 `json:"parent_gen,omitempty"`
-	ParentSnapshotSHA256   string  `json:"parent_snapshot_sha256,omitempty"`
-	ParentSnapshotBuiltAt  string  `json:"parent_snapshot_built_at,omitempty"` // RFC3339
-	ParentSynthesisID      string  `json:"parent_synthesis_id,omitempty"`
+	// Parentage. Phase D2b: snapshots are gone, so births are always
+	// ephemeral/greenfield — the parent_gen / parent_snapshot_* fields
+	// were removed. ParentSynthesisID is retained (omitempty) for the
+	// death-merge ledger.
+	ParentSynthesisID string `json:"parent_synthesis_id,omitempty"`
 
 	BornAt string `json:"born_at"`            // RFC3339
 	Status Status `json:"status"`             // alive | shutting_down | dead

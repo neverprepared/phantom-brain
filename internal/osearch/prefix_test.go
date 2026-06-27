@@ -44,18 +44,17 @@ func TestLive_EnsurePrefixes_IsIdempotent(t *testing.T) {
 	c, ctx, cleanup := testClient(t)
 	defer cleanup()
 
-	prefixes := []string{
-		c.prefix + "a_",
-		c.prefix + "b_",
-		c.prefix + "a_", // duplicate — EnsurePrefixes must dedup
+	// Phase D2b: EnsurePrefixes was removed; the per-prefix create path is
+	// the retained ensureIndex primitive (via EnsureIndexWithMapping),
+	// driven here by the ensureLegacyIndices test helper. Idempotency is the
+	// invariant under test — a second pass must short-circuit on the exists
+	// probe rather than re-create.
+	for _, p := range []string{c.prefix + "a_", c.prefix + "b_"} {
+		ensureLegacyIndices(t, ctx, c, p)
 	}
-	if err := c.EnsurePrefixes(ctx, prefixes); err != nil {
-		t.Fatalf("EnsurePrefixes first pass: %v", err)
-	}
-	// Re-run to prove idempotency: every ensureIndex must short-circuit
-	// on the exists probe rather than re-create.
-	if err := c.EnsurePrefixes(ctx, prefixes); err != nil {
-		t.Fatalf("EnsurePrefixes second pass: %v", err)
+	// Re-run to prove idempotency.
+	for _, p := range []string{c.prefix + "a_", c.prefix + "b_"} {
+		ensureLegacyIndices(t, ctx, c, p)
 	}
 
 	// Drop the per-prefix indices we created so cleanup is honest.
@@ -82,9 +81,7 @@ func TestLive_PerPrefixRouting(t *testing.T) {
 	defer cleanup()
 
 	overridePrefix := c.prefix + "ovr_"
-	if err := c.EnsureIndicesWithPrefix(ctx, overridePrefix); err != nil {
-		t.Fatalf("EnsureIndicesWithPrefix: %v", err)
-	}
+	ensureLegacyIndices(t, ctx, c, overridePrefix)
 	t.Cleanup(func() {
 		dctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

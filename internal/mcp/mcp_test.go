@@ -5,12 +5,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/neverprepared/phantom-brain/internal/index"
 	"github.com/neverprepared/phantom-brain/internal/vault"
 	"github.com/neverprepared/phantom-brain/internal/working"
 )
@@ -36,9 +34,11 @@ func (f *fakeEmbedder) Embed(_ context.Context, inputs []string) ([][]float32, e
 	return out, nil
 }
 
-// setup builds a Server backed by a temp vault + open index + a fake
-// embedder seeded with deterministic vectors for the texts the test
-// is going to use.
+// setup builds a Server backed by a temp vault + working memory + a fake
+// embedder seeded with deterministic vectors for the texts the test is
+// going to use. Phase D2b: there is no local read cache (the sqlite-vec index package
+// is gone), so setup wires no Index and no daemon Client — write-path
+// tests add a recording daemon via setupWithDaemon.
 func setup(t *testing.T, dims int, plan map[string][]float32) (*Server, ServerDeps) {
 	t.Helper()
 	dir := t.TempDir()
@@ -50,11 +50,6 @@ func setup(t *testing.T, dims int, plan map[string][]float32) (*Server, ServerDe
 	if err := os.MkdirAll(indexDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	idx, err := index.Open(indexDir, dims)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = idx.Close() })
 
 	wm, err := working.Open(indexDir)
 	if err != nil {
@@ -63,7 +58,6 @@ func setup(t *testing.T, dims int, plan map[string][]float32) (*Server, ServerDe
 	t.Cleanup(func() { _ = wm.Close() })
 
 	deps := ServerDeps{
-		Index:    idx,
 		Working:  wm,
 		Embedder: &fakeEmbedder{dims: dims, plan: plan},
 		VaultDir: vaultDir,
@@ -99,62 +93,26 @@ func callTool(
 }
 
 // --- brain_perceive ---
-
-func TestPerceiveHappyPath(t *testing.T) {
-	plan := map[string][]float32{
-		"My Page\n\nbody contents here": {1, 0, 0},
-	}
-	s, deps := setup(t, 3, plan)
-
-	text, isErr := callTool(t, s.handlePerceive, map[string]any{
-		"content":    "body contents here",
-		"title":      "My Page",
-		"source_url": "https://example.com/page",
-	})
-	if isErr {
-		t.Fatalf("unexpected error: %s", text)
-	}
-	if !strings.Contains(text, "Stored to Raw/gathered/my-page.md") {
-		t.Errorf("status missing expected path: %q", text)
-	}
-	if !strings.Contains(text, "SHA:") {
-		t.Errorf("status missing SHA: %q", text)
-	}
-
-	// File on disk has frontmatter + body.
-	wrote, err := os.ReadFile(filepath.Join(deps.VaultDir, "Raw", "gathered", "my-page.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := string(wrote)
-	if !strings.HasPrefix(got, "---\n") {
-		t.Errorf("written file should start with frontmatter:\n%s", got)
-	}
-	if !strings.Contains(got, "title: My Page") {
-		t.Errorf("written file missing title: %s", got)
-	}
-	if !strings.Contains(got, "source_url: https://example.com/page") {
-		t.Errorf("written file missing source_url: %s", got)
-	}
-	if !strings.Contains(got, "body contents here") {
-		t.Errorf("written file missing body: %s", got)
-	}
-
-	// Index contains it.
-	hits, err := deps.Index.SearchText(context.Background(), "page", 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(hits) != 1 {
-		t.Errorf("FTS hits after perceive = %d, want 1", len(hits))
-	}
-}
+//
+// Phase D2b: writes are daemon-only (no local file/index path), so the
+// write-path assertions run against the recording daemon (setupWithDaemon)
+// rather than the local vault. The default-slug happy path is covered by
+// daemon_post_test.go's TestPerceive_PostsToDaemon. The following local-path
+// unit tests were removed as testing-removed-behavior:
+//
+//   - TestPerceiveHappyPath          (superseded by TestPerceive_PostsToDaemon)
+//   - TestPerceiveDuplicateReturnsDuplicateStatus (local dedup removed; the
+//     daemon SHA-dedups now, so the agent no longer short-circuits)
+//
+// The filename-derivation coverage that those exercised is retained below,
+// asserting the source_path the agent sends to the daemon.
 
 func TestPerceiveFilenameHintOverridesSlug(t *testing.T) {
 	plan := map[string][]float32{
 		"Another Page\n\nbody": {0, 1, 0},
 	}
-	s, deps := setup(t, 3, plan)
+	s, _, daemon, cleanup := setupWithDaemon(t, 3, plan)
+	defer cleanup()
 
 	text, isErr := callTool(t, s.handlePerceive, map[string]any{
 		"content":  "body",
@@ -164,8 +122,12 @@ func TestPerceiveFilenameHintOverridesSlug(t *testing.T) {
 	if isErr {
 		t.Fatalf("err: %s", text)
 	}
-	if _, err := os.Stat(filepath.Join(deps.VaultDir, "Raw", "gathered", "custom-name.md")); err != nil {
-		t.Errorf("expected custom-name.md to exist: %v", err)
+	calls := daemon.calls("/api/brain/perceive")
+	if len(calls) != 1 {
+		t.Fatalf("perceive calls = %d, want 1", len(calls))
+	}
+	if got := calls[0]["source_path"]; got != "Raw/gathered/custom-name.md" {
+		t.Errorf("source_path = %v, want Raw/gathered/custom-name.md", got)
 	}
 }
 
@@ -173,7 +135,8 @@ func TestPerceiveFilenameHintAddsMdSuffix(t *testing.T) {
 	plan := map[string][]float32{
 		"X\n\nb": {0, 0, 1},
 	}
-	s, deps := setup(t, 3, plan)
+	s, _, daemon, cleanup := setupWithDaemon(t, 3, plan)
+	defer cleanup()
 
 	if _, isErr := callTool(t, s.handlePerceive, map[string]any{
 		"content":  "b",
@@ -182,30 +145,12 @@ func TestPerceiveFilenameHintAddsMdSuffix(t *testing.T) {
 	}); isErr {
 		t.Fatal("expected success")
 	}
-	if _, err := os.Stat(filepath.Join(deps.VaultDir, "Raw", "gathered", "no-ext.md")); err != nil {
-		t.Errorf("expected no-ext.md: %v", err)
+	calls := daemon.calls("/api/brain/perceive")
+	if len(calls) != 1 {
+		t.Fatalf("perceive calls = %d, want 1", len(calls))
 	}
-}
-
-func TestPerceiveDuplicateReturnsDuplicateStatus(t *testing.T) {
-	plan := map[string][]float32{
-		"Same Page\n\nidentical body": {1, 0, 0},
-	}
-	s, _ := setup(t, 3, plan)
-
-	args := map[string]any{
-		"content": "identical body",
-		"title":   "Same Page",
-	}
-	if _, isErr := callTool(t, s.handlePerceive, args); isErr {
-		t.Fatal("first ingest should succeed")
-	}
-	text, isErr := callTool(t, s.handlePerceive, args)
-	if isErr {
-		t.Fatalf("duplicate should NOT be an MCP error: %s", text)
-	}
-	if !strings.Contains(text, "Duplicate") {
-		t.Errorf("expected Duplicate in status: %q", text)
+	if got := calls[0]["source_path"]; got != "Raw/gathered/no-ext.md" {
+		t.Errorf("source_path = %v, want Raw/gathered/no-ext.md", got)
 	}
 }
 
@@ -220,18 +165,27 @@ func TestPerceiveRejectsEmptyContentOrTitle(t *testing.T) {
 }
 
 func TestPerceiveSlugFallbackOnNoFilenameButOddTitle(t *testing.T) {
-	// All-non-ascii title slugs to "" — perceive must surface that
-	// rather than write to an empty filename.
+	// All-non-ascii title slugs to "" — Phase D2b's daemon-only path
+	// falls back to source_path "Raw/gathered/untitled.md" rather than
+	// erroring (the old local path returned an empty-filename error).
 	plan := map[string][]float32{
 		"日本語\n\nbody": {1, 0, 0},
 	}
-	s, _ := setup(t, 3, plan)
+	s, _, daemon, cleanup := setupWithDaemon(t, 3, plan)
+	defer cleanup()
 	text, isErr := callTool(t, s.handlePerceive, map[string]any{
 		"content": "body",
 		"title":   "日本語",
 	})
-	if !isErr {
-		t.Errorf("expected error from empty slug; got %q", text)
+	if isErr {
+		t.Fatalf("err: %s", text)
+	}
+	calls := daemon.calls("/api/brain/perceive")
+	if len(calls) != 1 {
+		t.Fatalf("perceive calls = %d, want 1", len(calls))
+	}
+	if got := calls[0]["source_path"]; got != "Raw/gathered/untitled.md" {
+		t.Errorf("source_path = %v, want Raw/gathered/untitled.md", got)
 	}
 }
 

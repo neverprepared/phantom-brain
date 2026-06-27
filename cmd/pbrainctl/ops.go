@@ -17,7 +17,6 @@ import (
 
 	"github.com/neverprepared/phantom-brain/internal/brain"
 	"github.com/neverprepared/phantom-brain/internal/config"
-	"github.com/neverprepared/phantom-brain/internal/osearch"
 	pbserver "github.com/neverprepared/phantom-brain/internal/server"
 )
 
@@ -98,8 +97,8 @@ func vaultListCmd() *cobra.Command {
 					bucket = "(default)"
 				}
 				fmt.Fprintf(cmd.OutOrStdout(),
-					"%s\t%d retention_gens\tindex_prefix=%s\tbucket=%s\n",
-					b.Key, b.Defaults.RetentionGens, prefix, bucket)
+					"%s\tindex_prefix=%s\tbucket=%s\n",
+					b.Key, prefix, bucket)
 			}
 			return nil
 		},
@@ -111,7 +110,7 @@ func vaultListCmd() *cobra.Command {
 func vaultStatusCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "status",
-		Short: "Per-vault counts: queue depth, current gen, ledger rows, maintenance",
+		Short: "Per-vault counts: queue depth, ledger rows, maintenance",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			d := resolveDataDir(cmd)
 			r, err := loadRegistryForOps(resolveConfigDir(cmd))
@@ -119,7 +118,6 @@ func vaultStatusCmd() *cobra.Command {
 				return err
 			}
 			for _, b := range r.Vaults() {
-				gen, _ := pbserver.ReadGenCounter(d, b.Key.Profile, b.Key.Vault)
 				// queue_pending is always 0 in Phase 6 — the file queue is
 				// gone; the daemon's SynthWorker drains an in-memory chan.
 				pending := []string(nil)
@@ -132,8 +130,8 @@ func vaultStatusCmd() *cobra.Command {
 				}
 				maint := pbserver.InMaintenance(d, b.Key)
 				fmt.Fprintf(cmd.OutOrStdout(),
-					"%s\tgen=%d\tqueue_pending=%d\tledger_rows=%d\tmaintenance=%v\n",
-					b.Key, gen, len(pending), ledgerRows, maint,
+					"%s\tqueue_pending=%d\tledger_rows=%d\tmaintenance=%v\n",
+					b.Key, len(pending), ledgerRows, maint,
 				)
 			}
 			return nil
@@ -182,17 +180,9 @@ func readDaemonPID(d pbserver.DataDir) (int, error) {
 	return pid, nil
 }
 
-// --- snapshot status / rebuild / prune / claims ----------------------
-
-func snapshotCmd() *cobra.Command {
-	c := &cobra.Command{Use: "snapshot", Short: "Snapshot operations"}
-	c.AddCommand(snapshotStatusCmd(), snapshotRebuildCmd(), snapshotPruneCmd(), snapshotClaimsCmd())
-	return c
-}
-
-// vaultArg pulls the (profile, vault) the operator named. Most
-// snapshot ops are per-vault, so we expose them as positional args
-// rather than flags (`pbrainctl snapshot rebuild personal/memory`).
+// vaultArgFromArgs pulls the (profile, vault) the operator named. Most
+// per-vault ops expose it as a positional arg rather than a flag
+// (`pbrainctl server maintenance enter personal/memory`).
 func vaultArgFromArgs(args []string) (pbserver.VaultKey, error) {
 	if len(args) != 1 {
 		return pbserver.VaultKey{}, errors.New("requires exactly one argument: profile/vault")
@@ -202,178 +192,6 @@ func vaultArgFromArgs(args []string) (pbserver.VaultKey, error) {
 		return pbserver.VaultKey{}, fmt.Errorf("argument must look like profile/vault, got %q", args[0])
 	}
 	return pbserver.VaultKey{Profile: parts[0], Vault: parts[1]}, nil
-}
-
-func snapshotStatusCmd() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "status [profile/vault]",
-		Short: "Current snapshot gen + manifest for a vault",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			key, err := vaultArgFromArgs(args)
-			if err != nil {
-				return err
-			}
-			d := resolveDataDir(cmd)
-			info, err := pbserver.CurrentSnapshot(d, key.Profile, key.Vault)
-			if err != nil {
-				return err
-			}
-			if info == nil {
-				fmt.Fprintln(cmd.OutOrStdout(), "no snapshots yet (gen=0)")
-				return nil
-			}
-			body, _ := json.MarshalIndent(info.Manifest, "", "  ")
-			fmt.Fprintln(cmd.OutOrStdout(), string(body))
-			return nil
-		},
-	}
-	opsCommonFlags(c)
-	return c
-}
-
-func snapshotRebuildCmd() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "rebuild [profile/vault]",
-		Short: "Force a fresh snapshot build from OpenSearch (bumps gen, runs retention)",
-		Long: `Builds a new snapshot tarball for the named vault by exporting the
-current OpenSearch state (pb_summaries + pb_entities + pb_attachments)
-into a fresh sqlite-vec + FTS5 database, then publishes it as the next
-gen. Matches the daemon's auto-trigger path (SnapshotDebouncer ->
-BuildSnapshotFromOS).
-
-Requires server.toml to have an [opensearch] block - the subcommand
-talks to OS directly using the same credentials the daemon uses.`,
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			key, err := vaultArgFromArgs(args)
-			if err != nil {
-				return err
-			}
-			configDir := resolveConfigDir(cmd)
-			cfg, err := pbserver.LoadServerConfig(configDir)
-			if err != nil {
-				return fmt.Errorf("load server config: %w", err)
-			}
-			if !cfg.OpenSearch.Enabled() {
-				return errors.New("server.toml has no [opensearch] block - snapshot rebuild needs OS access")
-			}
-			r, err := loadRegistryForOps(configDir)
-			if err != nil {
-				return err
-			}
-			b, ok := r.LookupByVault(key)
-			if !ok {
-				return fmt.Errorf("vault %s not registered", key)
-			}
-
-			ctx, cancel := signalCancel(cmd.Context())
-			defer cancel()
-
-			oc, err := osearch.Open(ctx, osearch.Config{
-				Addresses:          cfg.OpenSearch.Addresses,
-				Username:           cfg.OpenSearch.Username,
-				Password:           cfg.OpenSearch.Password,
-				InsecureSkipVerify: cfg.OpenSearch.InsecureSkipVerify,
-				IndexPrefix:        cfg.OpenSearch.IndexPrefix,
-				RequestTimeout:     time.Duration(cfg.OpenSearch.RequestTimeoutSecs) * time.Second,
-			})
-			if err != nil {
-				return fmt.Errorf("opensearch open: %w", err)
-			}
-
-			info, err := pbserver.BuildSnapshotFromOS(ctx, resolveDataDir(cmd), oc, key.Profile, key.Vault, b.Defaults.RetentionGens)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "built snapshot gen=%d sha=%s size=%d\n",
-				info.Manifest.Gen, info.Manifest.SHA256, info.Manifest.SizeBytes)
-			return nil
-		},
-	}
-	opsCommonFlags(c)
-	return c
-}
-
-func snapshotPruneCmd() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "prune [profile/vault]",
-		Short: "Apply retention without rebuilding (drops oldest unpinned gens)",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			key, err := vaultArgFromArgs(args)
-			if err != nil {
-				return err
-			}
-			r, err := loadRegistryForOps(resolveConfigDir(cmd))
-			if err != nil {
-				return err
-			}
-			b, ok := r.LookupByVault(key)
-			if !ok {
-				return fmt.Errorf("vault %s not registered", key)
-			}
-			// Pruning piggy-backs on a rebuild's retention pass. Doing
-			// a no-op build here would bump the gen for nothing — the
-			// spec-defined `snapshot prune` semantics call for the
-			// retention sweep specifically. Expose that directly.
-			if err := pbserver.PruneSnapshots(resolveDataDir(cmd), key.Profile, key.Vault, b.Defaults.RetentionGens); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "pruned %s (retention=%d)\n", key, b.Defaults.RetentionGens)
-			return nil
-		},
-	}
-	opsCommonFlags(c)
-	return c
-}
-
-func snapshotClaimsCmd() *cobra.Command {
-	c := &cobra.Command{
-		Use:   "claims [profile/vault]",
-		Short: "List active brain claims pinning snapshot gens against retention",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			key, err := vaultArgFromArgs(args)
-			if err != nil {
-				return err
-			}
-			d := resolveDataDir(cmd)
-			stagedRoot := d.StagedDir(key.Profile, key.Vault)
-			entries, err := os.ReadDir(stagedRoot)
-			if errors.Is(err, os.ErrNotExist) {
-				return nil
-			}
-			if err != nil {
-				return err
-			}
-			type row struct{ gen uint64; brains []string }
-			var rows []row
-			for _, e := range entries {
-				if !e.IsDir() || !strings.HasPrefix(e.Name(), "snapshot-") {
-					continue
-				}
-				var g uint64
-				fmt.Sscanf(e.Name(), "snapshot-%d", &g)
-				claims, _ := os.ReadDir(filepath.Join(stagedRoot, e.Name(), ".claims"))
-				var names []string
-				for _, c := range claims {
-					names = append(names, c.Name())
-				}
-				if len(names) > 0 {
-					rows = append(rows, row{gen: g, brains: names})
-				}
-			}
-			sort.Slice(rows, func(i, j int) bool { return rows[i].gen < rows[j].gen })
-			for _, r := range rows {
-				fmt.Fprintf(cmd.OutOrStdout(), "snapshot-%d\t%d brain(s): %s\n",
-					r.gen, len(r.brains), strings.Join(r.brains, ", "))
-			}
-			return nil
-		},
-	}
-	opsCommonFlags(c)
-	return c
 }
 
 // --- queue depth / contributors --------------------------------------

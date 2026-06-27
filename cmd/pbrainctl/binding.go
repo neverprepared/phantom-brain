@@ -190,7 +190,7 @@ func bindingListCmd() *cobra.Command {
 				return err
 			}
 			out := cmd.OutOrStdout()
-			fmt.Fprintln(out, "PROFILE/VAULT\tINDEX_PREFIX\tBUCKET\tRETENTION_GENS")
+			fmt.Fprintln(out, "PROFILE/VAULT\tINDEX_PREFIX\tBUCKET")
 			cfg, _ := pbserver.LoadServerConfig(resolveConfigDir(cmd))
 			defaultPrefix := ""
 			defaultBucket := ""
@@ -207,8 +207,8 @@ func bindingListCmd() *cobra.Command {
 				if bucket == defaultBucket {
 					bucket = "<default>"
 				}
-				fmt.Fprintf(out, "%s\t%s\t%s\t%d\n",
-					b.Key, prefix, bucket, b.Defaults.RetentionGens)
+				fmt.Fprintf(out, "%s\t%s\t%s\n",
+					b.Key, prefix, bucket)
 			}
 			return nil
 		},

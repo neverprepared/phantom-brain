@@ -58,22 +58,6 @@ func (d DataDir) IndexDir(profile, vault string) string {
 	return filepath.Join(d.CollectiveDir(profile, vault), "_index")
 }
 
-// PublishedDir holds snapshot-<gen>.tar.zst tarballs the daemon
-// serves to brain births.
-//
-//	{collective}/_published/
-func (d DataDir) PublishedDir(profile, vault string) string {
-	return filepath.Join(d.CollectiveDir(profile, vault), "_published")
-}
-
-// StagedDir is the snapshot-builder's working area. The dual-source
-// pin-protection markers (.claims/) live under staged/snapshot-<gen>/.
-//
-//	{collective}/_published/staged/
-func (d DataDir) StagedDir(profile, vault string) string {
-	return filepath.Join(d.PublishedDir(profile, vault), "staged")
-}
-
 // BrainsDir owns the death-payload merge lifecycle on the daemon side
 // — _uploads/ (presigned multipart prefix), _staging/<brain_id>/
 // (during extract), _pending/<brain_id>.tar.zst (waiting for the
@@ -138,8 +122,6 @@ func EnsureCollectiveSkeleton(d DataDir, profile, vault string) error {
 		filepath.Join(d.VaultDir(profile, vault), "queue", "done"),
 		filepath.Join(d.VaultDir(profile, vault), "queue", "dead"),
 		d.IndexDir(profile, vault),
-		d.PublishedDir(profile, vault),
-		d.StagedDir(profile, vault),
 		filepath.Join(d.BrainsDir(profile, vault), "_uploads"),
 		filepath.Join(d.BrainsDir(profile, vault), "_staging"),
 		filepath.Join(d.BrainsDir(profile, vault), "_pending"),

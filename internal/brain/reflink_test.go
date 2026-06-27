@@ -1,9 +1,7 @@
 package brain
 
 import (
-	"context"
 	"errors"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -85,26 +83,8 @@ func TestReflinkFile_ErrIsSentinelSentinel(t *testing.T) {
 // payloads; writes ship synchronously via daemon POST during life.
 
 // --- snapcache --------------------------------------------------------
-
-func TestSnapcache_EmptyByDefault(t *testing.T) {
-	agent := agentForTest(t)
-	got, err := ListCachedSnapshots(agent)
-	if err != nil {
-		t.Fatalf("ListCachedSnapshots: %v", err)
-	}
-	if len(got) != 0 {
-		t.Errorf("expected no cached snapshots, got %v", got)
-	}
-}
-
-func TestSnapcache_FetchReturnsErrorWhenDaemonUnreachable(t *testing.T) {
-	// agentForTest sets CL_BRAIN_API to https://example.invalid which
-	// reliably fails to resolve / connect. Phase 2.5: this surface
-	// returns a wrapped HTTP error rather than the Phase 1
-	// ErrDaemonUnavailable sentinel.
-	agent := agentForTest(t)
-	_, err := FetchSnapshotFromDaemon(context.Background(), agent, slog.New(slog.DiscardHandler))
-	if err == nil {
-		t.Fatal("expected error when daemon unreachable")
-	}
-}
+//
+// Phase D2b: the snapshot cache (internal/brain/snapcache.go) was removed
+// — births are greenfield and recall/fetch are online-only, so there is
+// no cached snapshot to list or fetch. TestSnapcache_EmptyByDefault and
+// TestSnapcache_FetchReturnsErrorWhenDaemonUnreachable are gone.

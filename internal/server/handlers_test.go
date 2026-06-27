@@ -37,7 +37,7 @@ func newRouterRig(t *testing.T) *routerRig {
 	tok := seedVault(t, cfgDir, "personal", "memory", "")
 
 	reg := NewRegistry()
-	if _, err := reg.Load(LoadOpts{ConfigDir: cfgDir, Defaults: VaultDefaults{RetentionGens: 30}}); err != nil {
+	if _, err := reg.Load(LoadOpts{ConfigDir: cfgDir, Defaults: VaultDefaults{}}); err != nil {
 		t.Fatalf("registry load: %v", err)
 	}
 
@@ -72,36 +72,11 @@ func (r *routerRig) do(t *testing.T, method, path string, body []byte) *http.Res
 }
 
 // --- birth/claim --------------------------------------------------
-
-func TestHandler_BirthClaim_HappyPath(t *testing.T) {
-	r := newRouterRig(t)
-	seedCollective(t, r.d.DataDir, "personal", "memory", "# hi\n")
-	if _, err := BuildSnapshot(r.d.DataDir, "personal", "memory", 30); err != nil {
-		t.Fatal(err)
-	}
-	body, _ := json.Marshal(birthClaimRequest{BrainID: "brain-1", Gen: 1, TTLSecs: 3600})
-	resp := r.do(t, http.MethodPost, "/api/brain/birth/claim", body)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
-	}
-	// Marker file landed.
-	marker := filepath.Join(r.d.DataDir.StagedDir("personal", "memory"), "snapshot-1", ".claims", "brain-1")
-	if _, err := os.Stat(marker); err != nil {
-		t.Errorf("claim marker missing: %v", err)
-	}
-}
-
-func TestHandler_BirthClaim_StaleGenReturns409(t *testing.T) {
-	r := newRouterRig(t)
-	body, _ := json.Marshal(birthClaimRequest{BrainID: "brain-x", Gen: 999})
-	resp := r.do(t, http.MethodPost, "/api/brain/birth/claim", body)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("status=%d, want 409", resp.StatusCode)
-	}
-}
+//
+// Phase D2b: the /birth/claim endpoint + handler were removed with the
+// snapshot machinery (claims pinned snapshot gens against retention; both
+// are gone). TestHandler_BirthClaim_HappyPath and
+// TestHandler_BirthClaim_StaleGenReturns409 are deleted.
 
 // --- maintenance --------------------------------------------------
 

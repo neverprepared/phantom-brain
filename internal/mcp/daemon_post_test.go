@@ -1,7 +1,6 @@
 package mcp
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -118,16 +117,9 @@ func TestPerceive_PostsToDaemon_AndSkipsLocalWrite(t *testing.T) {
 		t.Errorf("embedding len = %d, want 3", len(emb))
 	}
 
-	// No local file written.
+	// No local file written — Phase D2b writes are daemon-only.
 	if _, err := os.Stat(filepath.Join(deps.VaultDir, "Raw", "gathered", "my-page.md")); !os.IsNotExist(err) {
-		t.Errorf("local file unexpectedly exists (Phase 6 should skip local write): err=%v", err)
-	}
-
-	// Local index NOT mutated either — the daemon owns the canonical
-	// index now; agent cache catches up on next snapshot pull.
-	hits, _ := deps.Index.SearchText(context.Background(), "page", 5)
-	if len(hits) != 0 {
-		t.Errorf("local index has %d hits after Phase 6 perceive; want 0", len(hits))
+		t.Errorf("local file unexpectedly exists (writes are daemon-only): err=%v", err)
 	}
 }
 
@@ -202,36 +194,7 @@ func TestAttach_PostsToDaemon(t *testing.T) {
 	}
 }
 
-// --- dedup still short-circuits before POST ----------------------
-
-func TestPerceive_DedupShortCircuitsBeforeDaemon(t *testing.T) {
-	plan := map[string][]float32{
-		"My Page\n\nbody contents here": {1, 0, 0},
-	}
-	// First setup without daemon to seed the local index.
-	s1, deps1 := setup(t, 3, plan)
-	if _, isErr := callTool(t, s1.handlePerceive, map[string]any{
-		"content": "body contents here", "title": "My Page",
-	}); isErr {
-		t.Fatal("seed perceive failed")
-	}
-
-	// Now wrap the same deps with a daemon client and re-perceive —
-	// dedup should kick in BEFORE we POST.
-	daemon := newRecordingDaemon()
-	ts := httptest.NewServer(daemon)
-	defer ts.Close()
-	client, _ := pbbrain.NewClient(pbbrain.ClientOpts{BaseURL: ts.URL, Token: "test-token"})
-	deps1.Client = client
-	s2 := NewServer(deps1)
-
-	text, _ := callTool(t, s2.handlePerceive, map[string]any{
-		"content": "body contents here", "title": "My Page",
-	})
-	if !strings.Contains(text, "Duplicate") {
-		t.Errorf("expected duplicate; got %q", text)
-	}
-	if got := len(daemon.calls("/api/brain/perceive")); got != 0 {
-		t.Errorf("daemon was called %d times; want 0 (dedup should short-circuit)", got)
-	}
-}
+// Phase D2b: TestPerceive_DedupShortCircuitsBeforeDaemon was removed.
+// There is no local read cache to dedup against — the daemon SHA-dedups
+// every write idempotently, so the agent always POSTs and a re-paste is a
+// benign no-op upsert daemon-side.

@@ -10,7 +10,6 @@ import (
 	"github.com/neverprepared/phantom-brain/internal/brain"
 	"github.com/neverprepared/phantom-brain/internal/brain/wqueue"
 	"github.com/neverprepared/phantom-brain/internal/canonicalize"
-	"github.com/neverprepared/phantom-brain/internal/index"
 	"github.com/neverprepared/phantom-brain/internal/osearch"
 	"github.com/neverprepared/phantom-brain/internal/vault"
 )
@@ -94,23 +93,10 @@ func (s *Server) ingestMarkdown(ctx context.Context, p ingestParams) (*ingestRes
 		return nil, fmt.Sprintf("canonicalize: %v", err), false
 	}
 
-	// Local dedup: even in Phase 6 the index check is the cheapest
-	// way to spot a re-paste, and it preserves the same UX the
-	// operator already trusts ("Duplicate" instead of a redundant
-	// POST). The daemon's OS-side upsert is idempotent by SHA anyway,
-	// so a false-negative here is fine.
-	has, err := s.deps.Index.Has(sha)
-	if err != nil {
-		return nil, fmt.Sprintf("index has: %v", err), false
-	}
-	if has {
-		return &ingestResult{Status: "duplicate", SHA: sha}, "", true
-	}
-
-	if s.deps.Embedder.Dims() != s.deps.Index.Dims() {
-		return nil, fmt.Sprintf("embedder/index dim mismatch: embedder=%d index=%d",
-			s.deps.Embedder.Dims(), s.deps.Index.Dims()), false
-	}
+	// Phase D2b: there is no local read cache, so no local dedup. The
+	// daemon SHA-dedups every write idempotently, so a re-paste lands
+	// as a benign no-op upsert daemon-side rather than a "Duplicate"
+	// early-out here.
 	embInput := strings.TrimSpace(p.Title + "\n\n" + p.Content)
 	embs, err := s.deps.Embedder.Embed(ctx, []string{embInput})
 	if err != nil {
@@ -118,13 +104,16 @@ func (s *Server) ingestMarkdown(ctx context.Context, p ingestParams) (*ingestRes
 	}
 
 	tags := doc.FrontmatterStrings("tags")
-	tagBlob := strings.Join(tags, " ")
 
-	// Phase 6: if a daemon client is wired, POST the canonical write
-	// and skip local file + index writes. The agent's local cache
-	// catches up on the next snapshot pull (snapshot-at-birth UX is
-	// retained per plan).
-	if client := lifecycleClient(s); client != nil {
+	// Phase D2b: writes are daemon-only. The daemon (Postgres SoR) is
+	// the sole authoritative store; there is no local file/index write
+	// path. A nil client means the agent contract isn't configured —
+	// return a clear error rather than silently dropping the write.
+	client := lifecycleClient(s)
+	if client == nil {
+		return nil, "daemon client not configured (set CL_BRAIN_API / CL_BRAIN_API_TOKEN); writes are daemon-only", false
+	}
+	{
 		dest := relativeRawPath(p.Subdir, p.Filename, p.Title)
 		// v2.4: default memory-classification fields per subdir.
 		// brain_perceive (gathered) is a semantic web scrape;
@@ -206,33 +195,6 @@ func (s *Server) ingestMarkdown(ctx context.Context, p ingestParams) (*ingestRes
 		}
 		return &ingestResult{Status: "stored", RelativePath: dest, SHA: sha, Notice: notice}, "", true
 	}
-
-	// Legacy fallback: no daemon client — write locally so the v1.x
-	// BRAIN_VAULT_PATH-only mode keeps working for operators who
-	// haven't migrated to the agent contract.
-	resolvedName := resolvePerceiveFilename(p.Filename, p.Title)
-	if resolvedName == "" {
-		return nil, "could not derive a filename from title (slug is empty)", false
-	}
-	destRel := filepath.Join("Raw", p.Subdir, resolvedName)
-	destAbs := filepath.Join(s.deps.VaultDir, destRel)
-	if err := vault.WriteAtomicFile(destAbs, rendered, 0o644); err != nil {
-		return nil, fmt.Sprintf("write: %v", err), false
-	}
-	if err := s.deps.Index.Upsert(ctx, index.Record{
-		SHA:        sha,
-		SourcePath: destRel,
-		Title:      p.Title,
-		Tags:       tagBlob,
-		Body:       p.Content,
-		Embedding:  embs[0],
-	}); err != nil {
-		return nil, fmt.Sprintf("index upsert: %v", err), false
-	}
-	if s.deps.Lifecycle != nil {
-		s.deps.Lifecycle.RecordWrite()
-	}
-	return &ingestResult{Status: "stored", RelativePath: destRel, SHA: sha}, "", true
 }
 
 // lifecycleClient returns the daemon client if one is wired (either

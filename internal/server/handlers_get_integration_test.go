@@ -97,7 +97,7 @@ func TestGetEndpoints_Integration(t *testing.T) {
 	const token = "get-test-token-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	b := authedBinding("gettest", "main", "pbc_get_", token)
 	d := newPGTestDaemon(t, b)
-	d.osBase, d.osClient, d.osExport = osc, osc, osc
+	d.osBase, d.osClient = osc, osc
 	d.pgBaseDSN = baseDSN
 	d.attach = presignAttach{}
 	d.buildBindingDeps()
