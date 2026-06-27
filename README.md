@@ -1,19 +1,24 @@
 # phantom-brain
 
-A [Model Context Protocol](https://modelcontextprotocol.io) server that gives Claude a structured, validated long-term memory backed by an Obsidian vault on disk.
+A [Model Context Protocol](https://modelcontextprotocol.io) server that gives Claude a structured, validated long-term memory backed by a **Postgres** System of Record, an **OpenSearch** search projection, and **MinIO** for attachments.
 
-Content enters through a **Raw → Gate → Wiki** pipeline. Sources are validated for reliability and classified by subject-matter topic before being written to the knowledge base. The host LLM drives the pipeline; the server enforces structure and provides the reference material.
+Content enters through a **Raw → Gate → distill** pipeline. Sources are validated for reliability and classified by subject-matter topic before they become durable memory. The host LLM drives the pipeline; the server enforces structure and provides the reference material.
 
-> **Implementation note.** The current codebase is the Go rewrite (v5.0 spec, Phases 0–2.5). A single `pbrainctl` binary subsumes the MCP server, the HTTP synthesis daemon, and the operator CLI. The original TypeScript implementation now lives under [`legacy-ts/`](./legacy-ts/) and is frozen pending deletion.
+> **Implementation note.** The codebase is the Go rewrite (v3.9.x). A single `pbrainctl` binary subsumes the agent-side MCP server, the HTTP daemon, and the operator CLI. The original TypeScript implementation lives under [`legacy-ts/`](./legacy-ts/), frozen. The OpenSearch→Postgres cutover (epic #92) is complete — the old snapshot/sqlite-vec read model is gone; see [`CLAUDE.md`](./CLAUDE.md) and [`docs/audit-2026-06-27.md`](./docs/audit-2026-06-27.md).
 
 ## How it works
 
-1. **Ingest** — `brain_perceive` (web content), `brain_learn` (curated docs), or `brain_attach` (binary files: PDF, Word, images) writes raw content to `Raw/` and enqueues it for processing.
-2. **Gate** — the synthesizer claims the next queue item and runs the Gate: a `claude` CLI call that scores the source for reliability (`high | medium | low | contested`) and classifies the subject-matter topic (`agents | memory | governance | tools | …`).
-3. **Synthesize** — raw content is distilled into a prose summary via LLM, written to `Wiki/summaries/`, named entities are extracted and fanned out to `Wiki/entities/`, and the mapping is recorded in `provenance.json`.
-4. **Recall** — `brain_recall` searches summaries and entity pages via hybrid FTS5 + vector RRF, with optional topic pre-filtering.
+Two processes:
 
-In agent-contract mode (v5.0), the lifecycle adds **mortal brains**: each MCP process births from a daemon-published snapshot, accumulates work locally, and ships a trimmed death payload back to the daemon on shutdown. The daemon merges + synthesises into the collective vault and publishes the next snapshot. See the v5.0 spec for the full lifecycle.
+- **Daemon** (`pbrainctl server serve`) — the canonical store. Records land in **Postgres** (the per-profile `pb_<profile>` System of Record, pgvector embeddings); a transactional outbox + River worker project each record into the **OpenSearch `pb_records`** search index; attachment blobs go to **MinIO**. An async synth worker runs the Gate + distill (via the `claude` CLI) and a continuous sweeper keeps the backlog drained.
+- **Agent** (`pbrainctl client mcp`) — a per-session stdio MCP server. Every read and write goes to the daemon over HTTP. `brain_recall` / `brain_fetch` are **online** (always fresh, no local cache). Writes pass through a per-binding write-ahead queue so they survive a daemon outage and drain on reconnect.
+
+The lifecycle:
+
+1. **Ingest** — `brain_perceive` (web content), `brain_learn` (curated docs), or `brain_attach` (binary files: PDF, Word, images) POSTs the daemon, which writes a Postgres record (`synthesised=false`) and enqueues a projection job.
+2. **Gate** — the synth worker scores the source for reliability (`high | medium | low | contested`) and classifies the subject-matter topic (`agents | memory | governance | tools | …`) via a `claude` CLI call.
+3. **Synthesize** — raw content is distilled into a prose body, named entities are extracted, the record is marked synthesised, and `pb_records` is re-projected with the distilled body.
+4. **Recall** — `brain_recall` embeds the query locally, POSTs the daemon, and gets hybrid BM25 + kNN hits over `pb_records`, with optional topic/kind/reliability filters. `brain_fetch` returns a full body by SHA from the SoR.
 
 ## Binary
 
@@ -23,18 +28,24 @@ v3.0 groups every command under `client` (workstation / agent side) or `server` 
 # client (agent / workstation)
 pbrainctl client mcp                 # stdio JSON-RPC MCP server (per agent process)
 pbrainctl client ingest-bulk         # bulk loader for an Obsidian-shaped tree
-pbrainctl client migrate-legacy      # one-time port of an old vault into the v5.0 layout
+pbrainctl client migrate-legacy      # one-time port of an old on-disk vault
 pbrainctl client brain list|show|orphans
 pbrainctl client gc-brains           # garbage-collect dead local brain dirs
+pbrainctl client queue list|drain-now|clear   # write-ahead queue inspection (--dead for dead-lettered rows)
+pbrainctl client reflect|forget|resynth       # maintenance: report / delete / re-synthesize (Postgres SoR)
 pbrainctl client version
 
 # server (daemon host)
-pbrainctl server serve               # HTTP synthesis daemon (multi-vault)
+pbrainctl server serve               # HTTP daemon (multi-vault; Postgres SoR + pb_records projection + MinIO)
+pbrainctl server config validate     # dry-run the registry load before reload
 pbrainctl server vault               # list | status | reload (SIGHUPs the daemon)
-pbrainctl server snapshot            # status | rebuild | prune | claims  [profile/vault]
+pbrainctl server db provision|migrate <profile>   # create / migrate the per-profile pb_<profile> database
+pbrainctl server backfill-to-pg <profile>         # one-shot legacy-OS → Postgres SoR backfill
 pbrainctl server queue               # depth | contributors  [profile/vault]
 pbrainctl server maintenance         # enter | exit          [profile/vault]
 pbrainctl server backfill-attachment-stubs
+pbrainctl server bucket create|list               # MinIO bucket admin
+pbrainctl server binding create|list|delete       # single-command binding workflow
 pbrainctl server version
 ```
 
@@ -44,13 +55,15 @@ pbrainctl server version
 |---|---|
 | `brain_perceive` | Ingest a gathered web source (URL + content). Single item or batch via `items[]` (up to 100) |
 | `brain_learn` | Ingest a curated document. Single item or batch via `items[]` (up to 100) |
-| `brain_attach` | Ingest a binary file (PDF, Word, image). Stores raw binary in `Raw/attachments/`, extracts text, queues for synthesis |
-| `brain_recall` | Hybrid FTS5 + vector search; optional `topic` filter |
-| `brain_trace` | Query the synthesis audit trail (`_log.md`) by text, reliability, or date |
-| `task_start` / `task_update` / `task_complete` / `task_get` | Working-memory task lifecycle, auto-seeded from vault context |
-| `brain_status` *(agent mode)* | Manifest + heartbeat age + ship-queue depth as JSON |
-| `brain_checkpoint` *(agent mode)* | Run the checkpoint flow; honors the v4.4 mtime-cutoff predicate unless `force=true` |
-| `brain_death` *(agent mode)* | Transition this brain to dead and pack the death payload into the local ship queue |
+| `brain_attach` | Ingest a binary file (PDF, Word, image). Stores the blob in MinIO, queues the record for synthesis |
+| `brain_recall` | Online hybrid BM25 + kNN search over `pb_records` (always fresh); optional `topic` / kind / reliability filters |
+| `brain_fetch` | Return one record's full body by SHA, online from the Postgres SoR |
+| `brain_trace` | Read the local synthesis audit trail (`Wiki/_log.md`) |
+| `brain_reflect` / `brain_forget` / `brain_resynth` | Maintenance: report forget-candidates, delete one record (SoR + projection), re-synthesize the backlog |
+| `task_start` / `task_update` / `task_complete` / `task_get` | Working-memory task lifecycle, auto-seeded from recall context |
+| `brain_status` *(agent mode)* | Manifest + heartbeat age + connectivity + queued-writes depth as JSON |
+| `brain_checkpoint` *(agent mode)* | Run the working-memory checkpoint flow unless `force=true` |
+| `brain_death` *(agent mode)* | Transition this brain to dead (status + log marker; no payload) |
 
 ## The Gate
 
@@ -65,29 +78,31 @@ Curated sources (`brain_learn`) skip the LLM — human curation is the quality s
 
 ## Layouts
 
-### Agent vault (per process, v5.0)
+The canonical store is Postgres + OpenSearch + MinIO, not a disk tree. Only a little local state remains.
+
+### Agent-side (per binding, shared across brain instances)
 
 ```
-$XDG_DATA_HOME/phantom-brain/{profile}/{vault}/brains/<brain_id>/
-├── manifest.json          # identity, parentage, lifecycle status
-├── vault/
-│   ├── Wiki/{summaries,entities}/
-│   ├── Raw/{curated,gathered,attachments}/
-│   └── _log.md            # append-only synthesis audit trail
-├── _index/                # vectors.db (FTS5 + sqlite-vec) + provenance.json
-└── markers/alive          # flock-held heartbeat marker
+$XDG_DATA_HOME/phantom-brain/{profile}/{vault}/
+├── wqueue.sqlite               # write-ahead queue for offline writes (per binding)
+├── wqueue-attach/<sha><ext>    # staged attachment bytes
+└── brains/<brain_id>/
+    ├── manifest.json           # identity + lifecycle status (births are greenfield — no snapshot parentage)
+    ├── markers/<brain_id>      # heartbeat sentinel
+    └── _index/
+        └── wm-<pid>.sqlite     # per-process working (active) memory
 ```
 
-### Daemon collective (per `(profile, vault)`, on the daemon host)
+There is no `vectors.db` read cache and no snapshot tarball — recall/fetch are online.
+
+### Daemon-side (per `(profile, vault)`, on the daemon host)
 
 ```
-$PHANTOM_BRAIN_DATA_DIR/{profile}/{vault}/collective/
-├── vault/                 # canonical Wiki + Raw + queue
-├── _index/                # vectors.db + provenance.json + .gen-counter
-├── _published/            # snapshot-<gen>.tar.zst tarballs + sidecars
-├── brains/                # _uploads, _staging, _pending, _merged
-└── ledger/merges.sqlite   # per-vault merge audit log
+$PHANTOM_BRAIN_DATA_DIR/{profile}/{vault}/
+└── locks/maintenance.flag      # present = pause writes
 ```
+
+Records live in Postgres (`pb_<profile>`), the search projection in OpenSearch (`pb_records`), and attachments in MinIO.
 
 ## Setup
 
@@ -134,7 +149,7 @@ Two startup modes, selected automatically by environment.
 }
 ```
 
-**Agent-contract mode** (v5.0 mortal brains + daemon ship):
+**Agent mode** (online recall/fetch against the daemon; offline writes via the local wqueue):
 
 ```json
 {
@@ -159,9 +174,9 @@ Two startup modes, selected automatically by environment.
 pbrainctl server serve
 ```
 
-Reads `$PHANTOM_BRAIN_CONFIG_DIR` (default `~/.config/phantom-brain-server`) for `server.toml` + per-vault `config.toml` + `auth.toml`. State lives under `$PHANTOM_BRAIN_DATA_DIR` (default `/var/lib/phantom-brain`). Acquires an exclusive flock so a second daemon refuses to start.
+Reads `$PHANTOM_BRAIN_CONFIG_DIR` (default `~/.config/phantom-brain-server`) for `server.toml` + per-vault `config.toml` + `auth.toml`, plus a base Postgres DSN (`PB_POSTGRES_DSN` or the `server.toml` field). Each profile's database must be provisioned first: `pbrainctl server db provision <profile>`. State lives under `$PHANTOM_BRAIN_DATA_DIR` (default `/var/lib/phantom-brain`). Acquires an exclusive flock so a second daemon refuses to start.
 
-Container build: `docker build -t pbrainctl -f docker/Dockerfile .` (currently macOS-arm64 only until the Linux `sqlite-vec` binary is vendored).
+Container build: `docker build -t pbrainctl -f docker/Dockerfile .`. The Linux `sqlite-vec` shared library is vendored, so Linux amd64 builds work the same as macOS arm64.
 
 ## Configuration
 
@@ -178,23 +193,22 @@ Container build: `docker build -t pbrainctl -f docker/Dockerfile .` (currently m
 
 ### Daemon (server.toml)
 
-`server.port`, `server.host`, `defaults.{retention_gens,reaper_poll_interval_secs,…}`, `storage.backend` (`local` default; `minio` enabled — see below). Full v4.4 §4 schema in [`internal/server/config.go`](./internal/server/config.go).
+`server.port`, `server.host`, the base Postgres DSN, `[opensearch]`, and `[storage]` (MinIO). Full schema in [`internal/server/config.go`](./internal/server/config.go).
 
-#### MinIO / S3 backend
+#### MinIO / S3 (attachment blobs)
 
-When `[storage] backend = "minio"`, brain uploads go directly to S3 via presigned PUT URLs (daemon never sees the bytes). On `/merge/complete` the daemon downloads the object into local `brains/_pending/<brain_id>.tar` so the reaper picks it up unchanged.
+MinIO stores attachment bytes written by `brain_attach` at `<profile>/<vault>/attachments/<sha><ext>`; metadata lives on the Postgres record. `[storage] minio_bucket` is the required global fallback bucket; a binding can route to its own bucket via `config.toml [storage_overrides]`. One MinIO credential serves every bucket — give it a wildcard policy.
 
 ```toml
 [storage]
-backend = "minio"
 minio_endpoint   = "minio.example.com:9000"
-minio_bucket     = "phantom-brain"
+minio_bucket     = "phantom-brain"   # required fallback default
 minio_access_key = "AKIA..."
 minio_secret_key = "secret..."
 minio_use_ssl    = true
 ```
 
-Bucket layout: `<profile>/<vault>/_uploads/<upload_id>.tar`. Daemon deletes the upload key after a successful merge; configure a bucket lifecycle rule to expire orphaned `_uploads/*` after the upload TTL (default 1 hour) as a backstop.
+Per-profile isolation (`config.toml`): `bucket = "<profile>-archives"` for a dedicated MinIO bucket and `index_prefix = "<profile>_"` for a dedicated `pb_records` index; the Postgres SoR is already isolated per-profile by database (`pb_<profile>`).
 
 ## Development
 
@@ -204,7 +218,7 @@ make test       # full suite (vet + unit + integration)
 go test -tags=sqlite_fts5 -race ./internal/brain/... ./internal/server/...
 ```
 
-CI is in `.github/workflows/go.yml` (currently macos-14 only until the Linux dylib lands). Deferred items: Linux `sqlite-vec` vendoring, MinIO backend, automated `brain_checkpoint` cadence, prompt-file extraction, rate limiting.
+CI is in `.github/workflows/go.yml` and runs the full matrix on **macos-14** (Apple Silicon) and **ubuntu-latest** (x86_64) — the `sqlite-vec` shared library is vendored for both. Integration tests that need Postgres / OpenSearch / MinIO are skipped unless those services are available.
 
 ## License
 
