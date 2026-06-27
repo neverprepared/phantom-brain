@@ -323,6 +323,11 @@ func Start(opts StartOpts) (*Daemon, error) {
 		w := NewSynthWorker(SynthWorkerOpts{
 			Logger:  opts.Logger,
 			Capture: cfg.Capture,
+			// Synth LLM backend: Ollama by default (local, zero Claude
+			// tokens), or the bundled `claude` CLI when [synth] backend =
+			// "claude". Health is probed lazily per job, so a daemon that
+			// starts before Ollama self-heals on the next sweep.
+			LLM: NewLLMBackend(cfg.Synth),
 		})
 		w.Resolve = func(profile, vaultName string) (synthStore, AttachmentStore, bool) {
 			deps, ok := d.bindings.Get(VaultKey{Profile: profile, Vault: vaultName})

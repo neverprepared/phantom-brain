@@ -228,9 +228,14 @@ The command writes `auth.toml` (mode 0o600) + `config.toml` with the override bl
 
 **Run `binding create` on the storage box host, not inside the daemon container.** The daemon container bind-mounts `/config` read-only (it reads config, never writes), so `binding create` will fail with EROFS there (it returns an actionable hint, not the raw syscall error — issue #69). Install `pbrainctl` on the host (brew or scp) and point the subcommand at the bind-mount source: `pbrainctl server binding create … --config-dir <host-path>`. This avoids hand-editing the TOML (the typo/duplicate-token/silent-drift failure mode). On a workstation you can write to any local `--config-dir` and copy the resulting `profiles/<profile>/vaults/<vault>/` subtree into the daemon's config root.
 
-### The Gate (`internal/server/gate.go`)
+### The Gate (`internal/server/gate.go`) + synth LLM backend (`internal/server/llm.go`)
 
-`RunGate()` is the daemon-side LLM call. It shells out to the `claude` CLI (bundled in the Docker image since v2.2.0), authenticated via `CLAUDE_CODE_OAUTH_TOKEN` (Claude Max subscription credentials, NOT `ANTHROPIC_API_KEY`).
+`RunGate()` is the daemon-side LLM call. As of the pluggable-backend change it routes through an `LLMBackend` (`internal/server/llm.go`) rather than shelling out directly, so synth (gate verdict + distill + entity extraction) runs on one of two backends, **selected by the `[synth]` block in `server.toml`**:
+
+- **`backend = "ollama"` (DEFAULT)** — a local Ollama model via `POST /api/generate` (`internal/ollama.Client.Generate`). Zero Claude tokens. Model defaults to `qwen2.5:7b` (`ollama.DefaultGenModel`) and **must be pulled locally** (`ollama pull qwen2.5:7b`). The gate call pins Ollama's `format:"json"` so small models emit parseable verdicts; distill runs free-form. Health is probed lazily and the first success is cached, so a daemon that starts before Ollama self-heals on the next synth job (no restart needed).
+- **`backend = "claude"`** — the bundled `claude` CLI (`CallClaudeCLI`, in the Docker image since v2.2.0), authenticated via `CLAUDE_CODE_OAUTH_TOKEN` (Claude Max subscription credentials, NOT `ANTHROPIC_API_KEY`). Higher-quality verdicts/summaries; costs tokens.
+
+`NewLLMBackend(cfg.Synth)` builds the backend; an unknown name falls through to Ollama. Tests use `SynthWorkerOpts.DisableCLI` to drop the backend to nil (no LLM); when `LLM` is nil but `DisableCLI` is false the worker defaults to the Claude CLI backend for back-compat.
 
 Verdict fields (matching `osearch.SummaryDoc`):
 - `reliability` — `high | medium | low | contested`
@@ -240,9 +245,9 @@ Verdict fields (matching `osearch.SummaryDoc`):
 
 Curated sources (`brain_learn`) skip the LLM and get a fixed `medium` verdict (curation is the quality signal).
 
-`SummarizeContent()` is the distill pass — same CLI, different prompt. Produces the `body` field; `raw_body` keeps the original.
+`SummarizeContent()` is the distill pass — same backend, different prompt (free-form prose). Produces the `body` field; `raw_body` keeps the original.
 
-Without the OAuth token the daemon still starts; gate + distill fall through to raw-content fallback (body == raw_body, reliability defaults to medium, topic defaults to general).
+If the selected backend is unavailable (Ollama unreachable / model not pulled; or, for `claude`, no OAuth token) the daemon still starts and gate + distill fall through to raw-content fallback (body == raw_body, reliability defaults to medium, topic defaults to general); entity extraction falls back to the regex extractor.
 
 ### Migration tooling (`pbrainctl ingest-bulk`)
 
@@ -279,7 +284,10 @@ Embeddings computed locally via Ollama. Idempotent — daemon dedups by SHA. `--
 | `CL_BRAIN_API_TOKEN` | — | Agent: bearer token matching daemon's `auth.toml` |
 | `CL_WORKSPACE_PROFILE` | — | Agent: profile binding |
 | `CL_BRAIN_VAULT` | — | Agent: vault binding |
-| `CLAUDE_CODE_OAUTH_TOKEN` | — | Daemon: subscription credentials for `claude` CLI |
+| `CLAUDE_CODE_OAUTH_TOKEN` | — | Daemon: subscription credentials for `claude` CLI (only used when `[synth] backend = "claude"`) |
+| `PB_SYNTH_BACKEND` | `ollama` | Daemon: synth LLM backend — `ollama` (default) or `claude`. Overrides `[synth] backend` in server.toml |
+| `PB_SYNTH_OLLAMA_MODEL` | `qwen2.5:7b` | Daemon: Ollama generation model for synth (gate/distill/entities). Must be `ollama pull`'d on the Ollama host. Overrides `[synth] ollama_model` |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama endpoint — shared by the agent embedding client AND the daemon synth backend. Overrides `[synth] ollama_base_url` |
 | `PB_POSTGRES_DSN` | — | Daemon: base/maintenance Postgres DSN; `pgstore.DSNForProfile` derives the per-profile `pb_<profile>` DSN from it (overrides the `server.toml` field) |
 | `BRAIN_VAULT_PATH` | — | Legacy: enables pre-v2 BRAIN_VAULT_PATH-only mode (no daemon contract) |
 

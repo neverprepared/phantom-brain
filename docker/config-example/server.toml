@@ -70,6 +70,17 @@ max_bytes      = 10485760   # 10 MB; non-2xx or larger response is a non-fatal e
 timeout_secs   = 30
 # user_agent  = "phantom-brain/2"  # uncomment to override default
 
+# Synth LLM backend — runs the gate verdict, distillation, and entity
+# extraction. Default is Ollama (local, zero Claude tokens). The model
+# MUST be pulled on the Ollama host first: `ollama pull qwen2.5:7b`.
+# Set backend = "claude" to use the bundled `claude` CLI instead (needs
+# CLAUDE_CODE_OAUTH_TOKEN; higher quality, costs tokens). Env overrides:
+# PB_SYNTH_BACKEND, PB_SYNTH_OLLAMA_MODEL, OLLAMA_BASE_URL.
+[synth]
+backend         = "ollama"
+ollama_base_url = "http://ollama:11434"   # compose service; host shell uses localhost:11434
+ollama_model    = "qwen2.5:7b"
+
 [defaults]
 retention_gens = 30
 reaper_poll_interval_secs = 5

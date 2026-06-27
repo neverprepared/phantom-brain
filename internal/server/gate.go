@@ -93,7 +93,7 @@ const (
 // daemon doesn't stall the synthesizer. Curated sources short-circuit
 // with the fixed "curated source — human curation is the quality signal"
 // verdict, same as the TS port.
-func RunGate(ctx context.Context, opts GateOpts) GateVerdict {
+func RunGate(ctx context.Context, llm LLMBackend, opts GateOpts) GateVerdict {
 	if opts.SourceType == "curated" {
 		return GateVerdict{
 			Reliability: ReliabilityMedium,
@@ -110,11 +110,16 @@ func RunGate(ctx context.Context, opts GateOpts) GateVerdict {
 	if timeout == 0 {
 		timeout = defaultGateTimeout
 	}
-	stdout, err := CallClaudeCLI(ctx, prompt, opts.Model, timeout)
+	stdout, err := llm.Complete(ctx, LLMRequest{
+		Prompt:  prompt,
+		Model:   opts.Model,
+		Timeout: timeout,
+		JSON:    true,
+	})
 	if err != nil {
 		return GateVerdict{
 			Reliability: ReliabilityMedium,
-			Reason:      "Gate CLI call failed: " + err.Error(),
+			Reason:      "Gate LLM call failed: " + err.Error(),
 		}
 	}
 	v, parseErr := parseGateVerdict(stdout)
@@ -214,7 +219,7 @@ func parseGateVerdict(raw string) (GateVerdict, error) {
 // returns the 3-5 paragraph prose summary. Returns "" + nil error
 // when summarization should be skipped (e.g. CLI missing); callers
 // fall back to the raw content in that case.
-func SummarizeContent(ctx context.Context, title, content, model string, timeout time.Duration) (string, error) {
+func SummarizeContent(ctx context.Context, llm LLMBackend, title, content, model string, timeout time.Duration) (string, error) {
 	if timeout == 0 {
 		timeout = defaultSummarizeTimeout
 	}
@@ -229,7 +234,13 @@ func SummarizeContent(ctx context.Context, title, content, model string, timeout
 	fmt.Fprintf(&b, "Title: %s\n\n", title)
 	b.WriteString("Content:\n")
 	b.WriteString(preview)
-	out, err := CallClaudeCLI(ctx, b.String(), model, timeout)
+	out, err := llm.Complete(ctx, LLMRequest{
+		Prompt:  b.String(),
+		Model:   model,
+		Timeout: timeout,
+		// Free-form prose — do NOT constrain to JSON.
+		JSON: false,
+	})
 	if err != nil {
 		return "", err
 	}

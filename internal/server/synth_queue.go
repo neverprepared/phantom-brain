@@ -95,10 +95,13 @@ type SynthWorker struct {
 	// Stores false in the goroutine's defer.
 	backfilling atomic.Bool
 
-	// cliAvailable is snapshotted at construction so the worker
-	// behaves predictably across the run — toggling the CLI in/out
-	// of $PATH at runtime would otherwise produce mixed-mode output.
-	cliAvailable bool
+	// llm is the synth text-generation backend (Ollama by default, or
+	// the Claude CLI) used for the gate verdict, distillation, and entity
+	// extraction. Nil when synth LLM calls are disabled (tests, or no
+	// backend wired) — the pipeline then degrades to coherence-only gate,
+	// raw-content body, and the regex entity extractor. Snapshotted at
+	// construction so the backend choice is stable across the run.
+	llm LLMBackend
 
 	// capture wires the raw-source archival path. When the binding's
 	// AttachmentStore is non-nil and Capture.Enabled, processJob fetches
@@ -176,11 +179,18 @@ type SynthWorkerOpts struct {
 	// single-operator deploy; bursts that exceed it drop oldest-
 	// first (TryEnqueue returns false, caller logs).
 	BufferSize int
-	// DisableCLI forces the worker to skip both RunGate and
-	// SummarizeContent's LLM call paths. Used by tests to keep the
-	// pipeline deterministic and fast (no real claude subprocess);
-	// production leaves this false and probes the CLI at startup.
+	// DisableCLI forces the worker to skip all synth LLM calls (gate,
+	// distill, entity extraction) regardless of LLM. Used by tests to keep
+	// the pipeline deterministic and fast (no subprocess / network);
+	// production leaves this false and wires LLM.
 	DisableCLI bool
+
+	// LLM is the synth text-generation backend. Production wires
+	// NewLLMBackend(cfg.Synth) — Ollama by default, or the Claude CLI when
+	// [synth] backend = "claude". When nil (and DisableCLI is false), the
+	// worker falls back to the Claude CLI backend for backward
+	// compatibility with callers that predate this field.
+	LLM LLMBackend
 	// Capture wires raw-source archival. The per-binding AttachmentStore
 	// (from Resolve) is the blob target; this carries the enable flag +
 	// limits.
@@ -205,9 +215,15 @@ func NewSynthWorker(opts SynthWorkerOpts) *SynthWorker {
 	if opts.BufferSize <= 0 {
 		opts.BufferSize = 1000
 	}
-	cli := ClaudeCLIAvailable()
-	if opts.DisableCLI {
-		cli = false
+	// Resolve the synth backend. DisableCLI wins (tests want no LLM at
+	// all). Otherwise use the wired backend, falling back to the Claude
+	// CLI for callers that don't set one (back-compat).
+	var backend LLMBackend
+	if !opts.DisableCLI {
+		backend = opts.LLM
+		if backend == nil {
+			backend = claudeBackend{}
+		}
 	}
 	extractor := opts.PDFExtractor
 	pdfAvail := PdftotextAvailable()
@@ -223,7 +239,7 @@ func NewSynthWorker(opts SynthWorkerOpts) *SynthWorker {
 		queue:         make(chan synthJob, opts.BufferSize),
 		bufSize:       opts.BufferSize,
 		stopped:       make(chan struct{}),
-		cliAvailable:  cli,
+		llm:           backend,
 		capture:       opts.Capture,
 		pdfExtractor:  extractor,
 		pdfAvailable:  extractor != nil,
@@ -455,10 +471,27 @@ func (w *SynthWorker) sweepOnce(ctx context.Context) {
 	}
 }
 
+// llmReady reports whether the synth backend can serve a request. False
+// when no backend is wired (DisableCLI) or the backend is unreachable —
+// callers then degrade to coherence-only gate / raw-content / regex
+// entities rather than blocking synth.
+func (w *SynthWorker) llmReady() bool {
+	return w.llm != nil && w.llm.Available()
+}
+
+// backendName is a short label for logs; "disabled" when no backend.
+func (w *SynthWorker) backendName() string {
+	if w.llm == nil {
+		return "disabled"
+	}
+	return w.llm.Name()
+}
+
 func (w *SynthWorker) run(ctx context.Context) {
 	w.logger.Info("phantom-brain: synth worker started",
 		slog.Int("buf_size", w.bufSize),
-		slog.Bool("claude_cli", w.cliAvailable),
+		slog.String("synth_backend", w.backendName()),
+		slog.Bool("synth_backend_ready", w.llmReady()),
 		slog.Bool("pdftotext", w.pdfAvailable),
 		slog.Bool("tesseract_ocr", w.ocrAvailable),
 	)
@@ -601,8 +634,8 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 	} else if doc.Reliability == osearch.ReliabilityMedium && doc.GateReason != "" &&
 		strings.HasPrefix(doc.GateReason, "curated") {
 		// Learn() already stamped curated-medium; skip the LLM gate.
-	} else if w.cliAvailable {
-		verdict = RunGate(ctx, GateOpts{
+	} else if w.llmReady() {
+		verdict = RunGate(ctx, w.llm, GateOpts{
 			Title:      doc.Title,
 			SourceURL:  doc.SourceURL,
 			Content:    content,
@@ -611,11 +644,11 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 		})
 	}
 
-	// Distill. If the CLI is unavailable or fails we fall back to the raw
-	// content so the record still becomes searchable as a summary.
+	// Distill. If the backend is unavailable or fails we fall back to the
+	// raw content so the record still becomes searchable as a summary.
 	summary := ""
-	if w.cliAvailable {
-		s, sErr := SummarizeContent(ctx, doc.Title, content, "", 0)
+	if w.llmReady() {
+		s, sErr := SummarizeContent(ctx, w.llm, doc.Title, content, "", 0)
 		if sErr != nil {
 			w.logger.Warn("phantom-brain: summarize failed; using raw content",
 				slog.String("sha", job.SHA), slog.String("err", sErr.Error()))
@@ -627,9 +660,9 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 		summary = content
 	}
 
-	// Extract entities from RAW content. LLM-driven when claude is
+	// Extract entities from RAW content. LLM-driven when the backend is
 	// available; falls back to the regex extractor otherwise.
-	entities := extractEntitiesBest(ctx, doc.Title, content, w.cliAvailable, w.logger)
+	entities := extractEntitiesBest(ctx, w.llm, doc.Title, content, w.logger)
 	// entityNames maps slug → display name for the SoR entity upserts.
 	entityNames := make(map[string]string, len(entities))
 	for _, ent := range entities {

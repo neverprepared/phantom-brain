@@ -70,7 +70,31 @@ type ServerConfig struct {
 	// untouched. See PostgresConfig + internal/server/pg_binding_views.go.
 	Postgres PostgresConfig `toml:"postgres"`
 
+	// Synth selects + configures the daemon-side LLM backend used for the
+	// gate verdict, distillation, and entity extraction. Default backend is
+	// Ollama (local, zero Claude tokens); backend = "claude" uses the
+	// bundled `claude` CLI instead. See SynthConfig + internal/server/llm.go.
+	Synth SynthConfig `toml:"synth"`
+
 	Defaults VaultDefaults `toml:"defaults"`
+}
+
+// SynthConfig mirrors the [synth] block in server.toml:
+//
+//	[synth]
+//	backend         = "ollama"                  # "ollama" (default) | "claude"
+//	ollama_base_url = "http://localhost:11434"  # default DefaultBaseURL
+//	ollama_model    = "qwen2.5:7b"              # default DefaultGenModel
+//
+// Env overrides (win over the TOML): PB_SYNTH_BACKEND, OLLAMA_BASE_URL
+// (shared with the embedding client), PB_SYNTH_OLLAMA_MODEL. Empty
+// base_url / model resolve to the ollama package defaults at backend
+// construction. The chosen Ollama model MUST be pulled locally on the
+// Ollama host (`ollama pull <model>`).
+type SynthConfig struct {
+	Backend       string `toml:"backend"`
+	OllamaBaseURL string `toml:"ollama_base_url"`
+	OllamaModel   string `toml:"ollama_model"`
 }
 
 // PostgresConfig mirrors the [postgres] block in server.toml. DSN is the
@@ -151,6 +175,24 @@ func applyServerDefaults(cfg *ServerConfig) {
 	if cfg.Storage.Backend == "" {
 		cfg.Storage.Backend = "local"
 	}
+
+	// Synth backend selection. Env overrides win over the TOML; an unset
+	// backend defaults to Ollama. Empty base_url / model are left empty
+	// here and resolved to the ollama package defaults in NewLLMBackend.
+	s := &cfg.Synth
+	if v := strings.TrimSpace(os.Getenv("PB_SYNTH_BACKEND")); v != "" {
+		s.Backend = v
+	}
+	if s.Backend == "" {
+		s.Backend = "ollama"
+	}
+	if v := strings.TrimSpace(os.Getenv("OLLAMA_BASE_URL")); v != "" {
+		s.OllamaBaseURL = v
+	}
+	if v := strings.TrimSpace(os.Getenv("PB_SYNTH_OLLAMA_MODEL")); v != "" {
+		s.OllamaModel = v
+	}
+
 	d := &cfg.Defaults
 	if d.ReaperPollIntervalSecs == 0 {
 		d.ReaperPollIntervalSecs = 5

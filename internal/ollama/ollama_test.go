@@ -184,6 +184,117 @@ func TestEmbedContextCancellation(t *testing.T) {
 	}
 }
 
+func TestGenerate(t *testing.T) {
+	t.Run("plain prose, no json format", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/generate" {
+				t.Errorf("path = %q, want /api/generate", r.URL.Path)
+			}
+			var req generateRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatal(err)
+			}
+			if req.Model != "gen-model" {
+				t.Errorf("model = %q, want gen-model", req.Model)
+			}
+			if req.Stream {
+				t.Error("Stream must be false")
+			}
+			if req.Format != "" {
+				t.Errorf("Format = %q, want empty for prose", req.Format)
+			}
+			if req.Prompt != "summarise this" {
+				t.Errorf("prompt = %q", req.Prompt)
+			}
+			_ = json.NewEncoder(w).Encode(generateResponse{Response: "  a summary  ", Done: true})
+		}))
+		defer srv.Close()
+
+		c := New(Options{BaseURL: srv.URL})
+		// Generate returns raw response (caller trims); assert untrimmed.
+		got, err := c.Generate(context.Background(), "gen-model", "summarise this", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "  a summary  " {
+			t.Errorf("got %q, want untrimmed summary", got)
+		}
+	})
+
+	t.Run("json format pins format field", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req generateRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.Format != "json" {
+				t.Errorf("Format = %q, want json", req.Format)
+			}
+			_ = json.NewEncoder(w).Encode(generateResponse{Response: `{"reliability":"high"}`})
+		}))
+		defer srv.Close()
+
+		c := New(Options{BaseURL: srv.URL})
+		got, err := c.Generate(context.Background(), "m", "rate this", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(got, "reliability") {
+			t.Errorf("got %q", got)
+		}
+	})
+
+	t.Run("empty model falls back to client model", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req generateRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.Model != "configured-model" {
+				t.Errorf("model = %q, want configured-model fallback", req.Model)
+			}
+			_ = json.NewEncoder(w).Encode(generateResponse{Response: "ok"})
+		}))
+		defer srv.Close()
+
+		c := New(Options{BaseURL: srv.URL, Model: "configured-model"})
+		if _, err := c.Generate(context.Background(), "", "x", false); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("http error is wrapped with status + body", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "model not found: qwen2.5:7b", http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		c := New(Options{BaseURL: srv.URL})
+		_, err := c.Generate(context.Background(), "qwen2.5:7b", "x", false)
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !strings.Contains(err.Error(), "model not found") || !strings.Contains(err.Error(), "404") {
+			t.Errorf("error should carry status + server message; got: %v", err)
+		}
+	})
+
+	t.Run("context cancellation surfaces", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-time.After(2 * time.Second):
+			case <-r.Context().Done():
+			}
+		}))
+		defer srv.Close()
+
+		// No transport timeout — ctx is the sole deadline (matches how the
+		// server's ollamaBackend builds its client).
+		c := New(Options{BaseURL: srv.URL, HTTP: &http.Client{}})
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		if _, err := c.Generate(ctx, "m", "x", false); err == nil {
+			t.Fatal("expected context deadline error")
+		}
+	})
+}
+
 func TestHealth(t *testing.T) {
 	t.Run("ok", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

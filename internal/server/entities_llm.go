@@ -20,12 +20,20 @@ import (
 // On any failure (CLI missing, timeout, parse error) returns the
 // error — callers fall back to ExtractEntities (the regex path) for
 // resilience.
-func ExtractEntitiesLLM(ctx context.Context, title, body, model string, timeout time.Duration) ([]string, error) {
+func ExtractEntitiesLLM(ctx context.Context, llm LLMBackend, title, body, model string, timeout time.Duration) ([]string, error) {
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
 	prompt := buildEntityPrompt(title, body)
-	raw, err := CallClaudeCLI(ctx, prompt, model, timeout)
+	raw, err := llm.Complete(ctx, LLMRequest{
+		Prompt:  prompt,
+		Model:   model,
+		Timeout: timeout,
+		// Output is a JSON array; the prompt + parser already tolerate
+		// prose/fences, and array-shaped responses are less reliable
+		// under Ollama's object-biased json mode, so leave it free-form.
+		JSON: false,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("entities LLM: %w", err)
 	}
@@ -142,9 +150,9 @@ func truncate(s string, max int) string {
 // This is what the SynthWorker should call — it gets the cleaner
 // LLM-driven output when the CLI is available, and the regex
 // behaviour when it isn't. Same return shape either way.
-func extractEntitiesBest(ctx context.Context, title, body string, cliAvailable bool, logger *slog.Logger) []string {
-	if cliAvailable {
-		names, err := ExtractEntitiesLLM(ctx, title, body, "", 60*time.Second)
+func extractEntitiesBest(ctx context.Context, llm LLMBackend, title, body string, logger *slog.Logger) []string {
+	if llm != nil && llm.Available() {
+		names, err := ExtractEntitiesLLM(ctx, llm, title, body, "", 60*time.Second)
 		if err == nil {
 			return names
 		}
