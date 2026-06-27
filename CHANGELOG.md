@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.9.0](https://github.com/neverprepared/phantom-brain/compare/v3.8.0...v3.9.0) (2026-06-27)
+
+
+### Features
+
+* Phase D2b — delete snapshot machinery + local sqlite-vec cache ([#92](https://github.com/neverprepared/phantom-brain/issues/92), [#110](https://github.com/neverprepared/phantom-brain/issues/110)) ([#112](https://github.com/neverprepared/phantom-brain/issues/112)) ([99d6819](https://github.com/neverprepared/phantom-brain/commit/99d68199736683f88c28ef2d8ed3a7582ade33ef))
+
 ## [3.8.0](https://github.com/neverprepared/phantom-brain/compare/v3.7.0...v3.8.0) (2026-06-27)
 
 
