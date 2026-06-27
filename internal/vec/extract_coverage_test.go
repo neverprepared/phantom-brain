@@ -10,30 +10,33 @@ import (
 	"testing"
 )
 
-// deterministicDylibPath recomputes the per-process temp path that
-// extractDylib derives from the embedded bytes, so a test can probe or
-// delete the on-disk file without reaching into unexported helpers.
-func deterministicDylibPath(t *testing.T) string {
+// deterministicDylibPath recomputes the path extractDylib derives from the
+// embedded bytes under the given dir, so a test can probe or delete the
+// on-disk file without reaching into unexported helpers.
+//
+// Tests pass an isolated t.TempDir() (never os.TempDir()) so their
+// delete/plant/truncate manipulations can't race the shared production
+// dylib that sibling packages (e.g. internal/sqlite) load concurrently
+// under `go test ./...`.
+func deterministicDylibPath(t *testing.T, dir string) string {
 	t.Helper()
 	if len(dylibBytes) == 0 {
 		t.Skip("no vendored dylib on this platform; extractDylib write paths are unreachable")
 	}
 	sum := sha256.Sum256(dylibBytes)
 	name := fmt.Sprintf("pbrainctl-vec-%s%s", hex.EncodeToString(sum[:8]), dylibExt)
-	return filepath.Join(os.TempDir(), name)
+	return filepath.Join(dir, name)
 }
 
 // TestExtractDylibWritesFreshWhenMissing forces the CreateTemp → Write →
-// Chmod → Rename branch by deleting the deterministic target first. The
+// Chmod → Rename branch by pointing extractDylib at an empty dir. The
 // happy fast-path (stat hit) skips all of that, which is why the cold
 // write path was previously uncovered.
 func TestExtractDylibWritesFreshWhenMissing(t *testing.T) {
-	path := deterministicDylibPath(t)
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		t.Fatalf("pre-clean target: %v", err)
-	}
+	dir := t.TempDir()
+	path := deterministicDylibPath(t, dir)
 
-	got, err := extractDylib()
+	got, err := extractDylib(dir)
 	if err != nil {
 		t.Fatalf("extractDylib: %v", err)
 	}
@@ -66,14 +69,15 @@ func TestExtractDylibWritesFreshWhenMissing(t *testing.T) {
 // must NOT trust it and must rewrite full content. A size check that
 // trusted any existing file would leave a corrupt extension on disk.
 func TestExtractDylibRewritesOnSizeMismatch(t *testing.T) {
-	path := deterministicDylibPath(t)
+	dir := t.TempDir()
+	path := deterministicDylibPath(t, dir)
 
 	// Plant a wrong-size file (1 byte) where the real dylib belongs.
 	if err := os.WriteFile(path, []byte{0x00}, 0o600); err != nil {
 		t.Fatalf("plant truncated file: %v", err)
 	}
 
-	got, err := extractDylib()
+	got, err := extractDylib(dir)
 	if err != nil {
 		t.Fatalf("extractDylib: %v", err)
 	}
@@ -97,38 +101,29 @@ func TestExtractDylibRewritesOnSizeMismatch(t *testing.T) {
 // cleanup path. Planting a non-empty directory at the deterministic
 // target makes os.Stat succeed (so the fast path is skipped on a size
 // mismatch), the fresh write succeed, and the final os.Rename(tmp, dir)
-// fail — driving the error return + temp-file cleanup branch. We then
-// restore a good file so later tests' fast path still works.
+// fail — driving the error return + temp-file cleanup branch.
 func TestExtractDylibRenameError(t *testing.T) {
-	path := deterministicDylibPath(t)
+	dir := t.TempDir()
+	path := deterministicDylibPath(t, dir)
 
-	// Remove any existing regular file, then plant a non-empty dir.
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		t.Fatalf("pre-clean: %v", err)
-	}
+	// Plant a non-empty dir at the target so the final rename fails.
 	if err := os.Mkdir(path, 0o700); err != nil {
 		t.Fatalf("plant dir at target: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(path, "occupant"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("populate dir: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = os.RemoveAll(path)
-		// Re-materialize a valid dylib so sibling tests / packages that
-		// open the vec driver after this one still find a good file.
-		_, _ = extractDylib()
-	})
 
-	tmpBefore, _ := filepath.Glob(filepath.Join(os.TempDir(), "pbrainctl-vec-*.tmp"))
+	tmpBefore, _ := filepath.Glob(filepath.Join(dir, "pbrainctl-vec-*.tmp"))
 
-	_, err := extractDylib()
+	_, err := extractDylib(dir)
 	if err == nil {
 		t.Fatal("extractDylib succeeded renaming onto a directory; want error")
 	}
 
 	// The failed write must not leak its O_EXCL temp file: cleanup runs
 	// os.Remove on the temp before returning the error.
-	tmpAfter, _ := filepath.Glob(filepath.Join(os.TempDir(), "pbrainctl-vec-*.tmp"))
+	tmpAfter, _ := filepath.Glob(filepath.Join(dir, "pbrainctl-vec-*.tmp"))
 	if len(tmpAfter) > len(tmpBefore) {
 		t.Errorf("rename-error path leaked a temp file: before=%v after=%v", tmpBefore, tmpAfter)
 	}
@@ -139,10 +134,11 @@ func TestExtractDylibRenameError(t *testing.T) {
 // rewrite. We prove "no rewrite" by stamping the file with an old mtime
 // and asserting it is preserved across the call.
 func TestExtractDylibFastPathReusesGoodFile(t *testing.T) {
-	path := deterministicDylibPath(t)
+	dir := t.TempDir()
+	path := deterministicDylibPath(t, dir)
 
 	// Ensure a correct file is present first.
-	if _, err := extractDylib(); err != nil {
+	if _, err := extractDylib(dir); err != nil {
 		t.Fatalf("seed extractDylib: %v", err)
 	}
 
@@ -151,7 +147,7 @@ func TestExtractDylibFastPathReusesGoodFile(t *testing.T) {
 		t.Fatalf("stat seeded file: %v", err)
 	}
 
-	got, err := extractDylib()
+	got, err := extractDylib(dir)
 	if err != nil {
 		t.Fatalf("extractDylib (fast path): %v", err)
 	}

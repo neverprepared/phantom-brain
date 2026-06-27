@@ -187,6 +187,66 @@ func newWorkerWithFakes(t *testing.T, store synthStore, attach AttachmentStore, 
 	}
 }
 
+// TestSynthWorker_SweeperDrainsBacklogWithoutEnqueue is the C1 durability
+// proof: a record left Synthesised=false in the SoR (simulating a synth
+// job the lossy Enqueue fast path dropped) is picked up and synthesised by
+// the background sweeper ALONE — no Enqueue is ever called. This is what
+// makes a dropped fast-path enqueue harmless. Run under -race it also
+// exercises the sweeper ↔ (idle) live-loop concurrency through processMu.
+func TestSynthWorker_SweeperDrainsBacklogWithoutEnqueue(t *testing.T) {
+	store := newFakeSynthStore()
+	sha := "sweep-me"
+	store.put(noteRecord("p", "v", sha, "Sweeper picks this up",
+		"This record was never Enqueued; only the sweeper sees it.", 1))
+	cap := newSynthCapture()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := NewSynthWorker(SynthWorkerOpts{
+		Logger:        slog.New(slog.DiscardHandler),
+		BufferSize:    16,
+		DisableCLI:    true,
+		SweepInterval: 20 * time.Millisecond,
+	})
+	w.Resolve = func(string, string) (synthStore, AttachmentStore, bool) {
+		return store, nil, true
+	}
+	w.WriteSynth = cap.writeSynth
+	w.Bindings = func() []VaultKey { return []VaultKey{{Profile: "p", Vault: "v"}} }
+	w.Start(ctx)
+	defer w.Stop()
+
+	// Deliberately NO w.Enqueue(...) — the sweeper is the only path that can
+	// reach this record.
+	waitUntil(t, 5*time.Second, func() bool { _, ok := cap.result(sha); return ok })
+
+	res, _ := cap.result(sha)
+	if res.Body == "" {
+		t.Error("sweeper-synthesised record has empty body")
+	}
+	if res.Reliability == "" {
+		t.Error("sweeper-synthesised record missing reliability")
+	}
+}
+
+// TestSynthWorker_SweeperNilBindingsIsNoop confirms the nil-safe contract:
+// a worker without Bindings wired (the unit-test default) never sweeps, so
+// pre-C1 tests are unaffected.
+func TestSynthWorker_SweeperNilBindingsIsNoop(t *testing.T) {
+	store := newFakeSynthStore()
+	store.put(noteRecord("p", "v", "x", "t", "b", 1))
+	cap := newSynthCapture()
+
+	_, cleanup := newWorkerWithFakes(t, store, nil, cap, nil)
+	defer cleanup()
+
+	// Bindings is nil ⇒ sweeper is a no-op. Give it time to (not) run.
+	time.Sleep(80 * time.Millisecond)
+	if _, ok := cap.result("x"); ok {
+		t.Error("sweeper ran despite nil Bindings — should be a no-op")
+	}
+}
+
 func TestSynthWorker_EnrichesRawDoc(t *testing.T) {
 	store := newFakeSynthStore()
 	sha := "abc"

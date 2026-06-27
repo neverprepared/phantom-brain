@@ -183,46 +183,55 @@ func (p *resolvingProjector) DeleteProjection(ctx context.Context, profile, vaul
 	return proj.DeleteProjection(ctx, profile, vault, sha)
 }
 
-// buildPGBindingDeps (re)builds the per-profile Postgres resources and the
-// per-binding pgBindingView entries on every cached bindingDeps. Called
-// from buildBindingDeps AFTER the OS/MinIO views are set, so the
-// bindingDeps pointers already exist in the cache.
+// buildPGBindingDeps fills the PG view on each staged *bindingDeps and
+// publishes the fully-built deps into the shared cache. `fresh` carries
+// the OS/MinIO views already assembled by buildBindingDeps but NOT yet
+// published — this function adds PG and Set()s the complete struct, so a
+// reader never observes a half-built deps (C3 race fix).
 //
-// Reload safety: any EXISTING d.pgProfiles are fully closed (River Stop +
-// pool Close) before rebuilding, so reload never leaks pools/goroutines.
-// The cache is then rebuilt fresh from the current registry.
+// C3 diff-only rebuild: per-profile Postgres resources (pool + River
+// client) are keyed by profile and depend only on the profile name (the
+// DSN is derived deterministically). On reload we therefore:
+//   - KEEP every profile that is still present (its pool + River client
+//     keep running untouched — no cross-tenant disruption);
+//   - BUILD only newly-added profiles (and Start their River client AFTER
+//     their bindings are published, so a projection worker never resolves
+//     through an unpublished deps);
+//   - CLOSE only removed profiles (River Stop + pool Close).
+// The lightweight per-binding view (Recaller/Projector over the binding's
+// OS prefix) is always rebuilt — that is how a storage_overrides prefix
+// edit takes effect — but it borrows the (possibly unchanged) profile
+// resources, so rebuilding it is cheap and non-disruptive.
 //
 // Phase D1: Postgres is MANDATORY. This returns an error when PG is
 // unconfigured or any binding's PG view fails to build. Start propagates
 // the error (fail-loud at boot); reload logs + tolerates partial failure
-// per the documented reload semantics. Returning an error leaves the
-// affected binding's PG view nil — resolvePG then fails loud per request.
-func (d *Daemon) buildPGBindingDeps() error {
+// per the documented reload semantics.
+func (d *Daemon) buildPGBindingDeps(fresh map[VaultKey]*bindingDeps) error {
 	d.pgMu.Lock()
 	defer d.pgMu.Unlock()
 
-	// Tear down any prior resources first (reload). Idempotent on first
-	// build (empty map).
-	d.closePGProfilesLocked()
-	d.pgProfiles = map[string]*pgProfileResources{}
+	if d.pgProfiles == nil {
+		d.pgProfiles = map[string]*pgProfileResources{}
+	}
 
-	// Disabled: PG is mandatory in D1 — refuse to build.
+	// Disabled: PG is mandatory in D1 — refuse to build. Still publish the
+	// OS/Attach views (PG nil) so non-PG paths/tests work, close any prior
+	// PG resources, then return the error.
 	if d.pgBaseDSN == "" {
-		for _, b := range d.registry.Vaults() {
-			if deps, ok := d.bindings.Get(b.Key); ok && deps != nil {
-				deps.PG = nil
-			}
+		d.closePGProfilesLocked()
+		d.pgProfiles = map[string]*pgProfileResources{}
+		for k, deps := range fresh {
+			d.bindings.Set(k, deps) // PG nil
 		}
 		return errors.New("server: postgres DSN not configured — the Postgres SoR is mandatory (set [postgres] dsn or PB_POSTGRES_DSN)")
 	}
-
 	// OS projection needs the base client to ensure indices + pipeline.
-	// Without it we can't project — fail loud.
 	if d.osBase == nil {
-		for _, b := range d.registry.Vaults() {
-			if deps, ok := d.bindings.Get(b.Key); ok && deps != nil {
-				deps.PG = nil
-			}
+		d.closePGProfilesLocked()
+		d.pgProfiles = map[string]*pgProfileResources{}
+		for k, deps := range fresh {
+			d.bindings.Set(k, deps) // PG nil
 		}
 		return errors.New("server: postgres requires opensearch for the pb_records projection target, but opensearch is not configured")
 	}
@@ -232,67 +241,108 @@ func (d *Daemon) buildPGBindingDeps() error {
 		ctx = context.Background()
 	}
 
-	// The hybrid search pipeline is a CLUSTER resource — ensure it once
-	// total, not per binding.
-	pipelineEnsured := false
-	ensurePipeline := func() error {
-		if pipelineEnsured {
-			return nil
-		}
-		if err := osproject.EnsureSearchPipeline(ctx, d.osBase); err != nil {
-			return err
-		}
-		pipelineEnsured = true
-		return nil
+	// Distinct profiles the new registry needs.
+	needed := map[string]struct{}{}
+	for k := range fresh {
+		needed[k.Profile] = struct{}{}
 	}
 
-	// Build per-PROFILE resources once. Collect distinct profiles across
-	// all bindings.
-	profiles := map[string]struct{}{}
-	for _, b := range d.registry.Vaults() {
-		profiles[b.Key.Profile] = struct{}{}
-	}
-	for profile := range profiles {
+	// Build ADDED profiles (present in needed, absent from the live map).
+	// Do NOT Start their River clients yet — Start happens after the
+	// bindings that resolve through them are published.
+	var newlyAdded []string
+	for profile := range needed {
+		if _, ok := d.pgProfiles[profile]; ok {
+			continue // unchanged — keep the running pool + River client
+		}
 		res, err := d.buildPGProfileResources(ctx, profile)
 		if err != nil {
+			// Non-fatal disable contract: publish the OS/Attach views with
+			// PG nil so legacy/non-PG read paths still resolve, then fail
+			// loud (Start aborts boot; reload logs + tolerates).
+			d.publishFreshLocked(fresh)
 			return fmt.Errorf("server: postgres profile resources for %q: %w", profile, err)
 		}
 		d.pgProfiles[profile] = res
+		newlyAdded = append(newlyAdded, profile)
 	}
 
-	// Build per-BINDING views, attaching to the profile-shared resources.
+	// Hybrid search pipeline is a CLUSTER resource — ensure once (idempotent).
+	if err := osproject.EnsureSearchPipeline(ctx, d.osBase); err != nil {
+		d.publishFreshLocked(fresh)
+		return fmt.Errorf("server: postgres search pipeline ensure: %w", err)
+	}
+
+	// Assemble each binding's PG view on its staged deps, then publish the
+	// COMPLETE deps via a single atomic Set (never mutate after publish).
 	for _, b := range d.registry.Vaults() {
-		deps, ok := d.bindings.Get(b.Key)
+		deps, ok := fresh[b.Key]
 		if !ok || deps == nil {
-			return fmt.Errorf("server: no binding deps cached for %s (cannot attach postgres view)", b.Key)
+			continue
 		}
 		res, ok := d.pgProfiles[b.Key.Profile]
 		if !ok {
-			deps.PG = nil
+			d.publishFreshLocked(fresh)
 			return fmt.Errorf("server: postgres profile resources missing for %s", b.Key)
 		}
 		if err := osproject.EnsureIndex(ctx, d.osBase, b.Storage.IndexPrefix); err != nil {
-			deps.PG = nil
+			d.publishFreshLocked(fresh)
 			return fmt.Errorf("server: postgres projection index ensure for %s (prefix %q): %w", b.Key, b.Storage.IndexPrefix, err)
-		}
-		if err := ensurePipeline(); err != nil {
-			deps.PG = nil
-			return fmt.Errorf("server: postgres search pipeline ensure for %s: %w", b.Key, err)
 		}
 		deps.PG = &pgBindingView{
 			res:       res,
 			recaller:  osproject.NewRecaller(d.osBase, b.Storage.IndexPrefix),
 			projector: osproject.New(d.osBase, b.Storage.IndexPrefix),
 		}
+		d.bindings.Set(b.Key, deps) // atomic full publish
+	}
+
+	// Start newly-added River clients now that the bindings their workers
+	// resolve through are published (audit: don't Start before publish).
+	// The deps are already published and valid — even if Start fails, the
+	// pool is open and InsertTx still durably queues projection jobs (they
+	// just won't drain until a working client starts), so we keep the
+	// resource rather than closing it out from under published readers. We
+	// still return the error so boot fails loud; reload logs + tolerates.
+	for _, profile := range newlyAdded {
+		res := d.pgProfiles[profile]
+		if res == nil || res.river == nil {
+			continue
+		}
+		if err := res.river.Start(ctx); err != nil {
+			return fmt.Errorf("server: start river client for profile %q: %w", profile, err)
+		}
+	}
+
+	// Close REMOVED profiles (live but no longer needed). No binding deps
+	// reference them anymore, so it is safe to Stop + Close.
+	for profile, res := range d.pgProfiles {
+		if _, ok := needed[profile]; ok {
+			continue
+		}
+		d.closePGProfileResourceLocked(profile, res)
+		delete(d.pgProfiles, profile)
 	}
 	return nil
 }
 
-// buildPGProfileResources opens the per-profile pool, migrates River,
-// builds the projection worker (with the daemon's resolvingProjector so a
-// single client can project to many vault prefixes), and starts the River
-// client. On ANY error it cleanly closes whatever it opened and returns
-// the error (caller logs + disables — non-fatal).
+// publishFreshLocked Sets every staged deps into the shared cache as-is.
+// Used on the failure paths so OS/Attach views still resolve (with PG nil)
+// even when the PG build fails — the non-fatal disable contract. Each Set
+// publishes a complete struct (PG nil is a valid "disabled" state), so
+// readers never observe a torn deps. Caller MUST hold d.pgMu.
+func (d *Daemon) publishFreshLocked(fresh map[VaultKey]*bindingDeps) {
+	for k, deps := range fresh {
+		d.bindings.Set(k, deps)
+	}
+}
+
+// buildPGProfileResources opens the per-profile pool, migrates River, and
+// builds the projection worker + River client (with the daemon's
+// resolvingProjector so a single client can project to many vault
+// prefixes). It does NOT Start the River client — the caller Starts it
+// only after the bindings it resolves through are published. On ANY error
+// it cleanly closes whatever it opened and returns the error.
 func (d *Daemon) buildPGProfileResources(ctx context.Context, profile string) (*pgProfileResources, error) {
 	dsn, err := pgstore.DSNForProfile(d.pgBaseDSN, profile)
 	if err != nil {
@@ -318,33 +368,37 @@ func (d *Daemon) buildPGProfileResources(ctx context.Context, profile string) (*
 		pool.Close()
 		return nil, fmt.Errorf("server: new river client for profile %q: %w", profile, err)
 	}
-	if err := client.Start(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("server: start river client for profile %q: %w", profile, err)
-	}
 
 	return &pgProfileResources{pool: pool, river: client}, nil
 }
 
+// closePGProfileResourceLocked stops one profile's River client (bounded
+// ctx) then closes its pool. Caller MUST hold d.pgMu. Errors are logged,
+// never fatal.
+func (d *Daemon) closePGProfileResourceLocked(profile string, res *pgProfileResources) {
+	if res == nil {
+		return
+	}
+	if res.river != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := res.river.Stop(stopCtx); err != nil {
+			d.Logger.Warn("phantom-brain: postgres river client stop error",
+				slog.String("profile", profile),
+				slog.String("err", err.Error()))
+		}
+		cancel()
+	}
+	if res.pool != nil {
+		res.pool.Close()
+	}
+}
+
 // closePGProfilesLocked stops every River client (bounded ctx) then closes
 // each pool. Caller MUST hold d.pgMu. Errors are logged, never fatal.
+// Used by Shutdown and by the PG-disabled reload path.
 func (d *Daemon) closePGProfilesLocked() {
 	for profile, res := range d.pgProfiles {
-		if res == nil {
-			continue
-		}
-		if res.river != nil {
-			stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			if err := res.river.Stop(stopCtx); err != nil {
-				d.Logger.Warn("phantom-brain: postgres river client stop error",
-					slog.String("profile", profile),
-					slog.String("err", err.Error()))
-			}
-			cancel()
-		}
-		if res.pool != nil {
-			res.pool.Close()
-		}
+		d.closePGProfileResourceLocked(profile, res)
 	}
 	d.pgProfiles = nil
 }

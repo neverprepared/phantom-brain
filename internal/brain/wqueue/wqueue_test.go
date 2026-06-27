@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/neverprepared/phantom-brain/internal/sqlite"
 )
 
 func openTest(t *testing.T) *Queue {
@@ -426,4 +428,102 @@ var errTransient = errors.New("transient")
 func filepathJoin(t *testing.T, i int) string {
 	t.Helper()
 	return "sha-" + filepath.Base(t.TempDir()) + "-" + string(rune('a'+i))
+}
+
+// --- C2: dead-letter state ----------------------------------------------
+
+func TestMarkDeadExcludedFromEligibleButListed(t *testing.T) {
+	q := openTest(t)
+	ctx := context.Background()
+	it, err := q.Enqueue(ctx, EnqueueOpts{Kind: KindPerceive, SHA: "dead1", PayloadJSON: []byte(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.MarkDead(ctx, it.ID, time.Now(), "HTTP 400 bad request"); err != nil {
+		t.Fatalf("MarkDead: %v", err)
+	}
+	// Excluded from NextEligible — never retried again.
+	elig, err := q.NextEligible(ctx, time.Now(), 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(elig) != 0 {
+		t.Fatalf("dead row still eligible: %d", len(elig))
+	}
+	// Retained for inspection via ListDead + flagged in List.
+	dead, _ := q.ListDead(ctx, 0)
+	if len(dead) != 1 || !dead[0].Dead || dead[0].DeadReason != "HTTP 400 bad request" {
+		t.Fatalf("ListDead = %+v", dead)
+	}
+	all, _ := q.List(ctx, 0)
+	if len(all) != 1 || !all[0].Dead {
+		t.Fatalf("List should include the dead row flagged: %+v", all)
+	}
+	// Still counted by Depth (clear's accounting).
+	if n, _ := q.Depth(ctx); n != 1 {
+		t.Fatalf("Depth = %d, want 1", n)
+	}
+}
+
+func TestClearRemovesDeadRows(t *testing.T) {
+	q := openTest(t)
+	ctx := context.Background()
+	live, _ := q.Enqueue(ctx, EnqueueOpts{Kind: KindPerceive, SHA: "live", PayloadJSON: []byte(`{}`)})
+	deadIt, _ := q.Enqueue(ctx, EnqueueOpts{Kind: KindLearn, SHA: "dead", PayloadJSON: []byte(`{}`)})
+	_ = live
+	if err := q.MarkDead(ctx, deadIt.ID, time.Now(), "perm"); err != nil {
+		t.Fatal(err)
+	}
+	n, err := q.Clear(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("Clear removed %d, want 2 (live + dead)", n)
+	}
+	if d, _ := q.Depth(ctx); d != 0 {
+		t.Fatalf("Depth after clear = %d", d)
+	}
+}
+
+// TestMigrateAddsDeadColumns proves an existing pre-C2 wqueue.sqlite (no
+// dead/dead_reason columns) is migrated in place on Open, and its existing
+// rows default to not-dead.
+func TestMigrateAddsDeadColumns(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "wqueue.sqlite")
+
+	// Hand-craft the OLD schema (no dead columns) + one row.
+	db, err := sqlite.Open(sqlite.Options{Path: dbPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const oldSchema = `CREATE TABLE wqueue (
+	  id INTEGER PRIMARY KEY AUTOINCREMENT,
+	  kind TEXT NOT NULL, sha TEXT NOT NULL, payload_json BLOB NOT NULL,
+	  staged_path TEXT NOT NULL DEFAULT '', enqueued_at INTEGER NOT NULL,
+	  attempts INTEGER NOT NULL DEFAULT 0, last_attempt_at INTEGER NOT NULL DEFAULT 0,
+	  claimed_at INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '',
+	  UNIQUE(kind, sha));`
+	if _, err := db.Exec(oldSchema); err != nil {
+		t.Fatalf("create old schema: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO wqueue(kind, sha, payload_json, enqueued_at) VALUES('perceive','old', x'7b7d', 1)`); err != nil {
+		t.Fatalf("seed old row: %v", err)
+	}
+	db.Close()
+
+	// Open via wqueue ⇒ migrateSchema ALTERs in the new columns.
+	q, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open (migrate): %v", err)
+	}
+	defer q.Close()
+	all, err := q.List(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("List after migrate: %v", err)
+	}
+	if len(all) != 1 || all[0].SHA != "old" || all[0].Dead {
+		t.Fatalf("migrated row = %+v (want 1 non-dead row sha=old)", all)
+	}
 }

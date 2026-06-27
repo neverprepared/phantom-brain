@@ -183,6 +183,106 @@ func TestDrainOnceIdempotentOnRedrain(t *testing.T) {
 	}
 }
 
+// TestDrainOncePermanent4xxDeadLetters proves a daemon 4xx rejection is
+// classified PERMANENT and dead-lettered immediately (not retried forever).
+func TestDrainOncePermanent4xxDeadLetters(t *testing.T) {
+	q := openQueue(t)
+	client, _ := newProgrammable(t, http.StatusBadRequest)
+	conn := NewConnectivity()
+	ctx := context.Background()
+	body, _ := json.Marshal(PerceiveRequest{SHA: "bad", Title: "t", Body: "b"})
+	q.Enqueue(ctx, wqueue.EnqueueOpts{Kind: wqueue.KindPerceive, SHA: "bad", PayloadJSON: body})
+
+	sent, failed, _ := DrainOnce(ctx, q, client, conn, slog.New(slog.DiscardHandler))
+	if sent != 0 || failed != 1 {
+		t.Fatalf("sent=%d failed=%d, want 0,1", sent, failed)
+	}
+	dead, err := q.ListDead(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dead) != 1 || !dead[0].Dead || dead[0].DeadReason == "" {
+		t.Fatalf("expected 1 dead row with reason, got %+v", dead)
+	}
+	// Not retried: a second pass selects nothing (dead excluded from NextEligible).
+	sent, failed, _ = DrainOnce(ctx, q, client, conn, slog.New(slog.DiscardHandler))
+	if sent != 0 || failed != 0 {
+		t.Fatalf("dead row was retried: sent=%d failed=%d", sent, failed)
+	}
+}
+
+// TestDrainOncePermanentUnmarshalDeadLetters proves a corrupt payload that
+// will never unmarshal is dead-lettered immediately.
+func TestDrainOncePermanentUnmarshalDeadLetters(t *testing.T) {
+	q := openQueue(t)
+	client, p := newProgrammable(t, http.StatusAccepted)
+	ctx := context.Background()
+	// Corrupt JSON — dispatch's json.Unmarshal fails before any POST.
+	q.Enqueue(ctx, wqueue.EnqueueOpts{Kind: wqueue.KindPerceive, SHA: "corrupt", PayloadJSON: []byte("{not valid json")})
+
+	sent, failed, _ := DrainOnce(ctx, q, client, NewConnectivity(), slog.New(slog.DiscardHandler))
+	if sent != 0 || failed != 1 {
+		t.Fatalf("sent=%d failed=%d, want 0,1", sent, failed)
+	}
+	if p.hits.Load() != 0 {
+		t.Fatalf("corrupt payload should never reach the daemon, hits=%d", p.hits.Load())
+	}
+	dead, _ := q.ListDead(ctx, 0)
+	if len(dead) != 1 {
+		t.Fatalf("expected 1 dead row, got %d", len(dead))
+	}
+}
+
+// TestDrainOnceMaxAttemptsDeadLetters proves a row that exhausts
+// MaxAttempts on transient failures is finally dead-lettered.
+func TestDrainOnceMaxAttemptsDeadLetters(t *testing.T) {
+	q := openQueue(t)
+	client, _ := newProgrammable(t, http.StatusServiceUnavailable) // 5xx ⇒ transient
+	ctx := context.Background()
+	body, _ := json.Marshal(LearnRequest{SHA: "tired", Title: "t", Body: "b"})
+	it, err := q.Enqueue(ctx, wqueue.EnqueueOpts{Kind: wqueue.KindLearn, SHA: "tired", PayloadJSON: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Burn attempts up to one shy of the cap, using an old timestamp so the
+	// backoff window is always elapsed (the row stays eligible).
+	old := time.Unix(0, 0)
+	for i := 0; i < wqueue.MaxAttempts-1; i++ {
+		if err := q.MarkAttempt(ctx, it.ID, old, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The next transient failure crosses the cap ⇒ dead.
+	sent, failed, _ := DrainOnce(ctx, q, client, NewConnectivity(), slog.New(slog.DiscardHandler))
+	if sent != 0 || failed != 1 {
+		t.Fatalf("sent=%d failed=%d, want 0,1", sent, failed)
+	}
+	dead, _ := q.ListDead(ctx, 0)
+	if len(dead) != 1 {
+		t.Fatalf("expected row dead-lettered at MaxAttempts, got %d dead", len(dead))
+	}
+}
+
+// TestDrainOnceTransientRetriesNotDead proves a single transient failure is
+// retried (attempt bumped, stays live), NOT dead-lettered.
+func TestDrainOnceTransientRetriesNotDead(t *testing.T) {
+	q := openQueue(t)
+	client, _ := newProgrammable(t, http.StatusServiceUnavailable)
+	ctx := context.Background()
+	body, _ := json.Marshal(LearnRequest{SHA: "later", Title: "t", Body: "b"})
+	q.Enqueue(ctx, wqueue.EnqueueOpts{Kind: wqueue.KindLearn, SHA: "later", PayloadJSON: body})
+
+	DrainOnce(ctx, q, client, NewConnectivity(), slog.New(slog.DiscardHandler))
+	dead, _ := q.ListDead(ctx, 0)
+	if len(dead) != 0 {
+		t.Fatalf("transient failure should not dead-letter, got %d dead", len(dead))
+	}
+	all, _ := q.List(ctx, 0)
+	if len(all) != 1 || all[0].Dead || all[0].Attempts != 1 {
+		t.Fatalf("expected 1 live row with attempts=1, got %+v", all)
+	}
+}
+
 func TestDrainerNilGuards(t *testing.T) {
 	// nil queue / nil client are no-ops, not panics.
 	sent, failed, err := DrainOnce(context.Background(), nil, nil, nil, nil)

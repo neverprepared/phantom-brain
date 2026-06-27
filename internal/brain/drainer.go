@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,6 +15,40 @@ import (
 
 // DefaultDrainInterval is the drainer's polling cadence.
 const DefaultDrainInterval = 30 * time.Second
+
+// ErrPermanentDispatch wraps a dispatch failure that will NEVER succeed
+// on retry (a corrupt payload that won't unmarshal, an unknown/invalid
+// kind). The drainer dead-letters such items immediately rather than
+// retrying them every backoff window for the life of the binding.
+var ErrPermanentDispatch = errors.New("drainer: permanent dispatch failure")
+
+// isPermanentFailure classifies a dispatch error as permanent (no point
+// retrying) vs transient (retry with backoff). The rules:
+//
+//   - ErrDaemonUnreachable (timeout / connection refused / EOF) → TRANSIENT.
+//   - HTTP 4xx (daemon rejected the request: bad SHA, empty title/body,
+//     unknown kind) → PERMANENT. The same bytes will be rejected again.
+//   - HTTP 5xx → TRANSIENT (server-side, may recover).
+//   - ErrPermanentDispatch (unmarshal / unknown-kind, client-side) → PERMANENT.
+//   - Anything else (e.g. a transient staged-file read error) → TRANSIENT,
+//     so it is still bounded by MaxAttempts rather than dead-lettered on
+//     a possibly-recoverable hiccup.
+func isPermanentFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrDaemonUnreachable) {
+		return false
+	}
+	if errors.Is(err, ErrPermanentDispatch) {
+		return true
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode >= 400 && apiErr.StatusCode < 500
+	}
+	return false
+}
 
 // DrainOnce performs a single drain pass against the queue using
 // client. Returns counts of items sent (deleted) and failed
@@ -51,7 +86,21 @@ func DrainOnce(ctx context.Context, q *wqueue.Queue, client *Client, conn *Conne
 			sent++
 			continue
 		}
-		if markErr := q.MarkAttempt(ctx, it.ID, now, dispatchErr); markErr != nil && logger != nil {
+		// Classify: a permanent (non-retryable) failure or one that has
+		// exhausted MaxAttempts is dead-lettered so NextEligible stops
+		// re-selecting it forever. Everything else is a transient miss —
+		// bump the attempt and let backoff retry.
+		if isPermanentFailure(dispatchErr) || it.Attempts+1 >= wqueue.MaxAttempts {
+			if markErr := q.MarkDead(ctx, it.ID, now, dispatchErr.Error()); markErr != nil && logger != nil {
+				logger.Warn("phantom-brain: wqueue mark dead failed",
+					slog.Int64("id", it.ID), slog.String("err", markErr.Error()))
+			} else if logger != nil {
+				logger.Warn("phantom-brain: wqueue item dead-lettered",
+					slog.Int64("id", it.ID), slog.String("kind", string(it.Kind)),
+					slog.String("sha", it.SHA), slog.Int("attempts", it.Attempts+1),
+					slog.String("reason", dispatchErr.Error()))
+			}
+		} else if markErr := q.MarkAttempt(ctx, it.ID, now, dispatchErr); markErr != nil && logger != nil {
 			logger.Warn("phantom-brain: wqueue mark attempt failed",
 				slog.Int64("id", it.ID), slog.String("err", markErr.Error()))
 		}
@@ -71,21 +120,21 @@ func dispatch(ctx context.Context, client *Client, it *wqueue.Item) error {
 	case wqueue.KindPerceive:
 		var req PerceiveRequest
 		if err := json.Unmarshal(it.PayloadJSON, &req); err != nil {
-			return fmt.Errorf("drainer: unmarshal perceive: %w", err)
+			return fmt.Errorf("drainer: unmarshal perceive: %w: %w", ErrPermanentDispatch, err)
 		}
 		_, err := client.Perceive(ctx, req)
 		return err
 	case wqueue.KindLearn, wqueue.KindTaskPromote:
 		var req LearnRequest
 		if err := json.Unmarshal(it.PayloadJSON, &req); err != nil {
-			return fmt.Errorf("drainer: unmarshal learn: %w", err)
+			return fmt.Errorf("drainer: unmarshal learn: %w: %w", ErrPermanentDispatch, err)
 		}
 		_, err := client.Learn(ctx, req)
 		return err
 	case wqueue.KindAttach:
 		var req AttachRequest
 		if err := json.Unmarshal(it.PayloadJSON, &req); err != nil {
-			return fmt.Errorf("drainer: unmarshal attach: %w", err)
+			return fmt.Errorf("drainer: unmarshal attach: %w: %w", ErrPermanentDispatch, err)
 		}
 		bytes, err := os.ReadFile(it.StagedPath)
 		if err != nil {
@@ -97,11 +146,11 @@ func dispatch(ctx context.Context, client *Client, it *wqueue.Item) error {
 	case wqueue.KindTrace:
 		var req TraceRequest
 		if err := json.Unmarshal(it.PayloadJSON, &req); err != nil {
-			return fmt.Errorf("drainer: unmarshal trace: %w", err)
+			return fmt.Errorf("drainer: unmarshal trace: %w: %w", ErrPermanentDispatch, err)
 		}
 		return client.Trace(ctx, req)
 	default:
-		return fmt.Errorf("drainer: unknown kind %q", it.Kind)
+		return fmt.Errorf("drainer: unknown kind %q: %w", it.Kind, ErrPermanentDispatch)
 	}
 }
 

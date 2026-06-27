@@ -254,9 +254,14 @@ type TraceRequest struct {
 }
 
 // WriteResponse is what perceive/learn/attach return after a
-// successful raw-doc write. SynthEnqueued is true when the doc was
-// queued for asynchronous synth; false when the daemon's queue is
-// not running (still a successful write, just no enrichment yet).
+// successful raw-doc write. SynthEnqueued means synth is durably
+// pending: the record is persisted Synthesised=false in the Postgres
+// SoR, the worker's Enqueue fast path was tried for low latency, and —
+// crucially — the background sweeper guarantees the record is processed
+// even if that lossy fast path dropped it. It is therefore true whenever
+// the record was written (synth is guaranteed-eventually), NOT a report
+// of the in-memory channel's accept/drop. False only when the daemon has
+// no synth worker running at all (e.g. OpenSearch unconfigured).
 type WriteResponse struct {
 	SHA           string `json:"sha"`
 	IndexedAt     int64  `json:"indexed_at"`

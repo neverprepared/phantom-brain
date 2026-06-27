@@ -141,11 +141,16 @@ func clientQueueListCmd() *cobra.Command {
 	var (
 		opts     queueResolveOpts
 		asJSON   bool
+		deadOnly bool
 		limit    int
 	)
 	c := &cobra.Command{
 		Use:   "list",
-		Short: "Print queued items, newest first",
+		Short: "Print queued items, newest first (--dead for dead-lettered only)",
+		Long: `Prints queued items newest-first. Dead-lettered rows (permanent
+failures or attempts exhausted) are shown with a DEAD marker and the
+dead reason; they are never retried but stay for inspection until
+` + "`queue clear`" + `. Use --dead to list only dead-lettered rows.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			q, dir, err := openResolvedQueueReadOnly(opts)
 			if err != nil {
@@ -156,7 +161,12 @@ func clientQueueListCmd() *cobra.Command {
 				return err
 			}
 			defer q.Close()
-			items, err := q.List(cmd.Context(), limit)
+			var items []*wqueue.Item
+			if deadOnly {
+				items, err = q.ListDead(cmd.Context(), limit)
+			} else {
+				items, err = q.List(cmd.Context(), limit)
+			}
 			if err != nil {
 				return err
 			}
@@ -168,6 +178,7 @@ func clientQueueListCmd() *cobra.Command {
 	}
 	attachQueueResolveFlags(c, &opts)
 	c.Flags().BoolVar(&asJSON, "json", false, "Emit JSON instead of a table")
+	c.Flags().BoolVar(&deadOnly, "dead", false, "List only dead-lettered items")
 	c.Flags().IntVar(&limit, "limit", 0, "Maximum rows to print (0 = no cap)")
 	return c
 }
@@ -179,7 +190,7 @@ func writeQueueTable(w io.Writer, dir string, items []*wqueue.Item, now time.Tim
 		return nil
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tKIND\tSHA\tATTEMPTS\tENQUEUED\tLAST_ATTEMPT\tLAST_ERROR")
+	fmt.Fprintln(tw, "ID\tKIND\tSHA\tATTEMPTS\tSTATE\tENQUEUED\tLAST_ATTEMPT\tLAST_ERROR")
 	for _, it := range items {
 		shortSHA := it.SHA
 		if len(shortSHA) > 12 {
@@ -189,12 +200,20 @@ func writeQueueTable(w io.Writer, dir string, items []*wqueue.Item, now time.Tim
 		if !it.LastAttemptAt.IsZero() {
 			last = humanizeAge(now.Sub(it.LastAttemptAt)) + " ago"
 		}
+		// Dead rows surface their dead_reason; live rows surface last_error.
 		msg := it.LastError
+		state := "pending"
+		if it.Dead {
+			state = "dead"
+			if it.DeadReason != "" {
+				msg = it.DeadReason
+			}
+		}
 		if len(msg) > 60 {
 			msg = msg[:57] + "..."
 		}
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%d\t%s ago\t%s\t%s\n",
-			it.ID, it.Kind, shortSHA, it.Attempts,
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%d\t%s\t%s ago\t%s\t%s\n",
+			it.ID, it.Kind, shortSHA, it.Attempts, state,
 			humanizeAge(now.Sub(it.EnqueuedAt)), last, msg,
 		)
 	}
@@ -215,6 +234,8 @@ type queueItemJSON struct {
 	EnqueuedAt    string `json:"enqueued_at"`
 	LastAttemptAt string `json:"last_attempt_at,omitempty"`
 	LastError     string `json:"last_error,omitempty"`
+	Dead          bool   `json:"dead,omitempty"`
+	DeadReason    string `json:"dead_reason,omitempty"`
 }
 
 func writeQueueJSON(w io.Writer, dir string, items []*wqueue.Item) error {
@@ -228,6 +249,8 @@ func writeQueueJSON(w io.Writer, dir string, items []*wqueue.Item) error {
 			Attempts:   it.Attempts,
 			EnqueuedAt: it.EnqueuedAt.UTC().Format(time.RFC3339),
 			LastError:  it.LastError,
+			Dead:       it.Dead,
+			DeadReason: it.DeadReason,
 		}
 		if !it.LastAttemptAt.IsZero() {
 			row.LastAttemptAt = it.LastAttemptAt.UTC().Format(time.RFC3339)

@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/neverprepared/phantom-brain/internal/brain"
 	"github.com/neverprepared/phantom-brain/internal/brain/wqueue"
@@ -81,6 +82,51 @@ func TestQueueListJSON(t *testing.T) {
 	}
 	if len(got.Items) != 1 || got.Items[0].SHA != "deadbeef" {
 		t.Fatalf("unexpected json: %+v", got)
+	}
+}
+
+func TestQueueListDeadFlag(t *testing.T) {
+	q, dir := newTestQueue(t)
+	ctx := context.Background()
+	live, _ := q.Enqueue(ctx, wqueue.EnqueueOpts{Kind: wqueue.KindPerceive, SHA: "liveaaaaaaaaaaaa", PayloadJSON: []byte(`{}`)})
+	deadIt, _ := q.Enqueue(ctx, wqueue.EnqueueOpts{Kind: wqueue.KindLearn, SHA: "deadbbbbbbbbbbbb", PayloadJSON: []byte(`{}`)})
+	_ = live
+	if err := q.MarkDead(ctx, deadIt.ID, time.Now(), "HTTP 400 invalid SHA"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Default list shows both, with the dead one flagged + its reason.
+	out, err := runQueueCmd(t, "list", "--queue-dir", dir)
+	if err != nil {
+		t.Fatalf("list: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "dead") || !strings.Contains(out, "HTTP 400 invalid SHA") {
+		t.Fatalf("default list should surface the dead row + reason, got:\n%s", out)
+	}
+
+	// --dead lists ONLY the dead row.
+	out, err = runQueueCmd(t, "list", "--queue-dir", dir, "--dead")
+	if err != nil {
+		t.Fatalf("list --dead: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "deadbbbbbbbb") {
+		t.Fatalf("--dead should show the dead SHA, got:\n%s", out)
+	}
+	if strings.Contains(out, "liveaaaaaaaa") {
+		t.Fatalf("--dead must exclude the live row, got:\n%s", out)
+	}
+
+	// JSON carries the dead flag + reason.
+	out, err = runQueueCmd(t, "list", "--queue-dir", dir, "--dead", "--json")
+	if err != nil {
+		t.Fatalf("list --dead --json: %v\n%s", err, out)
+	}
+	var got queueListJSON
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode json: %v\n%s", err, out)
+	}
+	if len(got.Items) != 1 || !got.Items[0].Dead || got.Items[0].DeadReason != "HTTP 400 invalid SHA" {
+		t.Fatalf("unexpected dead json: %+v", got)
 	}
 }
 

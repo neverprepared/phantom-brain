@@ -96,7 +96,7 @@ func doInit() {
 		return
 	}
 
-	path, err := extractDylib()
+	path, err := extractDylib(os.TempDir())
 	if err != nil {
 		initErr = fmt.Errorf("vec: extract dylib: %w", err)
 		return
@@ -116,14 +116,16 @@ func doInit() {
 }
 
 // extractDylib writes dylibBytes to a deterministic-per-process file
-// under os.TempDir() and returns its path. Deterministic means: if the
-// process imports this package multiple times across the same binary
-// (it shouldn't, but just in case), the second call reuses the same
-// file rather than spamming /tmp.
-func extractDylib() (string, error) {
+// under dir and returns its path. Deterministic means: if the process
+// imports this package multiple times across the same binary (it
+// shouldn't, but just in case), the second call reuses the same file
+// rather than spamming the dir. Production passes os.TempDir(); tests
+// pass a t.TempDir() so they never clobber the shared on-disk dylib
+// that other packages load concurrently under `go test ./...`.
+func extractDylib(dir string) (string, error) {
 	sum := sha256.Sum256(dylibBytes)
 	name := fmt.Sprintf("pbrainctl-vec-%s%s", hex.EncodeToString(sum[:8]), dylibExt)
-	path := filepath.Join(os.TempDir(), name)
+	path := filepath.Join(dir, name)
 
 	// If the file already exists with matching size, trust it. This
 	// makes Init() idempotent across process restarts during dev
@@ -134,7 +136,7 @@ func extractDylib() (string, error) {
 
 	// Otherwise write fresh. Use O_EXCL on a tmp file then rename so a
 	// concurrent process can't see a half-written dylib.
-	tmp, err := os.CreateTemp(os.TempDir(), "pbrainctl-vec-*.tmp")
+	tmp, err := os.CreateTemp(dir, "pbrainctl-vec-*.tmp")
 	if err != nil {
 		return "", err
 	}

@@ -143,7 +143,25 @@ type SynthWorker struct {
 	// tesseract. Office (docx/xlsx/pptx) extraction is pure-Go and needs
 	// no availability gate. Nil/false in environments without tesseract.
 	ocrAvailable bool
+
+	// sweepInterval is the cadence of the durability sweeper (run() loop's
+	// backstop). The sweeper drains each binding's Synthesised=false
+	// backlog from the Postgres SoR on this tick, so a job dropped by the
+	// lossy Enqueue fast-path is still processed eventually. Defaults to
+	// defaultSynthSweepInterval.
+	sweepInterval time.Duration
+
+	// Bindings enumerates the (profile, vault) pairs the sweeper should
+	// drain. Wired from the daemon's registry. Nil-safe: when nil (e.g.
+	// unit tests that don't exercise the sweep) the sweeper is a no-op.
+	Bindings func() []VaultKey
 }
+
+// defaultSynthSweepInterval is how often the durability sweeper drains
+// each binding's Synthesised=false backlog. The SoR record itself is the
+// durable pending marker; this just bounds how long a fast-path miss
+// stays un-synthesised.
+const defaultSynthSweepInterval = 30 * time.Second
 
 type synthJob struct {
 	Profile string
@@ -172,6 +190,10 @@ type SynthWorkerOpts struct {
 	// NewSynthWorker picks PDFExtractWithPdftotext when the binary is
 	// on PATH.
 	PDFExtractor PDFExtractor
+	// SweepInterval overrides the durability-sweeper cadence. Zero ⇒
+	// defaultSynthSweepInterval. Tests set a short interval to drive the
+	// sweep deterministically.
+	SweepInterval time.Duration
 }
 
 // NewSynthWorker constructs a worker; call Start to spawn the
@@ -192,27 +214,37 @@ func NewSynthWorker(opts SynthWorkerOpts) *SynthWorker {
 	if extractor == nil && pdfAvail {
 		extractor = PDFExtractWithPdftotext
 	}
+	sweep := opts.SweepInterval
+	if sweep <= 0 {
+		sweep = defaultSynthSweepInterval
+	}
 	return &SynthWorker{
-		logger:       opts.Logger,
-		queue:        make(chan synthJob, opts.BufferSize),
-		bufSize:      opts.BufferSize,
-		stopped:      make(chan struct{}),
-		cliAvailable: cli,
-		capture:      opts.Capture,
-		pdfExtractor: extractor,
-		pdfAvailable: extractor != nil,
-		ocrAvailable: OCRAvailable(),
+		logger:        opts.Logger,
+		queue:         make(chan synthJob, opts.BufferSize),
+		bufSize:       opts.BufferSize,
+		stopped:       make(chan struct{}),
+		cliAvailable:  cli,
+		capture:       opts.Capture,
+		pdfExtractor:  extractor,
+		pdfAvailable:  extractor != nil,
+		ocrAvailable:  OCRAvailable(),
+		sweepInterval: sweep,
 	}
 }
 
-// Enqueue tries to publish a job. Returns immediately; never blocks.
-// Overflow drops the job and logs at Warn — the operator should see
-// queue pressure in logs before agents stop seeing enrichment.
+// Enqueue is the best-effort LOW-LATENCY fast path: it tries to publish
+// a job for immediate processing and never blocks. Overflow under burst
+// drops the in-memory job — which is HARMLESS, because the record is
+// durably marked Synthesised=false in the Postgres SoR and the background
+// sweeper (runSweeper) drains that backlog on every tick. A dropped
+// fast-path enqueue therefore only delays synth to the next sweep, it
+// never loses it. Logged at Debug (a non-fatal fast-path miss caught by
+// the sweeper), NOT Warn-as-data-loss.
 func (w *SynthWorker) Enqueue(profile, vault, sha string) {
 	select {
 	case w.queue <- synthJob{Profile: profile, Vault: vault, SHA: sha}:
 	default:
-		w.logger.Warn("phantom-brain: synth queue full; dropping job",
+		w.logger.Debug("phantom-brain: synth fast-path full; sweeper will pick this up",
 			slog.String("vault", profile+"/"+vault),
 			slog.String("sha", sha),
 			slog.Int("buf_size", w.bufSize),
@@ -220,12 +252,13 @@ func (w *SynthWorker) Enqueue(profile, vault, sha string) {
 	}
 }
 
-// Start spawns the worker goroutine. ctx cancellation drains in-
-// flight work and exits the loop. Idempotent — repeat Starts are
-// no-ops once running.
+// Start spawns the worker goroutine plus the durability sweeper. ctx
+// cancellation drains in-flight work and exits both loops. Idempotent —
+// repeat Starts are no-ops once running.
 func (w *SynthWorker) Start(ctx context.Context) {
 	w.baseCtx = ctx
 	go w.run(ctx)
+	go w.runSweeper(ctx)
 }
 
 // Stop signals the worker to exit after its current job completes.
@@ -291,23 +324,21 @@ func (w *SynthWorker) ResynthBacklog(ctx context.Context, profile, vault string,
 		return ResynthResult{}, fmt.Errorf("resynth: list: %w", err)
 	}
 
-	stuck := make([]synthJob, 0, len(recs))
 	var sample []ResynthSampleItem
 	for _, rec := range recs {
-		stuck = append(stuck, synthJob{Profile: profile, Vault: vault, SHA: rec.Doc.SHA})
 		if len(sample) < resynthSampleCap {
 			sample = append(sample, ResynthSampleItem{SHA: rec.Doc.SHA, Title: rec.Doc.Title})
 		}
 	}
 
 	res := ResynthResult{BacklogCount: len(recs), Sample: sample}
-	if dryRun || len(stuck) == 0 {
+	if dryRun || len(recs) == 0 {
 		return res, nil
 	}
 
-	toProcess := stuck
-	if limit > 0 && limit < len(stuck) {
-		toProcess = stuck[:limit]
+	pending := len(recs)
+	if limit > 0 && limit < pending {
+		pending = limit
 	}
 
 	// At most one backfill at a time — the live worker + backfill already
@@ -323,19 +354,105 @@ func (w *SynthWorker) ResynthBacklog(ctx context.Context, profile, vault string,
 		if bctx == nil {
 			bctx = context.Background()
 		}
-		for _, job := range toProcess {
-			select {
-			case <-bctx.Done():
-				return
-			default:
-			}
-			w.handle(bctx, job)
+		// Share the one drain implementation with the sweeper + live path.
+		if _, err := w.drainBacklog(bctx, profile, vault, limit); err != nil {
+			w.logger.Warn("phantom-brain: resynth backfill drain failed",
+				slog.String("vault", profile+"/"+vault),
+				slog.String("err", err.Error()))
 		}
 	}()
 
 	res.Started = true
-	res.Pending = len(toProcess)
+	res.Pending = pending
 	return res, nil
+}
+
+// drainBacklog lists the Synthesised=false backlog for (profile, vault)
+// from the Postgres SoR and re-processes each record through handle (which
+// takes processMu, so it never races the live run() loop, a manual
+// resynth, or another sweep). limit<=0 processes the whole backlog (capped
+// at resynthScanLimit by the SoR query); limit>0 caps how many are
+// processed this pass. Returns the number processed.
+//
+// This is THE single drain implementation shared by the continuous
+// sweeper (runSweeper), the resynth apply path (ResynthBacklog), and
+// thereby the durability guarantee for dropped fast-path enqueues.
+func (w *SynthWorker) drainBacklog(ctx context.Context, profile, vault string, limit int) (int, error) {
+	store, _, ok := w.resolveForJob(synthJob{Profile: profile, Vault: vault})
+	if !ok {
+		return 0, fmt.Errorf("drainBacklog: no binding view registered for %s/%s", profile, vault)
+	}
+	recs, err := store.ListUnsynthesised(ctx, profile, vault)
+	if err != nil {
+		return 0, fmt.Errorf("drainBacklog: list: %w", err)
+	}
+	processed := 0
+	for _, rec := range recs {
+		if limit > 0 && processed >= limit {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return processed, ctx.Err()
+		default:
+		}
+		w.handle(ctx, synthJob{Profile: profile, Vault: vault, SHA: rec.Doc.SHA})
+		processed++
+	}
+	return processed, nil
+}
+
+// runSweeper is the durability backstop for the lossy Enqueue fast path.
+// On every sweepInterval tick it enumerates the daemon's bindings and
+// drains each one's Synthesised=false backlog via drainBacklog. Because a
+// written record is durably Synthesised=false in the SoR, any synth job
+// the in-memory fast path dropped is guaranteed to be picked up here —
+// the channel is an optimisation, the SoR is the queue.
+//
+// Nil-safe: when Bindings is unwired (unit tests) the loop is a no-op, so
+// tests that don't exercise the sweep are unaffected.
+func (w *SynthWorker) runSweeper(ctx context.Context) {
+	if w.Bindings == nil {
+		return
+	}
+	interval := w.sweepInterval
+	if interval <= 0 {
+		interval = defaultSynthSweepInterval
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.stopped:
+			return
+		case <-t.C:
+			w.sweepOnce(ctx)
+		}
+	}
+}
+
+// sweepOnce drains every binding's backlog once. Exported behaviour is
+// idempotent: already-synthesised records are skipped in processJob, and
+// handle serializes on processMu so a sweep never stampedes the live
+// worker. Errors are logged per-binding and never abort the sweep.
+func (w *SynthWorker) sweepOnce(ctx context.Context) {
+	if w.Bindings == nil {
+		return
+	}
+	for _, k := range w.Bindings() {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		if _, err := w.drainBacklog(ctx, k.Profile, k.Vault, 0); err != nil {
+			w.logger.Warn("phantom-brain: synth sweep drain failed",
+				slog.String("vault", k.Profile+"/"+k.Vault),
+				slog.String("err", err.Error()))
+		}
+	}
 }
 
 func (w *SynthWorker) run(ctx context.Context) {

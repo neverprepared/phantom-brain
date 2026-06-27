@@ -68,7 +68,19 @@ type Item struct {
 	Attempts      int
 	LastAttemptAt time.Time // zero == never attempted
 	LastError     string
+	// Dead marks a dead-lettered row: a permanent (non-retryable)
+	// dispatch failure, or one that exhausted MaxAttempts. Dead rows are
+	// excluded from NextEligible (no more retries) but retained for
+	// operator inspection until cleared.
+	Dead       bool
+	DeadReason string
 }
+
+// MaxAttempts caps how many times a TRANSIENT dispatch failure is
+// retried before the row is dead-lettered. Permanent failures (HTTP
+// 4xx, JSON unmarshal, unknown/invalid kind) are dead-lettered
+// immediately regardless of this cap.
+const MaxAttempts = 20
 
 // EnqueueOpts is the caller-side request. For KindAttach, Bytes is the
 // raw blob (copied into the staging directory before the row inserts);
@@ -114,10 +126,36 @@ CREATE TABLE IF NOT EXISTS wqueue (
   last_attempt_at INTEGER NOT NULL DEFAULT 0,
   claimed_at INTEGER NOT NULL DEFAULT 0,
   last_error TEXT NOT NULL DEFAULT '',
+  dead INTEGER NOT NULL DEFAULT 0,
+  dead_reason TEXT NOT NULL DEFAULT '',
   UNIQUE(kind, sha)
 );
 CREATE INDEX IF NOT EXISTS wqueue_eligible ON wqueue(last_attempt_at, id);
 `
+
+// migrateSchema applies schemaSQL (create-if-not-exists for fresh DBs)
+// then idempotently ALTERs in the v3.x dead-letter columns for any
+// pre-existing wqueue.sqlite that predates them. A "duplicate column"
+// error means the column already exists (already-migrated DB) and is
+// benign.
+func migrateSchema(db *sql.DB) error {
+	if _, err := db.Exec(schemaSQL); err != nil {
+		return fmt.Errorf("wqueue: schema: %w", err)
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE wqueue ADD COLUMN dead INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE wqueue ADD COLUMN dead_reason TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := db.Exec(stmt); err != nil && !isDuplicateColumn(err) {
+			return fmt.Errorf("wqueue: migrate: %w", err)
+		}
+	}
+	return nil
+}
+
+func isDuplicateColumn(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "duplicate column name")
+}
 
 // Open opens (or creates) the queue under dir. dir must be an absolute
 // path. Creates dir, dir/wqueue-attach, and dir/wqueue.sqlite if absent.
@@ -139,9 +177,9 @@ func Open(dir string) (*Queue, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wqueue: open db: %w", err)
 	}
-	if _, err := db.Exec(schemaSQL); err != nil {
+	if err := migrateSchema(db); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("wqueue: schema: %w", err)
+		return nil, err
 	}
 	return &Queue{dir: dir, attachDir: attachDir, db: db}, nil
 }
@@ -168,9 +206,9 @@ func OpenReadOnly(dir string) (*Queue, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wqueue: open db: %w", err)
 	}
-	if _, err := db.Exec(schemaSQL); err != nil {
+	if err := migrateSchema(db); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("wqueue: schema: %w", err)
+		return nil, err
 	}
 	return &Queue{dir: dir, attachDir: filepath.Join(dir, "wqueue-attach"), db: db}, nil
 }
@@ -259,7 +297,7 @@ func isUniqueViolation(err error) bool {
 
 func (q *Queue) lookupByKindSHA(ctx context.Context, kind Kind, sha string) (*Item, error) {
 	row := q.db.QueryRowContext(ctx,
-		`SELECT id, kind, sha, payload_json, staged_path, enqueued_at, attempts, last_attempt_at, last_error
+		`SELECT id, kind, sha, payload_json, staged_path, enqueued_at, attempts, last_attempt_at, last_error, dead, dead_reason
 		 FROM wqueue WHERE kind = ? AND sha = ?`, string(kind), sha)
 	return scanItem(row)
 }
@@ -293,8 +331,8 @@ func (q *Queue) NextEligible(ctx context.Context, now time.Time, limit int) ([]*
 	}
 	defer tx.Rollback() //nolint:errcheck
 	rows, err := tx.QueryContext(ctx,
-		`SELECT id, kind, sha, payload_json, staged_path, enqueued_at, attempts, last_attempt_at, last_error, claimed_at
-		 FROM wqueue ORDER BY id ASC LIMIT ?`, limit*4)
+		`SELECT id, kind, sha, payload_json, staged_path, enqueued_at, attempts, last_attempt_at, last_error, dead, dead_reason, claimed_at
+		 FROM wqueue WHERE dead = 0 ORDER BY id ASC LIMIT ?`, limit*4)
 	if err != nil {
 		return nil, err
 	}
@@ -369,6 +407,18 @@ func (q *Queue) MarkAttempt(ctx context.Context, id int64, now time.Time, attemp
 	return err
 }
 
+// MarkDead dead-letters a row: it records a final failed attempt
+// (increments attempts, stamps last_attempt_at + last_error) AND sets
+// dead = 1 with the supplied reason. Dead rows are excluded from
+// NextEligible so they are never retried again, but are retained for
+// `pbrainctl client queue list --dead` inspection until cleared.
+func (q *Queue) MarkDead(ctx context.Context, id int64, now time.Time, reason string) error {
+	_, err := q.db.ExecContext(ctx,
+		`UPDATE wqueue SET attempts = attempts + 1, last_attempt_at = ?, last_error = ?, dead = 1, dead_reason = ?, claimed_at = 0 WHERE id = ?`,
+		now.UnixNano(), reason, reason, id)
+	return err
+}
+
 // Delete removes the row and, when applicable, the staged file. Both
 // removals are idempotent.
 func (q *Queue) Delete(ctx context.Context, id int64) error {
@@ -388,10 +438,25 @@ func (q *Queue) Delete(ctx context.Context, id int64) error {
 	return nil
 }
 
-// List returns rows newest-first. limit <= 0 means no cap.
+// List returns rows newest-first. limit <= 0 means no cap. Includes both
+// live and dead-lettered rows (dead ones carry Dead=true + DeadReason).
 func (q *Queue) List(ctx context.Context, limit int) ([]*Item, error) {
-	q1 := `SELECT id, kind, sha, payload_json, staged_path, enqueued_at, attempts, last_attempt_at, last_error
-	       FROM wqueue ORDER BY id DESC`
+	return q.listWhere(ctx, "", limit)
+}
+
+// ListDead returns only dead-lettered rows, newest-first. limit <= 0
+// means no cap. Used by `pbrainctl client queue list --dead`.
+func (q *Queue) ListDead(ctx context.Context, limit int) ([]*Item, error) {
+	return q.listWhere(ctx, "WHERE dead = 1", limit)
+}
+
+func (q *Queue) listWhere(ctx context.Context, where string, limit int) ([]*Item, error) {
+	q1 := `SELECT id, kind, sha, payload_json, staged_path, enqueued_at, attempts, last_attempt_at, last_error, dead, dead_reason
+	       FROM wqueue `
+	if where != "" {
+		q1 += where + " "
+	}
+	q1 += `ORDER BY id DESC`
 	var rows *sql.Rows
 	var err error
 	if limit > 0 {
@@ -520,10 +585,11 @@ func scanItemWithClaim(s rowScanner) (*Item, int64, error) {
 		kind        string
 		enqueued    int64
 		lastAttempt int64
+		dead        int64
 		claimedAt   int64
 	)
 	if err := s.Scan(&it.ID, &kind, &it.SHA, &it.PayloadJSON, &it.StagedPath,
-		&enqueued, &it.Attempts, &lastAttempt, &it.LastError, &claimedAt); err != nil {
+		&enqueued, &it.Attempts, &lastAttempt, &it.LastError, &dead, &it.DeadReason, &claimedAt); err != nil {
 		return nil, 0, err
 	}
 	it.Kind = Kind(kind)
@@ -531,6 +597,7 @@ func scanItemWithClaim(s rowScanner) (*Item, int64, error) {
 	if lastAttempt != 0 {
 		it.LastAttemptAt = time.Unix(0, lastAttempt)
 	}
+	it.Dead = dead != 0
 	return &it, claimedAt, nil
 }
 
@@ -540,9 +607,10 @@ func scanItem(s rowScanner) (*Item, error) {
 		kind        string
 		enqueued    int64
 		lastAttempt int64
+		dead        int64
 	)
 	if err := s.Scan(&it.ID, &kind, &it.SHA, &it.PayloadJSON, &it.StagedPath,
-		&enqueued, &it.Attempts, &lastAttempt, &it.LastError); err != nil {
+		&enqueued, &it.Attempts, &lastAttempt, &it.LastError, &dead, &it.DeadReason); err != nil {
 		return nil, err
 	}
 	it.Kind = Kind(kind)
@@ -550,5 +618,6 @@ func scanItem(s rowScanner) (*Item, error) {
 	if lastAttempt != 0 {
 		it.LastAttemptAt = time.Unix(0, lastAttempt)
 	}
+	it.Dead = dead != 0
 	return &it, nil
 }

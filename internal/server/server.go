@@ -341,6 +341,18 @@ func Start(opts StartOpts) (*Daemon, error) {
 			}
 			return d.writeSynthResult(ctx, b, profile, vaultName, sha, res)
 		}
+		// Bindings feeds the durability sweeper the current registry's
+		// (profile, vault) set so it can drain each binding's
+		// Synthesised=false backlog — the backstop that makes a dropped
+		// Enqueue fast-path job harmless.
+		w.Bindings = func() []VaultKey {
+			vs := d.registry.Vaults()
+			out := make([]VaultKey, 0, len(vs))
+			for _, b := range vs {
+				out = append(out, b.Key)
+			}
+			return out
+		}
 		w.Start(parentCtx)
 		d.synth = w
 	}
@@ -598,7 +610,16 @@ func (d *Daemon) LocalBackendForTest() (*LocalBackend, bool) {
 // *osearch.Client (via WithPrefix) and a per-binding AttachmentStore
 // (minioBindingView) once at startup / reload so the request path is
 // a cache lookup, not a clone.
+//
+// C3 (audit): each *bindingDeps is assembled FULLY (OS + Attach + PG)
+// BEFORE it is published into the shared cache, and published via a
+// single atomic Set of the whole pointer. We never mutate a deps struct
+// after it is visible to readers, so resolveOS / resolveAttach /
+// resolvePG always observe a complete deps or the prior one — never a
+// torn (half-built) struct. The fresh deps are staged here (OS+Attach)
+// and handed to buildPGBindingDeps, which fills PG and publishes.
 func (d *Daemon) buildBindingDeps() error {
+	fresh := make(map[VaultKey]*bindingDeps)
 	for _, b := range d.registry.Vaults() {
 		deps := &bindingDeps{}
 		if d.osBase != nil {
@@ -613,13 +634,12 @@ func (d *Daemon) buildBindingDeps() error {
 			// in local-backend mode; log a warn at reload if set.
 			deps.Attach = d.attach
 		}
-		d.bindings.Set(b.Key, deps)
+		fresh[b.Key] = deps
 	}
-	// Phase D1: build per-profile Postgres resources + per-binding PG
-	// views AFTER the OS/MinIO views are cached (the PG view borrows the
-	// just-set bindingDeps pointers). Postgres is MANDATORY — a build
-	// failure is returned so Start fails loud; reload logs + tolerates it.
-	return d.buildPGBindingDeps()
+	// Phase D1: fill each staged deps' PG view (diff-only per-profile
+	// rebuild) and publish them atomically. Postgres is MANDATORY — a
+	// build failure is returned so Start fails loud; reload logs + tolerates.
+	return d.buildPGBindingDeps(fresh)
 }
 
 // depsForBinding returns the per-binding view bundle. Handlers call
