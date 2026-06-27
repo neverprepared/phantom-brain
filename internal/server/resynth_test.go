@@ -11,48 +11,59 @@ import (
 	"github.com/neverprepared/phantom-brain/internal/osearch"
 )
 
-// errScroller embeds fakeOS and forces ScrollSummaries to fail, so the
-// scroll-error path of ResynthBacklog is exercised without a live OS.
-type errScroller struct {
-	*fakeOS
-	err error
-}
+// Phase D1: ResynthBacklog now reads the Synthesised=false backlog through
+// the synthStore seam (fakeSynthStore), so the dry-run / apply / limit /
+// in-progress-guard contract is covered here against an in-memory fake —
+// no live Postgres. (Pre-D1 the test passed an osWriter directly; the
+// worker now resolves the store via w.Resolve.)
 
-func (e errScroller) ScrollSummaries(context.Context, string, string, int, func(osearch.SummaryDoc) error) error {
-	return e.err
-}
-
-// newDryRunWorker builds a worker with no Start() — a dry run needs no
-// baseCtx and never spawns the backfill goroutine.
-func newDryRunWorker(t *testing.T, os osWriter) *SynthWorker {
+// newResynthWorker wires a worker whose Resolve returns the given store +
+// WriteSynth capture. limit/apply paths spawn the backfill goroutine, so
+// Start (which sets baseCtx) is the caller's responsibility per test.
+func newResynthWorker(t *testing.T, store synthStore, cap *synthCapture) *SynthWorker {
 	t.Helper()
-	return NewSynthWorker(SynthWorkerOpts{
-		OSClient:   os,
+	w := NewSynthWorker(SynthWorkerOpts{
 		Logger:     slog.New(slog.DiscardHandler),
 		BufferSize: 16,
 		DisableCLI: true,
 	})
+	w.Resolve = func(string, string) (synthStore, AttachmentStore, bool) {
+		return store, nil, true
+	}
+	if cap != nil {
+		w.WriteSynth = cap.writeSynth
+	}
+	return w
+}
+
+// stuckRecord seeds a raw (Synthesised=false) record for the backlog scan.
+func stuckRecord(profile, vault, sha, title string, id int64) synthRecord {
+	now := time.Now().UTC()
+	return synthRecord{
+		Doc: osearch.SummaryDoc{
+			Profile: profile, Vault: vault, SHA: sha,
+			Kind: osearch.KindNote, Title: title, RawBody: "content for " + sha,
+			CreatedAt: now, UpdatedAt: now, Synthesised: false,
+		},
+		RecordID: id,
+	}
 }
 
 func TestResynthBacklog_DryRunReportsAndMutatesNothing(t *testing.T) {
-	fos := newFakeOS()
-	now := time.Now().UTC()
+	store := newFakeSynthStore()
 	// 3 stuck (Synthesised=false), 1 enriched, 1 other-tenant stuck.
-	for _, sha := range []string{"s1", "s2", "s3"} {
-		fos.summaries[osearch.DocID("p", "v", sha)] = osearch.SummaryDoc{
-			Profile: "p", Vault: "v", SHA: sha, Title: "stuck " + sha,
-			RawBody: "x", CreatedAt: now, UpdatedAt: now, Synthesised: false,
-		}
+	for i, sha := range []string{"s1", "s2", "s3"} {
+		store.put(stuckRecord("p", "v", sha, "stuck "+sha, int64(i+1)))
 	}
-	fos.summaries[osearch.DocID("p", "v", "ok")] = osearch.SummaryDoc{
-		Profile: "p", Vault: "v", SHA: "ok", Title: "done", Synthesised: true,
-	}
-	fos.summaries[osearch.DocID("other", "v", "z")] = osearch.SummaryDoc{
-		Profile: "other", Vault: "v", SHA: "z", Synthesised: false,
-	}
+	done := stuckRecord("p", "v", "ok", "done", 4)
+	done.Synthesised = true
+	done.Doc.Synthesised = true
+	store.put(done)
+	store.put(stuckRecord("other", "v", "z", "other tenant", 5))
 
-	w := newDryRunWorker(t, fos)
-	res, err := w.ResynthBacklog(context.Background(), fos, "p", "v", true /*dryRun*/, 0)
+	cap := newSynthCapture()
+	w := newResynthWorker(t, store, cap)
+	res, err := w.ResynthBacklog(context.Background(), "p", "v", true /*dryRun*/, 0)
 	if err != nil {
 		t.Fatalf("ResynthBacklog dry run: %v", err)
 	}
@@ -71,25 +82,20 @@ func TestResynthBacklog_DryRunReportsAndMutatesNothing(t *testing.T) {
 	if w.backfilling.Load() {
 		t.Error("dry run flipped the backfilling flag")
 	}
-	// Nothing mutated — the stuck docs stay unsynthesised.
-	for _, sha := range []string{"s1", "s2", "s3"} {
-		d, _ := fos.GetSummary(context.Background(), "p", "v", sha)
-		if d.Synthesised {
-			t.Errorf("dry run synthesised %s", sha)
-		}
+	// Nothing mutated — the dry run never invokes WriteSynth.
+	if len(cap.results) != 0 {
+		t.Errorf("dry run synthesised %d records, want 0", len(cap.results))
 	}
 }
 
 func TestResynthBacklog_SampleCappedAt20(t *testing.T) {
-	fos := newFakeOS()
+	store := newFakeSynthStore()
 	for i := 0; i < 25; i++ {
 		sha := fmt.Sprintf("sha-%02d", i)
-		fos.summaries[osearch.DocID("p", "v", sha)] = osearch.SummaryDoc{
-			Profile: "p", Vault: "v", SHA: sha, Title: "t", Synthesised: false,
-		}
+		store.put(stuckRecord("p", "v", sha, "t", int64(i+1)))
 	}
-	w := newDryRunWorker(t, fos)
-	res, err := w.ResynthBacklog(context.Background(), fos, "p", "v", true, 0)
+	w := newResynthWorker(t, store, newSynthCapture())
+	res, err := w.ResynthBacklog(context.Background(), "p", "v", true, 0)
 	if err != nil {
 		t.Fatalf("ResynthBacklog: %v", err)
 	}
@@ -101,37 +107,34 @@ func TestResynthBacklog_SampleCappedAt20(t *testing.T) {
 	}
 }
 
-func TestResynthBacklog_ScrollErrorWrapped(t *testing.T) {
+func TestResynthBacklog_ListErrorWrapped(t *testing.T) {
 	sentinel := errors.New("boom")
-	osc := errScroller{fakeOS: newFakeOS(), err: sentinel}
-	w := newDryRunWorker(t, osc)
-	_, err := w.ResynthBacklog(context.Background(), osc, "p", "v", true, 0)
+	store := newFakeSynthStore()
+	store.listErr = sentinel
+	w := newResynthWorker(t, store, newSynthCapture())
+	_, err := w.ResynthBacklog(context.Background(), "p", "v", true, 0)
 	if err == nil {
-		t.Fatal("expected scroll error")
+		t.Fatal("expected list error")
 	}
 	if !errors.Is(err, sentinel) {
-		t.Errorf("error should wrap the scroll error, got %v", err)
+		t.Errorf("error should wrap the list error, got %v", err)
 	}
 }
 
 func TestResynthBacklog_ApplyReprocessesStuckDocs(t *testing.T) {
-	fos := newFakeOS()
-	now := time.Now().UTC()
-	for _, sha := range []string{"a1", "a2"} {
-		fos.summaries[osearch.DocID("p", "v", sha)] = osearch.SummaryDoc{
-			Profile: "p", Vault: "v", SHA: sha, Title: "stuck " + sha,
-			RawBody: "content for " + sha, CreatedAt: now, UpdatedAt: now,
-			Synthesised: false,
-		}
+	store := newFakeSynthStore()
+	for i, sha := range []string{"a1", "a2"} {
+		store.put(stuckRecord("p", "v", sha, "stuck "+sha, int64(i+1)))
 	}
+	cap := newSynthCapture()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	w := newDryRunWorker(t, fos)
+	w := newResynthWorker(t, store, cap)
 	w.Start(ctx)
 	defer w.Stop()
 
-	res, err := w.ResynthBacklog(ctx, fos, "p", "v", false /*apply*/, 0)
+	res, err := w.ResynthBacklog(ctx, "p", "v", false /*apply*/, 0)
 	if err != nil {
 		t.Fatalf("ResynthBacklog apply: %v", err)
 	}
@@ -145,32 +148,29 @@ func TestResynthBacklog_ApplyReprocessesStuckDocs(t *testing.T) {
 		t.Errorf("BacklogCount = %d, want 2", res.BacklogCount)
 	}
 
-	// The background backfill flips both docs to Synthesised over time.
+	// The background backfill pushes both records through WriteSynth.
 	waitUntil(t, 5*time.Second, func() bool {
-		a, _ := fos.GetSummary(context.Background(), "p", "v", "a1")
-		b, _ := fos.GetSummary(context.Background(), "p", "v", "a2")
-		return a != nil && a.Synthesised && b != nil && b.Synthesised
+		_, a := cap.result("a1")
+		_, b := cap.result("a2")
+		return a && b
 	})
 	// Backfill flag releases when the goroutine drains.
 	waitUntil(t, 2*time.Second, func() bool { return !w.backfilling.Load() })
 }
 
 func TestResynthBacklog_ApplyRespectsLimit(t *testing.T) {
-	fos := newFakeOS()
-	now := time.Now().UTC()
-	for _, sha := range []string{"l1", "l2", "l3"} {
-		fos.summaries[osearch.DocID("p", "v", sha)] = osearch.SummaryDoc{
-			Profile: "p", Vault: "v", SHA: sha, Title: "t", RawBody: "c",
-			CreatedAt: now, UpdatedAt: now, Synthesised: false,
-		}
+	store := newFakeSynthStore()
+	for i, sha := range []string{"l1", "l2", "l3"} {
+		store.put(stuckRecord("p", "v", sha, "t", int64(i+1)))
 	}
+	cap := newSynthCapture()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	w := newDryRunWorker(t, fos)
+	w := newResynthWorker(t, store, cap)
 	w.Start(ctx)
 	defer w.Stop()
 
-	res, err := w.ResynthBacklog(ctx, fos, "p", "v", false, 2 /*limit*/)
+	res, err := w.ResynthBacklog(ctx, "p", "v", false, 2 /*limit*/)
 	if err != nil {
 		t.Fatalf("ResynthBacklog apply with limit: %v", err)
 	}
@@ -185,27 +185,23 @@ func TestResynthBacklog_ApplyRespectsLimit(t *testing.T) {
 }
 
 func TestResynthBacklog_InProgressGuard(t *testing.T) {
-	fos := newFakeOS()
-	now := time.Now().UTC()
-	fos.summaries[osearch.DocID("p", "v", "g1")] = osearch.SummaryDoc{
-		Profile: "p", Vault: "v", SHA: "g1", Title: "t", RawBody: "c",
-		CreatedAt: now, UpdatedAt: now, Synthesised: false,
-	}
+	store := newFakeSynthStore()
+	store.put(stuckRecord("p", "v", "g1", "t", 1))
+
 	// Deterministically simulate an in-flight backfill by holding the
 	// flag, then assert a second apply returns ErrResynthInProgress.
 	// (Racing two real goroutines on timing would be flaky; the guard's
 	// contract is exactly "flag already set → reject".)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	w := newDryRunWorker(t, fos)
+	w := newResynthWorker(t, store, newSynthCapture())
 	w.Start(ctx)
 	defer w.Stop()
 
-	// Simulate an in-flight backfill.
 	if !w.backfilling.CompareAndSwap(false, true) {
 		t.Fatal("precondition: backfilling already set")
 	}
-	res, err := w.ResynthBacklog(ctx, fos, "p", "v", false, 0)
+	res, err := w.ResynthBacklog(ctx, "p", "v", false, 0)
 	if !errors.Is(err, ErrResynthInProgress) {
 		t.Fatalf("second apply error = %v, want ErrResynthInProgress", err)
 	}

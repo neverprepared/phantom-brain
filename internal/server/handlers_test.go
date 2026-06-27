@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -13,90 +12,104 @@ import (
 	"testing"
 )
 
-// helper: start daemon + httptest server, return (daemon, baseURL, token, cleanup).
-func startTestRig(t *testing.T) (*Daemon, string, string, func()) {
+// Phase D1 testability: the daemon's startup now makes the Postgres SoR
+// mandatory (buildBindingDeps → buildPGBindingDeps errors without a DSN),
+// so Start() cannot stand up in the unit suite. The birth-claim /
+// maintenance / snapshot HTTP handlers, however, are purely DataDir
+// (filesystem) backed — they never touch Postgres. So rather than drop
+// them to integration, we mount the REAL chi router against a Daemon built
+// WITHOUT Start() (newRouterRig): a loaded registry for AuthMiddleware, a
+// DataDir, a no-op synth queue, and a fake AttachmentStore. That keeps the
+// full auth + routing + handler path under unit coverage, no Docker.
+
+// routerRig is a daemon with the real router mounted over httptest, built
+// without Start() (and therefore without Postgres).
+type routerRig struct {
+	d      *Daemon
+	server *httptest.Server
+	token  string
+}
+
+func newRouterRig(t *testing.T) *routerRig {
 	t.Helper()
 	cfgDir := t.TempDir()
 	dataDir := t.TempDir()
-	writeServerConfig(t, cfgDir, "[server]\nport = 0\n")
 	tok := seedVault(t, cfgDir, "personal", "memory", "")
-	d, err := Start(StartOpts{
-		ConfigDir: cfgDir,
-		DataDir:   DataDir(dataDir),
-		Logger:    slog.New(slog.DiscardHandler),
-	})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
+
+	reg := NewRegistry()
+	if _, err := reg.Load(LoadOpts{ConfigDir: cfgDir, Defaults: VaultDefaults{RetentionGens: 30}}); err != nil {
+		t.Fatalf("registry load: %v", err)
 	}
-	ts := httptest.NewServer(d.Router())
-	// Rewire the LocalBackend's baseURL to the httptest server so
-	// /merge/init issues URLs that actually route back here.
-	if lb, ok := d.storage.(*LocalBackend); ok {
-		lb.baseURL = ts.URL
+
+	d := &Daemon{
+		DataDir:             DataDir(dataDir),
+		Logger:              slog.New(slog.DiscardHandler),
+		registry:            reg,
+		synth:               noopSynthQueue{},
+		attach:              newFakeAttach(),
+		allowSharedFallback: true, // resolveAttach returns d.attach without per-binding views
 	}
-	return d, ts.URL, tok, func() {
-		ts.Close()
-		_ = d.Shutdown(context.Background())
-	}
+	d.router = d.buildRouter()
+
+	ts := httptest.NewServer(d.router)
+	t.Cleanup(ts.Close)
+	return &routerRig{d: d, server: ts, token: tok}
 }
 
-// --- Birth claim -----------------------------------------------------
+func (r *routerRig) do(t *testing.T, method, path string, body []byte) *http.Response {
+	t.Helper()
+	var rdr io.Reader
+	if body != nil {
+		rdr = bytes.NewReader(body)
+	}
+	req, _ := http.NewRequest(method, r.server.URL+path, rdr)
+	req.Header.Set("Authorization", "Bearer "+r.token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	return resp
+}
+
+// --- birth/claim --------------------------------------------------
 
 func TestHandler_BirthClaim_HappyPath(t *testing.T) {
-	d, baseURL, tok, cleanup := startTestRig(t)
-	defer cleanup()
-	seedCollective(t, d.DataDir, "personal", "memory", "# hi\n")
-	if _, err := BuildSnapshot(d.DataDir, "personal", "memory", 30); err != nil {
+	r := newRouterRig(t)
+	seedCollective(t, r.d.DataDir, "personal", "memory", "# hi\n")
+	if _, err := BuildSnapshot(r.d.DataDir, "personal", "memory", 30); err != nil {
 		t.Fatal(err)
 	}
 	body, _ := json.Marshal(birthClaimRequest{BrainID: "brain-1", Gen: 1, TTLSecs: 3600})
-	req, _ := http.NewRequest(http.MethodPost, baseURL+"/api/brain/birth/claim", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+tok)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil { t.Fatal(err) }
+	resp := r.do(t, http.MethodPost, "/api/brain/birth/claim", body)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
 	}
 	// Marker file landed.
-	marker := filepath.Join(d.DataDir.StagedDir("personal", "memory"), "snapshot-1", ".claims", "brain-1")
+	marker := filepath.Join(r.d.DataDir.StagedDir("personal", "memory"), "snapshot-1", ".claims", "brain-1")
 	if _, err := os.Stat(marker); err != nil {
 		t.Errorf("claim marker missing: %v", err)
 	}
 }
 
 func TestHandler_BirthClaim_StaleGenReturns409(t *testing.T) {
-	_, baseURL, tok, cleanup := startTestRig(t)
-	defer cleanup()
+	r := newRouterRig(t)
 	body, _ := json.Marshal(birthClaimRequest{BrainID: "brain-x", Gen: 999})
-	req, _ := http.NewRequest(http.MethodPost, baseURL+"/api/brain/birth/claim", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+tok)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil { t.Fatal(err) }
+	resp := r.do(t, http.MethodPost, "/api/brain/birth/claim", body)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
 		t.Errorf("status=%d, want 409", resp.StatusCode)
 	}
 }
 
-// --- Merge init → upload → complete end-to-end -----------------------
-
-// Phase 6: /merge handlers + LocalBackend HMAC upload tests removed.
-// Writes go agent → daemon POST → OS directly; there's no upload-
-// token handshake or death-payload reaper to exercise.
-
-// --- Maintenance -----------------------------------------------------
+// --- maintenance --------------------------------------------------
 
 func TestHandler_Maintenance_EnterExitGet(t *testing.T) {
-	_, baseURL, tok, cleanup := startTestRig(t)
-	defer cleanup()
+	r := newRouterRig(t)
 
 	enter := func() int {
-		req, _ := http.NewRequest(http.MethodPost, baseURL+"/api/brain/maintenance/enter", nil)
-		req.Header.Set("Authorization", "Bearer "+tok)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil { t.Fatal(err) }
+		resp := r.do(t, http.MethodPost, "/api/brain/maintenance/enter", nil)
 		resp.Body.Close()
 		return resp.StatusCode
 	}
@@ -105,10 +118,7 @@ func TestHandler_Maintenance_EnterExitGet(t *testing.T) {
 	}
 
 	getState := func() bool {
-		req, _ := http.NewRequest(http.MethodGet, baseURL+"/api/brain/maintenance", nil)
-		req.Header.Set("Authorization", "Bearer "+tok)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil { t.Fatal(err) }
+		resp := r.do(t, http.MethodGet, "/api/brain/maintenance", nil)
 		defer resp.Body.Close()
 		var m map[string]any
 		_ = json.NewDecoder(resp.Body).Decode(&m)
@@ -119,15 +129,34 @@ func TestHandler_Maintenance_EnterExitGet(t *testing.T) {
 		t.Fatal("expected maintenance true after enter")
 	}
 
-	req, _ := http.NewRequest(http.MethodPost, baseURL+"/api/brain/maintenance/exit", nil)
-	req.Header.Set("Authorization", "Bearer "+tok)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil { t.Fatal(err) }
+	resp := r.do(t, http.MethodPost, "/api/brain/maintenance/exit", nil)
 	resp.Body.Close()
 	if getState() {
 		t.Fatal("expected maintenance false after exit")
 	}
 }
 
-// Local backend HMAC tests removed in Phase 6 with the death-payload
-// upload-token handshake.
+// --- trace --------------------------------------------------------
+
+// handleTrace is unchanged by Phase D1: it appends a structured line to
+// the per-vault Wiki/_log.md on the daemon's DataDir and never touches
+// OpenSearch or Postgres. So it stays under unit coverage via newRouterRig.
+func TestHandlerTrace_AppendsLog(t *testing.T) {
+	r := newRouterRig(t)
+
+	body, _ := json.Marshal(TraceRequest{Kind: "decision", Message: "chose option B"})
+	resp := r.do(t, http.MethodPost, "/api/brain/trace", body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("trace status=%d, want 202", resp.StatusCode)
+	}
+
+	logPath := filepath.Join(r.d.DataDir.VaultDir("personal", "memory"), "Wiki", "_log.md")
+	got, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read _log.md: %v", err)
+	}
+	if !bytes.Contains(got, []byte("chose option B")) || !bytes.Contains(got, []byte("decision")) {
+		t.Errorf("log missing trace entry; got %q", got)
+	}
+}

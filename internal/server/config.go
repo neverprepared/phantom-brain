@@ -189,15 +189,12 @@ type VaultOverrides struct {
 	// OS index set and/or MinIO bucket. Both fields optional; missing
 	// fields fall through to the daemon-global defaults. See
 	// StorageOverrides for the per-field contract.
+	//
+	// Phase D1: the Postgres SoR is the sole authoritative store and is
+	// always on; the former per-binding `dual_write` flag was removed. A
+	// stray `dual_write = true` in an old config.toml is now silently
+	// ignored by the TOML decoder (no matching field), which is benign.
 	StorageOverrides StorageOverrides `toml:"storage_overrides"`
-
-	// DualWrite opts THIS binding into the Phase B1 parallel-run: every
-	// write (and the synth mirror) is additionally written to the
-	// Postgres System-of-Record. Defaults OFF — legacy pb_summaries stays
-	// authoritative and untouched until an operator flips this true.
-	// New-store failures during dual-write are non-fatal (logged +
-	// metered), never affecting the legacy write path.
-	DualWrite bool `toml:"dual_write"`
 }
 
 // StorageOverrides is the per-binding override block parsed from

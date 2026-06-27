@@ -66,19 +66,13 @@ type ServerDeps struct {
 	// from Lifecycle.Client() at startup; tests may inject directly.
 	Client *brain.Client
 
-	// RecallClient is the seam brain_recall uses for online recall
-	// (Phase C). In production it is the same *brain.Client as Client;
-	// tests inject a fake. Kept separate from Client so the online
-	// recall path is mockable without faking the whole write client.
+	// RecallClient is the seam brain_recall uses for online recall.
+	// Phase D1: recall is ONLINE-ONLY — brain_recall always queries the
+	// daemon's live pb_records projection (no local-snapshot fallback).
+	// REQUIRED in production; a nil client makes brain_recall return a
+	// clear "online-only, not configured" error. In production it is the
+	// same *brain.Client as Client; tests inject a fake.
 	RecallClient recallClient
-
-	// OnlineRecall gates the Phase C always-online recall path. When
-	// true (and RecallClient is non-nil), brain_recall queries the
-	// daemon's live pb_records index instead of the birth-time local
-	// snapshot, falling back to the snapshot on ANY daemon failure.
-	// Wired from CL_BRAIN_ONLINE_RECALL; default false (no behavior
-	// change until an operator opts a binding in).
-	OnlineRecall bool
 }
 
 // Server is the MCP tool registry. Construct once per process, hand

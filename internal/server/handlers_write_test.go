@@ -3,14 +3,10 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -19,9 +15,14 @@ import (
 	"github.com/neverprepared/phantom-brain/internal/osearch"
 )
 
-func osReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
-
 // --- in-memory fakes ----------------------------------------------
+//
+// fakeOS / fakeAttach remain in the unit suite because the per-binding
+// resolver tests (storage_overrides_test.go) assign them into a
+// bindingDeps and assert resolveOS/resolveAttach return them. They no
+// longer back any write-handler test: post-D1 the perceive/learn/attach
+// handlers write to the Postgres SoR, which needs a live pool, so those
+// happy-path tests moved to the integration suite (dual_write_integration_test.go).
 
 type fakeOS struct {
 	mu          sync.Mutex
@@ -148,462 +149,7 @@ func (f *fakeAttach) GetAttachmentBytes(_ context.Context, key string, _ int64) 
 	return append([]byte(nil), b...), nil
 }
 
-type fakeSynth struct {
-	mu    sync.Mutex
-	calls []string // "profile:vault:sha"
-}
-
-func (q *fakeSynth) Enqueue(profile, vault, sha string) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.calls = append(q.calls, fmt.Sprintf("%s:%s:%s", profile, vault, sha))
-}
-func (q *fakeSynth) snapshot() []string {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	out := make([]string, len(q.calls))
-	copy(out, q.calls)
-	return out
-}
-
-// --- test rig ------------------------------------------------------
-
-type writeRig struct {
-	d       *Daemon
-	url     string
-	token   string
-	os      *fakeOS
-	attach  *fakeAttach
-	synth   *fakeSynth
-	cleanup func()
-}
-
-func startWriteRig(t *testing.T) *writeRig {
-	t.Helper()
-	d, url, token, cleanup := startTestRig(t)
-	os := newFakeOS()
-	attach := newFakeAttach()
-	synth := &fakeSynth{}
-	d.osClient = os
-	d.attach = attach
-	d.synth = synth
-	// Test rig wires the shared osClient/attach directly without
-	// building per-binding views — opt in to the legacy fallback
-	// path so resolveOS / resolveAttach return them instead of
-	// failing loud (v3.2 blocker fix).
-	d.allowSharedFallback = true
-	return &writeRig{d: d, url: url, token: token, os: os, attach: attach, synth: synth, cleanup: cleanup}
-}
-
-func (r *writeRig) post(t *testing.T, path string, body any) *http.Response {
-	t.Helper()
-	b, err := json.Marshal(body)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	req, _ := http.NewRequest(http.MethodPost, r.url+path, bytes.NewReader(b))
-	req.Header.Set("Authorization", "Bearer "+r.token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("POST %s: %v", path, err)
-	}
-	return resp
-}
-
-func validSHA() string {
-	return strings.Repeat("a", 64)
-}
-
-// --- /perceive ----------------------------------------------------
-
-func TestHandlerPerceive_HappyPath(t *testing.T) {
-	r := startWriteRig(t)
-	defer r.cleanup()
-
-	sha := validSHA()
-	resp := r.post(t, "/api/brain/perceive", PerceiveRequest{
-		SHA: sha, Title: "Hi", Body: "World",
-		URL: "https://example.com", Tags: []string{"a"},
-	})
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusAccepted {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
-	}
-
-	doc, ok := r.os.summaries[osearch.DocID("personal", "memory", sha)]
-	if !ok {
-		t.Fatal("OS doc not written")
-	}
-	if doc.Synthesised {
-		t.Errorf("perceive should leave Synthesised=false")
-	}
-	if doc.SourceURL != "https://example.com" {
-		t.Errorf("SourceURL = %q, want example.com", doc.SourceURL)
-	}
-	if len(r.synth.snapshot()) != 1 {
-		t.Errorf("synth queue calls = %v, want 1", r.synth.snapshot())
-	}
-}
-
-func TestHandlerPerceive_RejectsBadSHA(t *testing.T) {
-	r := startWriteRig(t)
-	defer r.cleanup()
-
-	resp := r.post(t, "/api/brain/perceive", PerceiveRequest{
-		SHA: "not-hex", Title: "x", Body: "y",
-	})
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400", resp.StatusCode)
-	}
-}
-
-func TestHandlerPerceive_RejectsMissingTitleBody(t *testing.T) {
-	r := startWriteRig(t)
-	defer r.cleanup()
-
-	resp := r.post(t, "/api/brain/perceive", PerceiveRequest{SHA: validSHA(), Title: "", Body: "x"})
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400 for missing title", resp.StatusCode)
-	}
-}
-
-func TestHandlerPerceive_DisabledWithoutOS(t *testing.T) {
-	d, url, token, cleanup := startTestRig(t)
-	defer cleanup()
-	d.osClient = nil // simulate [opensearch] absent
-
-	body, _ := json.Marshal(PerceiveRequest{SHA: validSHA(), Title: "x", Body: "y"})
-	req, _ := http.NewRequest(http.MethodPost, url+"/api/brain/perceive", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("status = %d, want 503 when OS unwired", resp.StatusCode)
-	}
-}
-
-// --- /learn -------------------------------------------------------
-
-func TestHandlerLearn_HappyPath(t *testing.T) {
-	r := startWriteRig(t)
-	defer r.cleanup()
-
-	sha := validSHA()
-	resp := r.post(t, "/api/brain/learn", LearnRequest{
-		SHA: sha, Title: "T", Body: "B",
-		Tags: []string{"curated"},
-	})
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("status = %d", resp.StatusCode)
-	}
-	doc := r.os.summaries[osearch.DocID("personal", "memory", sha)]
-	if doc.Reliability != osearch.ReliabilityMedium {
-		t.Errorf("learn should set reliability=medium; got %q", doc.Reliability)
-	}
-	if doc.GateReason == "" {
-		t.Error("learn should set GateReason")
-	}
-}
-
-// --- /attach ------------------------------------------------------
-
-func TestHandlerAttach_HappyPath(t *testing.T) {
-	r := startWriteRig(t)
-	defer r.cleanup()
-
-	payload := []byte("hello, attachment bytes")
-	sha := osearch.SHA256Hex(payload)
-	resp := r.post(t, "/api/brain/attach", AttachRequest{
-		SHA:              sha,
-		OriginalFilename: "note.pdf",
-		MIMEType:         "application/pdf",
-		BytesB64:         base64.StdEncoding.EncodeToString(payload),
-		ExtractedText:    "extracted text",
-	})
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusAccepted {
-		b, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
-	}
-
-	doc := r.os.attachments[osearch.DocID("personal", "memory", sha)]
-	if doc.SHA != sha {
-		t.Errorf("doc SHA = %q", doc.SHA)
-	}
-	if doc.SizeBytes != int64(len(payload)) {
-		t.Errorf("SizeBytes = %d, want %d", doc.SizeBytes, len(payload))
-	}
-	wantKey := "personal/memory/attachments/" + sha + ".pdf"
-	if doc.MinIOKey != wantKey {
-		t.Errorf("MinIOKey = %q, want %q", doc.MinIOKey, wantKey)
-	}
-	stored, ok := r.attach.blobs[wantKey]
-	if !ok || !bytes.Equal(stored, payload) {
-		t.Errorf("blob not stored or content mismatch (got %d bytes)", len(stored))
-	}
-}
-
-func TestHandlerAttach_TagsAndContentType(t *testing.T) {
-	r := startWriteRig(t)
-	defer r.cleanup()
-
-	payload := []byte("tagged attachment bytes")
-	sha := osearch.SHA256Hex(payload)
-	wantTags := []string{"vendor:UIA", "invoice"}
-	resp := r.post(t, "/api/brain/attach", AttachRequest{
-		SHA:              sha,
-		OriginalFilename: "invoice.pdf",
-		MIMEType:         "application/pdf",
-		BytesB64:         base64.StdEncoding.EncodeToString(payload),
-		Tags:             wantTags,
-	})
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusAccepted {
-		b, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
-	}
-
-	doc := r.os.attachments[osearch.DocID("personal", "memory", sha)]
-	if doc.MIMEType != "application/pdf" {
-		t.Errorf("MIMEType = %q, want application/pdf (caller-supplied must round-trip)", doc.MIMEType)
-	}
-	if len(doc.Tags) != len(wantTags) {
-		t.Fatalf("Tags = %v, want %v", doc.Tags, wantTags)
-	}
-	for i, tag := range wantTags {
-		if doc.Tags[i] != tag {
-			t.Errorf("Tags[%d] = %q, want %q", i, doc.Tags[i], tag)
-		}
-	}
-
-	// v2.5.1: index tags must also reach MinIO via PutAttachmentWithTags.
-	wantKey := fmt.Sprintf("personal/memory/attachments/%s.pdf", sha)
-	storedTags := r.attach.tags[wantKey]
-	if len(storedTags) != len(wantTags) {
-		t.Fatalf("MinIO tags = %v, want %v (PutAttachmentWithTags must thread req.Tags through)", storedTags, wantTags)
-	}
-	for i, tag := range wantTags {
-		if storedTags[i] != tag {
-			t.Errorf("MinIO tags[%d] = %q, want %q", i, storedTags[i], tag)
-		}
-	}
-}
-
-// v2.5.1 (#48): handleAttach must write a companion SummaryDoc to
-// pb_summaries so brain_recall can see attachments via the existing
-// summaries-only snapshot export path.
-func TestHandlerAttach_WritesSummaryStub(t *testing.T) {
-	r := startWriteRig(t)
-	defer r.cleanup()
-
-	payload := []byte("attachment body bytes")
-	sha := osearch.SHA256Hex(payload)
-	resp := r.post(t, "/api/brain/attach", AttachRequest{
-		SHA:              sha,
-		OriginalFilename: "note.pdf",
-		Title:            "Important note",
-		MIMEType:         "application/pdf",
-		BytesB64:         base64.StdEncoding.EncodeToString(payload),
-		Description:      "why I kept this",
-		Tags:             []string{"keep"},
-		MemoryFields: MemoryFields{
-			Source: []string{"file:///tmp/note.pdf"},
-		},
-	})
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusAccepted {
-		b, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
-	}
-
-	// AttachmentDoc carries Description, NOT ExtractedText (#47 fix).
-	att := r.os.attachments[osearch.DocID("personal", "memory", sha)]
-	if att.Description != "why I kept this" {
-		t.Errorf("AttachmentDoc.Description = %q, want caller text", att.Description)
-	}
-	if att.ExtractedText != "" {
-		t.Errorf("AttachmentDoc.ExtractedText = %q, want empty (pdftotext owns it)", att.ExtractedText)
-	}
-	if att.SummarySHA != sha {
-		t.Errorf("AttachmentDoc.SummarySHA = %q, want %q", att.SummarySHA, sha)
-	}
-
-	// Companion stub in pb_summaries — same SHA, different index.
-	stub, ok := r.os.summaries[osearch.DocID("personal", "memory", sha)]
-	if !ok {
-		t.Fatal("companion SummaryDoc stub not written")
-	}
-	if stub.Kind != osearch.KindAttachmentStub {
-		t.Errorf("stub.Kind = %q, want attachment_stub", stub.Kind)
-	}
-	if stub.RawBody != "why I kept this" {
-		t.Errorf("stub.RawBody = %q, want description", stub.RawBody)
-	}
-	if stub.Title != "Important note" {
-		t.Errorf("stub.Title = %q", stub.Title)
-	}
-	if stub.Reliability != osearch.ReliabilityMedium {
-		t.Errorf("stub.Reliability = %q, want medium", stub.Reliability)
-	}
-	if !strings.HasPrefix(stub.GateReason, "curated") {
-		t.Errorf("stub.GateReason = %q, want curated-prefixed", stub.GateReason)
-	}
-	if len(stub.Attachments) != 1 || stub.Attachments[0] != sha {
-		t.Errorf("stub.Attachments = %v, want [%s]", stub.Attachments, sha)
-	}
-	// Tags include attachment + mime: prefix.
-	hasMime, hasAttachment := false, false
-	for _, tag := range stub.Tags {
-		if tag == "attachment" {
-			hasAttachment = true
-		}
-		if tag == "mime:application/pdf" {
-			hasMime = true
-		}
-	}
-	if !hasAttachment || !hasMime {
-		t.Errorf("stub.Tags = %v, want to include 'attachment' + 'mime:application/pdf'", stub.Tags)
-	}
-	if len(stub.Source) == 0 || stub.Source[0] != "file:///tmp/note.pdf" {
-		t.Errorf("stub.Source = %v, want mirror of req.Source", stub.Source)
-	}
-}
-
-// v2.5.1: re-attaching the same SHA must preserve any pdftotext output
-// the synth worker previously wrote, otherwise every re-attach
-// transiently wipes ExtractedText until the next synth pass.
-func TestHandlerAttach_PreservesExtractedTextOnReattach(t *testing.T) {
-	r := startWriteRig(t)
-	defer r.cleanup()
-
-	payload := []byte("idempotent bytes")
-	sha := osearch.SHA256Hex(payload)
-	// Seed an existing AttachmentDoc with ExtractedText (as if synth ran).
-	r.os.attachments[osearch.DocID("personal", "memory", sha)] = osearch.AttachmentDoc{
-		Profile: "personal", Vault: "memory", SHA: sha,
-		OriginalFilename: "note.pdf",
-		MIMEType:         "application/pdf",
-		ExtractedText:    "prior pdftext from a previous synth pass",
-	}
-
-	resp := r.post(t, "/api/brain/attach", AttachRequest{
-		SHA:              sha,
-		OriginalFilename: "note.pdf",
-		MIMEType:         "application/pdf",
-		BytesB64:         base64.StdEncoding.EncodeToString(payload),
-		Description:      "re-attaching",
-		// req.ExtractedText intentionally empty
-	})
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusAccepted {
-		b, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status=%d body=%s", resp.StatusCode, b)
-	}
-	got := r.os.attachments[osearch.DocID("personal", "memory", sha)]
-	if got.ExtractedText != "prior pdftext from a previous synth pass" {
-		t.Errorf("ExtractedText not preserved on re-attach: got %q", got.ExtractedText)
-	}
-	if got.Description != "re-attaching" {
-		t.Errorf("Description not refreshed on re-attach: got %q", got.Description)
-	}
-}
-
-func TestHandlerAttach_RejectsSHAMismatch(t *testing.T) {
-	r := startWriteRig(t)
-	defer r.cleanup()
-
-	bad := validSHA() // not the real hash of "x"
-	resp := r.post(t, "/api/brain/attach", AttachRequest{
-		SHA: bad, OriginalFilename: "x.txt",
-		BytesB64: base64.StdEncoding.EncodeToString([]byte("x")),
-	})
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("status = %d, want 400 on sha mismatch", resp.StatusCode)
-	}
-}
-
-// --- /attach/{sha} ------------------------------------------------
-
-func TestHandlerAttachGet_PresignsExisting(t *testing.T) {
-	r := startWriteRig(t)
-	defer r.cleanup()
-
-	// Seed via the handler so MinIO key + OS doc both exist.
-	payload := []byte("contents")
-	sha := osearch.SHA256Hex(payload)
-	resp := r.post(t, "/api/brain/attach", AttachRequest{
-		SHA: sha, OriginalFilename: "x.bin",
-		BytesB64: base64.StdEncoding.EncodeToString(payload),
-	})
-	resp.Body.Close()
-
-	req, _ := http.NewRequest(http.MethodGet, r.url+"/api/brain/attach/"+sha, nil)
-	req.Header.Set("Authorization", "Bearer "+r.token)
-	getResp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	defer getResp.Body.Close()
-	if getResp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(getResp.Body)
-		t.Fatalf("status = %d body=%s", getResp.StatusCode, b)
-	}
-	var body map[string]any
-	_ = json.NewDecoder(getResp.Body).Decode(&body)
-	url, _ := body["url"].(string)
-	if !strings.HasPrefix(url, "https://example.test/personal/memory/attachments/") {
-		t.Errorf("unexpected presigned URL: %q", url)
-	}
-}
-
-func TestHandlerAttachGet_404OnMissing(t *testing.T) {
-	r := startWriteRig(t)
-	defer r.cleanup()
-
-	req, _ := http.NewRequest(http.MethodGet, r.url+"/api/brain/attach/"+validSHA(), nil)
-	req.Header.Set("Authorization", "Bearer "+r.token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", resp.StatusCode)
-	}
-}
-
-// --- /trace -------------------------------------------------------
-
-func TestHandlerTrace_AppendsLog(t *testing.T) {
-	r := startWriteRig(t)
-	defer r.cleanup()
-
-	resp := r.post(t, "/api/brain/trace", TraceRequest{
-		Kind: "test", Message: "hello", Meta: map[string]any{"x": 1},
-	})
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("status = %d", resp.StatusCode)
-	}
-
-	logPath := filepath.Join(r.d.DataDir.VaultDir("personal", "memory"), "Wiki", "_log.md")
-	got := readFile(t, logPath)
-	if !strings.Contains(got, `"kind":"test"`) {
-		t.Errorf("log missing kind=test: %s", got)
-	}
-	if !strings.Contains(got, `"message":"hello"`) {
-		t.Errorf("log missing message: %s", got)
-	}
-}
+// --- pure helpers (no rig, no I/O) --------------------------------
 
 func TestValidateSHA(t *testing.T) {
 	if err := validateSHA(strings.Repeat("0", 64)); err != nil {
@@ -632,11 +178,132 @@ func TestExtFromFilename(t *testing.T) {
 	}
 }
 
-func readFile(t *testing.T, path string) string {
+// --- handler VALIDATION tests (no PG, no Start) --------------------
+//
+// Phase D1: the write happy-paths now hit a live Postgres SoR and moved
+// to the integration suite (handlers_write_integration_test.go). But the
+// validation paths (bad JSON / bad SHA / missing fields / sha mismatch)
+// return 400 BEFORE any SoR access, so they stay in the unit suite. They
+// drive the same no-Start router rig as the birth/maintenance handler
+// tests (newRouterRig in handlers_test.go).
+
+// postJSONRig marshals body and POSTs it to the rig with the bearer token.
+func postJSONRig(t *testing.T, r *routerRig, path string, body any) *http.Response {
 	t.Helper()
-	b, err := osReadFile(path)
+	b, err := json.Marshal(body)
 	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+		t.Fatalf("marshal: %v", err)
 	}
-	return string(b)
+	req, _ := http.NewRequest(http.MethodPost, r.server.URL+path, bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+r.token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", path, err)
+	}
+	return resp
+}
+
+func validSHA() string { return strings.Repeat("a", 64) }
+
+// --- /perceive validation -----------------------------------------
+
+func TestHandlerPerceive_RejectsBadSHA(t *testing.T) {
+	r := newRouterRig(t)
+	resp := postJSONRig(t, r, "/api/brain/perceive", PerceiveRequest{SHA: "not-hex", Title: "x", Body: "y"})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestHandlerPerceive_RejectsMissingTitleBody(t *testing.T) {
+	r := newRouterRig(t)
+	resp := postJSONRig(t, r, "/api/brain/perceive", PerceiveRequest{SHA: validSHA(), Title: "", Body: "x"})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for missing title", resp.StatusCode)
+	}
+}
+
+func TestHandlerPerceive_RejectsBadJSON(t *testing.T) {
+	r := newRouterRig(t)
+	req, _ := http.NewRequest(http.MethodPost, r.server.URL+"/api/brain/perceive",
+		bytes.NewReader([]byte("{not json")))
+	req.Header.Set("Authorization", "Bearer "+r.token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for malformed JSON", resp.StatusCode)
+	}
+}
+
+// --- /learn validation --------------------------------------------
+
+func TestHandlerLearn_RejectsBadSHA(t *testing.T) {
+	r := newRouterRig(t)
+	resp := postJSONRig(t, r, "/api/brain/learn", LearnRequest{SHA: "nope", Title: "x", Body: "y"})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestHandlerLearn_RejectsMissingTitleBody(t *testing.T) {
+	r := newRouterRig(t)
+	resp := postJSONRig(t, r, "/api/brain/learn", LearnRequest{SHA: validSHA(), Title: "T", Body: ""})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for missing body", resp.StatusCode)
+	}
+}
+
+// --- /attach validation -------------------------------------------
+
+func TestHandlerAttach_RejectsBadSHA(t *testing.T) {
+	r := newRouterRig(t)
+	resp := postJSONRig(t, r, "/api/brain/attach", AttachRequest{
+		SHA: "short", OriginalFilename: "x.txt", BytesB64: "eA==",
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestHandlerAttach_RejectsMissingFilename(t *testing.T) {
+	r := newRouterRig(t)
+	resp := postJSONRig(t, r, "/api/brain/attach", AttachRequest{
+		SHA: validSHA(), OriginalFilename: "", BytesB64: "eA==",
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for missing filename", resp.StatusCode)
+	}
+}
+
+func TestHandlerAttach_RejectsSHAMismatch(t *testing.T) {
+	r := newRouterRig(t)
+	// validSHA() is not the real hash of "x" → mismatch is a 400.
+	resp := postJSONRig(t, r, "/api/brain/attach", AttachRequest{
+		SHA: validSHA(), OriginalFilename: "x.txt", BytesB64: "eA==", // base64("x")
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 on sha mismatch", resp.StatusCode)
+	}
+}
+
+// --- /trace validation --------------------------------------------
+
+func TestHandlerTrace_RejectsMissingKindMessage(t *testing.T) {
+	r := newRouterRig(t)
+	resp := postJSONRig(t, r, "/api/brain/trace", TraceRequest{Kind: "", Message: ""})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for missing kind/message", resp.StatusCode)
+	}
 }

@@ -16,6 +16,8 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/neverprepared/phantom-brain/internal/osearch"
+	"github.com/neverprepared/phantom-brain/internal/pgstore"
+	"github.com/neverprepared/phantom-brain/internal/pgstore/pgdb"
 )
 
 // resolveOS returns the per-binding osWriter view (v3.2 per-binding
@@ -270,18 +272,7 @@ type WriteResponse struct {
 // --- handlers -----------------------------------------------------
 
 func (d *Daemon) handlePerceive(w http.ResponseWriter, r *http.Request) {
-	if d.osClient == nil {
-		WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
-			"opensearch not configured; perceive disabled", nil)
-		return
-	}
 	binding, _ := BindingFromContext(r.Context())
-	osc, err := d.resolveOS(binding)
-	if err != nil {
-		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
-		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
-		return
-	}
 
 	var req PerceiveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -317,33 +308,21 @@ func (d *Daemon) handlePerceive(w http.ResponseWriter, r *http.Request) {
 		Embedding:   req.Embedding,
 	}
 	applyMemoryFields(&doc, req.MemoryFields)
-	if err := osc.UpsertSummary(r.Context(), doc, false); err != nil {
+	// Phase D1: the Postgres SoR is THE write. On error return 502 so the
+	// agent's write-ahead queue retries (the daemon SHA-dedups, so retries
+	// are safe). The pb_records projection follows asynchronously via River.
+	if err := d.writeRecordRaw(r.Context(), binding, doc); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
-			"opensearch upsert failed: "+err.Error(), nil)
+			"record write failed: "+err.Error(), nil)
 		return
 	}
 	d.synth.Enqueue(binding.Key.Profile, binding.Key.Vault, req.SHA)
-
-	// Phase B1: mirror the raw record into the Postgres SoR when the
-	// binding has dual_write on. Non-fatal — never affects the response.
-	d.dualWriteRaw(r.Context(), binding, doc)
 
 	writeWriteResponse(w, http.StatusAccepted, req.SHA, true)
 }
 
 func (d *Daemon) handleLearn(w http.ResponseWriter, r *http.Request) {
-	if d.osClient == nil {
-		WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
-			"opensearch not configured; learn disabled", nil)
-		return
-	}
 	binding, _ := BindingFromContext(r.Context())
-	osc, err := d.resolveOS(binding)
-	if err != nil {
-		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
-		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
-		return
-	}
 
 	var req LearnRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -383,38 +362,25 @@ func (d *Daemon) handleLearn(w http.ResponseWriter, r *http.Request) {
 		Embedding:   req.Embedding,
 	}
 	applyMemoryFields(&doc, req.MemoryFields)
-	if err := osc.UpsertSummary(r.Context(), doc, false); err != nil {
+	// Phase D1: the Postgres SoR is THE write. 502 on error so the agent's
+	// write-ahead queue retries (SHA-dedup makes retries safe).
+	if err := d.writeRecordRaw(r.Context(), binding, doc); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
-			"opensearch upsert failed: "+err.Error(), nil)
+			"record write failed: "+err.Error(), nil)
 		return
 	}
 	d.synth.Enqueue(binding.Key.Profile, binding.Key.Vault, req.SHA)
-
-	// Phase B1: mirror the raw record into the Postgres SoR (dual_write).
-	// Non-fatal — never affects the response.
-	d.dualWriteRaw(r.Context(), binding, doc)
 
 	writeWriteResponse(w, http.StatusAccepted, req.SHA, true)
 }
 
 func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
-	if d.osClient == nil {
-		WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
-			"opensearch not configured; attach disabled", nil)
-		return
-	}
 	if d.attach == nil {
 		WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
 			"attachment store not configured; attach disabled", nil)
 		return
 	}
 	binding, _ := BindingFromContext(r.Context())
-	osc, err := d.resolveOS(binding)
-	if err != nil {
-		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
-		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
-		return
-	}
 	attach, err := d.resolveAttach(binding)
 	if err != nil {
 		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
@@ -495,24 +461,25 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 		Embedding:        req.Embedding,
 		SummarySHA:       req.SHA, // companion stub lives at the same SHA in pb_summaries
 	}
-	// Preserve existing pdftotext output on re-attach. Without this guard
+	// Preserve existing extracted text on re-attach. Without this guard
 	// every re-attach (same SHA, same bytes) blows away the synth pass's
-	// ExtractedText until the next synth pass re-runs pdftotext.
+	// ExtractedText until the next synth pass re-runs extraction. Phase D1:
+	// the attachment IS the same record in the SoR — read it back by SHA.
 	if req.ExtractedText == "" {
-		if existing, _ := osc.GetAttachment(r.Context(), binding.Key.Profile, binding.Key.Vault, req.SHA); existing != nil && existing.ExtractedText != "" {
-			doc.ExtractedText = existing.ExtractedText
+		if view, perr := d.resolvePG(binding); perr == nil {
+			if existing, gerr := pgstore.New(view.Pool()).GetRecordBySHA(r.Context(), pgdb.GetRecordBySHAParams{
+				Profile: binding.Key.Profile,
+				Vault:   binding.Key.Vault,
+				Sha:     req.SHA,
+			}); gerr == nil && existing.ExtractedText.Valid && existing.ExtractedText.String != "" {
+				doc.ExtractedText = existing.ExtractedText.String
+			}
 		}
 	}
-	if err := osc.UpsertAttachment(r.Context(), doc, false); err != nil {
-		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
-			"opensearch upsert failed: "+err.Error(), nil)
-		return
-	}
 
-	// Companion SummaryDoc — the fix for #48. Sits in pb_summaries so
-	// the existing summaries-only snapshot export carries it to agents,
-	// where brain_recall can FTS-hit on description + (post-synth) the
-	// extracted attachment body. Same SHA, different index — no collision.
+	// Companion stub identity — the attachment record's recall fields. The
+	// attachment's binary metadata (minio_key/mime/size/filename) rides on
+	// the same SoR record via writeAttachRecord. Same SHA, one record.
 	stubTitle := req.Title
 	if strings.TrimSpace(stubTitle) == "" {
 		stubTitle = req.OriginalFilename
@@ -533,7 +500,7 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 		References:  req.References,
 		CapturedAt:  req.CapturedAt,
 		Title:       stubTitle,
-		RawBody:     req.Description, // pdftotext fills this in synth
+		RawBody:     req.Description, // extraction fills this in synth
 		Tags:        stubTags,
 		Attachments: []string{req.SHA},
 		Reliability: osearch.ReliabilityMedium,
@@ -543,17 +510,15 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 		Synthesised: false,
 		Embedding:   req.Embedding,
 	}
-	if err := osc.UpsertSummary(r.Context(), stub, false); err != nil {
+	// Phase D1: the Postgres SoR is THE write. 502 on error so the agent's
+	// write-ahead queue retries (the bytes are already in MinIO; SHA-dedup
+	// makes the record write retry-safe).
+	if err := d.writeAttachRecord(r.Context(), binding, stub, doc); err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
-			"opensearch summary stub upsert failed: "+err.Error(), nil)
+			"attachment record write failed: "+err.Error(), nil)
 		return
 	}
 	d.synth.Enqueue(binding.Key.Profile, binding.Key.Vault, req.SHA)
-
-	// Phase B1: mirror the attachment's companion record (stub identity +
-	// the attachment's minio_key/mime/size/filename) into the Postgres SoR
-	// when dual_write is on. Non-fatal — never affects the response.
-	d.dualWriteAttachRaw(r.Context(), binding, stub, doc)
 
 	writeWriteResponse(w, http.StatusAccepted, req.SHA, true)
 }
@@ -596,6 +561,12 @@ func (d *Daemon) handleTrace(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
+// handleAttachGet / handleCaptureGet still read the LEGACY OpenSearch
+// indices (pb_attachments / pb_summaries) for the presign metadata. Phase
+// D1 stopped WRITING those indices, so these GET paths only work for docs
+// written before the cutover; they will be migrated to read the Postgres
+// SoR / pb_records in the D2 follow-up. capture/{sha} additionally has no
+// SoR column for capture_minio_key yet (see synth_queue.go).
 func (d *Daemon) handleAttachGet(w http.ResponseWriter, r *http.Request) {
 	if d.osClient == nil || d.attach == nil {
 		WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,

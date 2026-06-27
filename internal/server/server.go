@@ -265,23 +265,14 @@ func Start(opts StartOpts) (*Daemon, error) {
 		slog.String("config_dir", opts.ConfigDir),
 	)
 
-	// v3.2 eager-ensure: walk every binding, collect distinct OS
-	// index prefixes + MinIO buckets, and ensure each one exists
-	// BEFORE the HTTP listener opens. Failure aborts startup — the
-	// daemon would otherwise return 503/500 on first write to an
-	// overridden binding, masking a config error operators want to
-	// catch at boot.
-	if d.osBase != nil {
-		prefixes := []string{cfg.OpenSearch.IndexPrefix}
-		for _, b := range d.registry.Vaults() {
-			prefixes = append(prefixes, b.Storage.IndexPrefix)
-		}
-		if eerr := d.osBase.EnsurePrefixes(parentCtx, prefixes); eerr != nil {
-			_ = lk.Unlock()
-			parentCancel()
-			return nil, fmt.Errorf("server: opensearch ensure indices: %w", eerr)
-		}
-	}
+	// v3.2 eager-ensure for MinIO buckets: walk every binding, collect
+	// distinct buckets, and ensure each exists BEFORE the HTTP listener
+	// opens. Failure aborts startup.
+	//
+	// Phase D1: the LEGACY OpenSearch indices (pb_summaries/pb_entities/
+	// pb_attachments) are NO LONGER written, so they are NOT ensured here.
+	// The only OS index that matters now is pb_records, ensured per binding
+	// via osproject.EnsureIndex inside buildPGBindingDeps below.
 	if d.minioBase != nil {
 		seenBucket := map[string]struct{}{}
 		buckets := []string{cfg.Storage.MinIOBucket}
@@ -306,22 +297,22 @@ func Start(opts StartOpts) (*Daemon, error) {
 		}
 	}
 
-	// v3.2 operator-footgun detector. After indices exist (so
-	// CountByVault against the new prefixed index returns a real 0,
-	// not 404), refuse to start when a binding's override would
-	// silently strand existing data on the shared indices.
-	if d.osBase != nil {
-		if verr := VerifyStorageOverrides(parentCtx, d.osBase, cfg.OpenSearch.IndexPrefix, d.registry.Vaults()); verr != nil {
-			_ = lk.Unlock()
-			parentCancel()
-			return nil, verr
-		}
-	}
+	// Phase D1: the v3.2 operator-footgun detector (VerifyStorageOverrides)
+	// queried the LEGACY pb_summaries indices, which are no longer
+	// ensured or written — so it is dropped here. The pb_records
+	// projection is per-binding-prefixed and ensured fresh in
+	// buildPGBindingDeps; there is no shared-vs-prefixed straddle to guard
+	// against for a store that's authoritative-from-birth.
 
 	// Build per-binding views now that the registry + eager-ensure
 	// passed. Handlers + synth resolve through d.depsForBinding —
-	// reload() re-runs buildBindingDeps for added bindings.
-	d.buildBindingDeps()
+	// reload() re-runs buildBindingDeps for added bindings. Phase D1:
+	// Postgres is mandatory, so a PG build failure here aborts startup.
+	if err := d.buildBindingDeps(); err != nil {
+		_ = lk.Unlock()
+		parentCancel()
+		return nil, err
+	}
 
 	if d.osBase != nil {
 		// Day 6: debounced snapshot rebuild. Each successful synth
@@ -343,42 +334,35 @@ func Start(opts StartOpts) (*Daemon, error) {
 		)
 		d.debouncer.Start(parentCtx)
 
-		// Day 5: spawn the synth worker now that OS is reachable.
-		// Wire OnComplete → debouncer so each enriched doc kicks the
-		// rebuild timer. Attach + Capture are wired through so the
-		// worker can pull raw-source captures into MinIO before gate.
-		// v3.2: Resolve threads the per-binding views in so processJob
-		// reads/writes against the binding's prefixed indices + bucket.
+		// Spawn the synth worker now that OS + Postgres are reachable.
+		// Phase D1: the worker reads raw records from the Postgres SoR
+		// and writes synth results back to it (the pb_records projection
+		// follows via River). Resolve threads the per-binding PG view +
+		// AttachmentStore in; WriteSynth persists the distilled result.
+		// OnComplete → debouncer kicks the snapshot rebuild timer.
 		w := NewSynthWorker(SynthWorkerOpts{
-			OSClient: d.osClient,
-			Logger:   opts.Logger,
-			Attach:   d.attach,
-			Capture:  cfg.Capture,
+			Logger:  opts.Logger,
+			Capture: cfg.Capture,
 		})
-		w.Resolve = func(profile, vaultName string) (osWriter, AttachmentStore, bool) {
+		w.Resolve = func(profile, vaultName string) (synthStore, AttachmentStore, bool) {
 			deps, ok := d.bindings.Get(VaultKey{Profile: profile, Vault: vaultName})
-			if !ok || deps == nil {
+			if !ok || deps == nil || deps.PG == nil {
 				return nil, nil, false
 			}
-			var osc osWriter
-			if deps.OS != nil {
-				osc = deps.OS
+			// Wrap the resolved per-binding PG view in the production
+			// synthStore adapter so the worker reads through the
+			// fakeable seam rather than a concrete pgx pool.
+			return &pgSynthStore{view: deps.PG}, deps.Attach, true
+		}
+		w.WriteSynth = func(ctx context.Context, profile, vaultName, sha string, res synthResult) error {
+			b, ok := d.registry.LookupByVault(VaultKey{Profile: profile, Vault: vaultName})
+			if !ok {
+				return fmt.Errorf("synth: no binding for %s/%s", profile, vaultName)
 			}
-			return osc, deps.Attach, true
+			return d.writeSynthResult(ctx, b, profile, vaultName, sha, res)
 		}
 		w.OnComplete = func(profile, vaultName, _ string) {
 			d.debouncer.Trigger(profile, vaultName)
-		}
-		// Phase B1: mirror the synthesised state into the Postgres SoR.
-		// Resolve the binding (for its DualWrite flag + PG view) by
-		// (profile, vault); dualWriteSynth is a no-op when the flag is
-		// off or PG is disabled, and non-fatal on any error.
-		w.OnSynthesised = func(profile, vaultName, sha string, res synthResult) {
-			b, ok := d.registry.LookupByVault(VaultKey{Profile: profile, Vault: vaultName})
-			if !ok {
-				return
-			}
-			d.dualWriteSynth(parentCtx, b, profile, vaultName, sha, res)
 		}
 		w.Start(parentCtx)
 		d.synth = w
@@ -548,28 +532,16 @@ func (d *Daemon) reload() error {
 		if !ok {
 			continue // racing remove — skip
 		}
-		if d.osBase != nil {
-			if err := d.osBase.EnsurePrefixes(d.parentCtx, []string{b.Storage.IndexPrefix}); err != nil {
-				d.Logger.Warn("phantom-brain: SIGHUP ensure-indices failed",
-					slog.String("vault", k.String()),
-					slog.String("prefix", b.Storage.IndexPrefix),
-					slog.String("err", err.Error()))
-				continue
-			}
-		}
+		// Phase D1: legacy pb_* index ensure + VerifyStorageOverrides are
+		// dropped — those indices are no longer written. The pb_records
+		// projection index is ensured for added bindings inside
+		// buildBindingDeps → buildPGBindingDeps below.
 		if d.minioBase != nil && b.Storage.Bucket != "" {
 			if err := d.minioBase.EnsureBucketExists(d.parentCtx, b.Storage.Bucket); err != nil {
 				d.Logger.Warn("phantom-brain: SIGHUP ensure-bucket failed",
 					slog.String("vault", k.String()),
 					slog.String("bucket", b.Storage.Bucket),
 					slog.String("err", err.Error()))
-				continue
-			}
-		}
-		if d.osBase != nil {
-			if err := VerifyStorageOverrides(d.parentCtx, d.osBase, d.Config.OpenSearch.IndexPrefix, []VaultBinding{b}); err != nil {
-				d.Logger.Warn("phantom-brain: SIGHUP storage-overrides verify failed (binding not started)",
-					slog.String("vault", k.String()), slog.String("err", err.Error()))
 				continue
 			}
 		}
@@ -583,8 +555,14 @@ func (d *Daemon) reload() error {
 	// Rebuild deps for every binding (added + existing) so any
 	// operator-edited config.toml (e.g. switched buckets) takes
 	// effect. Existing runners are NOT restarted per the documented
-	// reload semantics.
-	d.buildBindingDeps()
+	// reload semantics. Phase D1: a PG rebuild failure is logged but
+	// tolerated (consistent with reload's "continue with prior
+	// registry" posture) — resolvePG then fails loud per-request for
+	// any binding whose view didn't rebuild.
+	if err := d.buildBindingDeps(); err != nil {
+		d.Logger.Warn("phantom-brain: SIGHUP postgres binding rebuild failed (some bindings may have no PG view until fixed)",
+			slog.String("err", err.Error()))
+	}
 	return nil
 }
 
@@ -644,7 +622,7 @@ func (d *Daemon) LocalBackendForTest() (*LocalBackend, bool) {
 // *osearch.Client (via WithPrefix) and a per-binding AttachmentStore
 // (minioBindingView) once at startup / reload so the request path is
 // a cache lookup, not a clone.
-func (d *Daemon) buildBindingDeps() {
+func (d *Daemon) buildBindingDeps() error {
 	for _, b := range d.registry.Vaults() {
 		deps := &bindingDeps{}
 		if d.osBase != nil {
@@ -662,11 +640,11 @@ func (d *Daemon) buildBindingDeps() {
 		}
 		d.bindings.Set(b.Key, deps)
 	}
-	// Phase A: build per-profile Postgres resources + per-binding PG
+	// Phase D1: build per-profile Postgres resources + per-binding PG
 	// views AFTER the OS/MinIO views are cached (the PG view borrows the
-	// just-set bindingDeps pointers). Non-fatal: a PG failure leaves PG
-	// nil and never disturbs the legacy views above.
-	d.buildPGBindingDeps()
+	// just-set bindingDeps pointers). Postgres is MANDATORY — a build
+	// failure is returned so Start fails loud; reload logs + tolerates it.
+	return d.buildPGBindingDeps()
 }
 
 // depsForBinding returns the per-binding view bundle. Handlers call

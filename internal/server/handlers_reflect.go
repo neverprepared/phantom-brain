@@ -118,18 +118,7 @@ type ResynthRequest struct {
 //	POST /api/brain/resynth {"dry_run": true}   — report backlog, mutate nothing.
 //	POST /api/brain/resynth {"dry_run": false}  — start the backfill.
 func (d *Daemon) handleResynth(w http.ResponseWriter, r *http.Request) {
-	if d.osClient == nil {
-		WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
-			"opensearch not configured; resynth disabled", nil)
-		return
-	}
 	binding, _ := BindingFromContext(r.Context())
-	osc, err := d.resolveOS(binding)
-	if err != nil {
-		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
-		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
-		return
-	}
 
 	// Tolerate an empty body — both fields default. EOF (no body) is not
 	// an error; anything else malformed is a 400.
@@ -149,7 +138,7 @@ func (d *Daemon) handleResynth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := worker.ResynthBacklog(r.Context(), osc, binding.Key.Profile, binding.Key.Vault, req.DryRun, req.Limit)
+	result, err := worker.ResynthBacklog(r.Context(), binding.Key.Profile, binding.Key.Vault, req.DryRun, req.Limit)
 	if err != nil {
 		if errors.Is(err, ErrResynthInProgress) {
 			WriteErrorEnvelope(w, http.StatusConflict, ErrCodeStorageBackendErr, err.Error(), nil)

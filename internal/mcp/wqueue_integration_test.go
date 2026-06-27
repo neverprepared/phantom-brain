@@ -226,36 +226,15 @@ func TestBrainStatus_ReportsConnectivityAndQueueDepth(t *testing.T) {
 }
 
 // --- recall footer for stale snapshot ---------------------------
-
-func TestRecall_AppendsSnapshotFooterWhenStale(t *testing.T) {
-	plan := map[string][]float32{
-		"q":              {1, 0, 0},
-		"Doc\n\nbody bb": {1, 0, 0},
-	}
-	// 2h-old snapshot.
-	s, _, lc, cleanup := setupWithQueue(t, 3, plan, http.HandlerFunc(always200))
-	defer cleanup()
-	lc.SetSnapshotBuiltAt(time.Now().Add(-2 * time.Hour))
-
-	text, isErr := callTool(t, s.handleRecall, map[string]any{"query": "q"})
-	if isErr {
-		t.Fatalf("recall error: %s", text)
-	}
-	if !strings.Contains(text, "Snapshot") || !strings.Contains(text, "ago") {
-		t.Errorf("expected snapshot footer; got: %q", text)
-	}
-}
-
-func TestRecall_NoFooterWhenFresh(t *testing.T) {
-	plan := map[string][]float32{
-		"q": {1, 0, 0},
-	}
-	s, _, lc, cleanup := setupWithQueue(t, 3, plan, http.HandlerFunc(always200))
-	defer cleanup()
-	lc.SetSnapshotBuiltAt(time.Now().Add(-5 * time.Minute))
-
-	text, _ := callTool(t, s.handleRecall, map[string]any{"query": "q"})
-	if strings.Contains(text, "_Snapshot") {
-		t.Errorf("did not expect snapshot footer for fresh snapshot; got: %q", text)
-	}
-}
+//
+// Phase D1: brain_recall is online-only now; the local-snapshot recall
+// path (and its snapshot-staleness footer) was removed in the Postgres
+// cutover. The footer the online path emits is a "live / always fresh"
+// note, not a snapshot-age one, so these two tests assert behaviour that
+// no longer exists. Removed (the online recall footer is covered by
+// recall_online_test.go):
+//
+//   - TestRecall_AppendsSnapshotFooterWhenStale (asserted the stale footer
+//     — impossible online-only; errored without a recall client)
+//   - TestRecall_NoFooterWhenFresh (passed only vacuously: recall errored
+//     and the error text happened not to contain "_Snapshot")

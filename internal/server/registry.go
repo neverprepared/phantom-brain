@@ -30,13 +30,6 @@ type VaultBinding struct {
 	Auth     VaultAuth
 	Defaults VaultDefaults
 	Storage  ResolvedStorage
-
-	// DualWrite is the resolved Phase B1 per-binding flag (from
-	// VaultOverrides.DualWrite, default false). When true the write
-	// handlers + synth mirror the binding's writes into the Postgres
-	// SoR; non-fatal on failure. Read by Daemon.dualWriteRaw /
-	// dualWriteSynth.
-	DualWrite bool
 }
 
 // ResolvedStorage carries the binding's final OS index prefix + MinIO
@@ -197,11 +190,10 @@ func (r *Registry) Load(opts LoadOpts) (int, error) {
 				storage.Bucket = overrides.StorageOverrides.Bucket
 			}
 			binding := VaultBinding{
-				Key:       key,
-				Auth:      auth,
-				Defaults:  MergedDefaults(opts.Defaults, overrides),
-				Storage:   storage,
-				DualWrite: overrides.DualWrite,
+				Key:      key,
+				Auth:     auth,
+				Defaults: MergedDefaults(opts.Defaults, overrides),
+				Storage:  storage,
 			}
 			newByToken[auth.BearerToken] = binding
 			newByVault[key] = binding

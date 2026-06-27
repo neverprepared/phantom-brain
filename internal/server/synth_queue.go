@@ -14,26 +14,62 @@ import (
 	"github.com/neverprepared/phantom-brain/internal/osearch"
 )
 
-// SynthWorker is Phase 6's replacement for the file-queue +
-// synthesizer-loop pair. It drains an in-memory channel of (profile,
-// vault, sha) jobs; for each job it reads the raw OS doc, runs gate
-// + distill via the claude CLI, and writes back the enriched
-// SummaryDoc plus one EntityDoc per extracted entity.
+// synthRecord is the worker's read view of one SoR record. It carries
+// only the fields the synth pipeline reads — the mapped SummaryDoc (so
+// CheckCoherence / RunGate / SummarizeContent / extractEntitiesBest keep
+// working against their existing shape) plus the relational identity
+// (RecordID) and attachment metadata the enrichment path needs. The
+// production adapter (pgSynthStore) builds this from a pgdb.Record via
+// pgRecordToSummaryDoc; tests build it directly.
+type synthRecord struct {
+	Doc              osearch.SummaryDoc // mapped summary view (pgRecordToSummaryDoc)
+	RecordID         int64
+	Synthesised      bool
+	MIMEType         string
+	OriginalFilename string
+	MinIOKey         string
+	ExtractedText    string
+}
+
+// synthStore is the per-binding Postgres read/extract surface the worker
+// depends on, mirroring the WriteSynth callback seam so the read path is
+// equally fakeable. The production impl (pgSynthStore) wraps a
+// *pgBindingView and calls pgstore.New(view.Pool()); tests inject an
+// in-memory fake. Keeping this abstract means processJob + ResynthBacklog
+// never touch a live pgx pool directly.
+type synthStore interface {
+	// Fetch returns the record for (profile, vault, sha) or (nil, nil)
+	// when no rows match — a delete race / unknown SHA is not an error.
+	Fetch(ctx context.Context, profile, vault, sha string) (*synthRecord, error)
+	// SetExtractedText persists newly extracted attachment text back to
+	// the SoR record so re-synth is idempotent (it won't re-extract).
+	SetExtractedText(ctx context.Context, recordID int64, text string) error
+	// ListUnsynthesised returns the Synthesised=false backlog for
+	// (profile, vault), ordered for stable sampling. Used by
+	// ResynthBacklog; len() doubles as the backlog count.
+	ListUnsynthesised(ctx context.Context, profile, vault string) ([]synthRecord, error)
+}
+
+// SynthWorker drains an in-memory channel of (profile, vault, sha) jobs.
+// For each job it reads the raw record from the Postgres SoR, runs gate +
+// distill via the claude CLI, extracts entities, and writes the enriched
+// result back to the SoR (MarkRecordSynthesised + entity upserts + a
+// re-projection enqueue, all in one tx via writeSynthResult). The
+// pb_records OpenSearch projection is updated by the River worker once the
+// re-projection job runs — the synth worker never touches OpenSearch
+// directly (Phase D1: PG is the sole authoritative store).
 //
 // Concurrency:
 //   - Enqueue is non-blocking with overflow drop (logged at Warn).
 //     Operator restart loses queued jobs — durable queueing is a
 //     Phase 7 hardening item per the plan.
-//   - One worker goroutine processes one job at a time. Per-vault
-//     parallelism doesn't matter for a single-operator deploy and
-//     keeps `claude` CLI invocations from stampeding.
+//   - One worker goroutine processes one job at a time.
 //   - Stop drains the in-flight job (bounded by ctx timeout) before
 //     returning.
 //
 // SynthWorker satisfies SynthQueue, so the daemon plugs it straight
 // into the field where the noop default used to live.
 type SynthWorker struct {
-	os       osWriter
 	logger   *slog.Logger
 	queue    chan synthJob
 	bufSize  int
@@ -48,9 +84,10 @@ type SynthWorker struct {
 	baseCtx context.Context
 
 	// processMu serializes processJob across the live run() loop AND
-	// the backfill goroutine so they never run concurrently. upsertEntity
-	// is a read-modify-write on the OS entity doc, single-worker-safe
-	// only — concurrent processing would corrupt MentionedBy[].
+	// the backfill goroutine so they never run concurrently. Entity
+	// upserts are now per-(profile, vault, slug) ON CONFLICT in the SoR
+	// (concurrency-safe), but serialization keeps CLI invocations from
+	// stampeding and preserves the single-job-at-a-time contract.
 	processMu sync.Mutex
 
 	// backfilling caps the resynth backfill at one at a time. The apply
@@ -59,52 +96,58 @@ type SynthWorker struct {
 	backfilling atomic.Bool
 
 	// OnComplete is fired after each successfully synthesised job.
-	// Day 6 wires the debounced snapshot rebuild trigger here.
-	// Nil-safe; the worker checks before invoking.
+	// Wires the debounced snapshot rebuild trigger here. Nil-safe; the
+	// worker checks before invoking.
 	OnComplete func(profile, vault, sha string)
-
-	// OnSynthesised is the Phase B1 seam: fired after a job's legacy
-	// UpsertSummary(Synthesised=true) succeeds, carrying the just-computed
-	// distilled state so the daemon can mirror it into the Postgres SoR
-	// (dualWriteSynth) WITHOUT coupling this file to Postgres types. Keeps
-	// synth_queue.go decoupled — mirrors the OnComplete callback pattern.
-	// Nil-safe; the worker checks before invoking.
-	OnSynthesised func(profile, vault, sha string, res synthResult)
 
 	// cliAvailable is snapshotted at construction so the worker
 	// behaves predictably across the run — toggling the CLI in/out
 	// of $PATH at runtime would otherwise produce mixed-mode output.
 	cliAvailable bool
 
-	// Capture wires the raw-source archival path. When attach is
-	// non-nil and Capture.Enabled, processJob fetches the doc's
-	// source URL and stores response bytes in MinIO before running
-	// gate + distill. Failures are logged and non-fatal.
-	attach  AttachmentStore
+	// capture wires the raw-source archival path. When the binding's
+	// AttachmentStore is non-nil and Capture.Enabled, processJob fetches
+	// the doc's source URL and stores response bytes in MinIO before
+	// running gate + distill. Failures are logged and non-fatal.
+	//
+	// Phase D1 NOTE: the resulting CaptureMinIOKey has NO Postgres
+	// column, so the capture bytes land in MinIO but the key is logged
+	// and dropped — capture-retrieval (handleCaptureGet) will not see it
+	// until the SoR grows a capture_minio_key column (follow-up).
 	capture CaptureConfig
 
-	// Resolve returns per-binding views for a job's (profile, vault).
-	// v3.2 per-binding storage overrides: each binding may have its
-	// own OS index prefix + MinIO bucket. processJob looks up the
-	// binding's view here and uses it for every OS/MinIO call rather
-	// than the worker's struct-level shared os/attach fields.
+	// Resolve returns the per-binding synthStore + AttachmentStore for a
+	// job's (profile, vault). v3.2 per-binding storage overrides: each
+	// binding has its own OS projection prefix + MinIO bucket, and the
+	// Postgres pool is per-profile. processJob looks up the binding's
+	// store here and uses it for every SoR/MinIO read call.
 	//
-	// Nil-safe: when Resolve is nil the worker falls back to the
-	// shared os/attach fields (legacy / test path).
-	Resolve func(profile, vault string) (osWriter, AttachmentStore, bool)
+	// The store is an interface (synthStore), not a concrete
+	// *pgBindingView, so the read path is fakeable in unit tests exactly
+	// like WriteSynth. Production wraps the resolved view in pgSynthStore.
+	//
+	// Returns ok=false on cache miss — the worker MUST drop the job
+	// rather than fall back to shared infra (tenant-boundary safety).
+	Resolve func(profile, vault string) (synthStore, AttachmentStore, bool)
+
+	// WriteSynth persists a job's distilled result into the SoR
+	// (MarkRecordSynthesised + entity upserts + re-projection enqueue,
+	// transactionally). Wired from Daemon.writeSynthResult, which resolves
+	// the binding from (profile, vault). Returning an error leaves the
+	// record raw for a later re-enqueue.
+	WriteSynth func(ctx context.Context, profile, vault, sha string, res synthResult) error
 
 	// pdfExtractor pulls plain text out of PDF attachments at synth
 	// time so they become FTS-searchable. Nil-safe — when the daemon
 	// runs in an environment without poppler-utils, the field stays
 	// nil and PDF attachments synth as a no-op.
-	pdfExtractor    PDFExtractor
-	pdfAvailable    bool
+	pdfExtractor PDFExtractor
+	pdfAvailable bool
 
 	// ocrAvailable is snapshotted at construction. When true the worker
 	// may OCR image attachments and image-only (scanned) PDFs via
 	// tesseract. Office (docx/xlsx/pptx) extraction is pure-Go and needs
-	// no availability gate. Nil/false in environments without tesseract
-	// — those attachments synth with empty bodies, like before v3.4.
+	// no availability gate. Nil/false in environments without tesseract.
 	ocrAvailable bool
 }
 
@@ -116,8 +159,7 @@ type synthJob struct {
 
 // SynthWorkerOpts groups construction inputs.
 type SynthWorkerOpts struct {
-	OSClient osWriter
-	Logger   *slog.Logger
+	Logger *slog.Logger
 	// BufferSize bounds the in-memory queue. 1000 is plenty for a
 	// single-operator deploy; bursts that exceed it drop oldest-
 	// first (TryEnqueue returns false, caller logs).
@@ -127,10 +169,9 @@ type SynthWorkerOpts struct {
 	// pipeline deterministic and fast (no real claude subprocess);
 	// production leaves this false and probes the CLI at startup.
 	DisableCLI bool
-	// Attach + Capture wire raw-source archival. Pass the same
-	// AttachmentStore the daemon uses for /attach; if nil, the
-	// capture pass is skipped entirely.
-	Attach  AttachmentStore
+	// Capture wires raw-source archival. The per-binding AttachmentStore
+	// (from Resolve) is the blob target; this carries the enable flag +
+	// limits.
 	Capture CaptureConfig
 	// PDFExtractor overrides the default pdftotext-backed extractor.
 	// Tests inject a deterministic fake; production leaves it nil and
@@ -158,13 +199,11 @@ func NewSynthWorker(opts SynthWorkerOpts) *SynthWorker {
 		extractor = PDFExtractWithPdftotext
 	}
 	return &SynthWorker{
-		os:           opts.OSClient,
 		logger:       opts.Logger,
 		queue:        make(chan synthJob, opts.BufferSize),
 		bufSize:      opts.BufferSize,
 		stopped:      make(chan struct{}),
 		cliAvailable: cli,
-		attach:       opts.Attach,
 		capture:      opts.Capture,
 		pdfExtractor: extractor,
 		pdfAvailable: extractor != nil,
@@ -226,36 +265,48 @@ type ResynthResult struct {
 // resynthSampleCap bounds the preview slice ResynthBacklog returns.
 const resynthSampleCap = 20
 
-// ResynthBacklog scrolls Synthesised=false summaries for (profile, vault).
-// dryRun: report count+sample, mutate nothing. apply: spawn ONE background
-// goroutine that re-processes each stuck doc serialized with the live
-// worker (non-lossy — bypasses the lossy Enqueue channel). limit<=0 means
-// all; limit>0 caps how many are processed (count still reflects the true total).
+// resynthScanLimit bounds the SoR ListUnsynthesised scan. The true total
+// comes from CountUnsynthesised; this caps how many rows we pull to
+// process + sample in one apply.
+const resynthScanLimit = 10000
+
+// ResynthBacklog reports + (on apply) re-processes Synthesised=false
+// records for (profile, vault) from the Postgres SoR. dryRun: report
+// count+sample, mutate nothing. apply: spawn ONE background goroutine that
+// re-processes each stuck record serialized with the live worker. limit<=0
+// means all (up to resynthScanLimit); limit>0 caps how many are processed
+// (count still reflects the true total).
 //
 // This is the fix-it apply-companion to brain_reflect (issue #82): a bulk
 // ingest can outrun the single CLI-bound worker and overflow Enqueue's
-// buffer, leaving docs stuck at Synthesised=false. Re-pushing them through
-// Enqueue would risk dropping them again; instead the backfill calls
-// w.handle directly, which takes processMu and therefore can never run
-// concurrently with the live worker (preserving the entity-upsert invariant).
-func (w *SynthWorker) ResynthBacklog(ctx context.Context, osc osWriter, profile, vault string, dryRun bool, limit int) (ResynthResult, error) {
-	var stuck []synthJob
-	var sample []ResynthSampleItem
-	err := osc.ScrollSummaries(ctx, profile, vault, 0, func(doc osearch.SummaryDoc) error {
-		if doc.Synthesised {
-			return nil
-		}
-		stuck = append(stuck, synthJob{Profile: profile, Vault: vault, SHA: doc.SHA})
-		if len(sample) < resynthSampleCap {
-			sample = append(sample, ResynthSampleItem{SHA: doc.SHA, Title: doc.Title})
-		}
-		return nil
-	})
-	if err != nil {
-		return ResynthResult{}, fmt.Errorf("resynth: scroll: %w", err)
+// buffer, leaving records stuck at Synthesised=false. Re-pushing them
+// through Enqueue would risk dropping them again; instead the backfill
+// calls w.handle directly, which takes processMu and therefore can never
+// run concurrently with the live worker.
+func (w *SynthWorker) ResynthBacklog(ctx context.Context, profile, vault string, dryRun bool, limit int) (ResynthResult, error) {
+	store, _, ok := w.resolveForJob(synthJob{Profile: profile, Vault: vault})
+	if !ok {
+		return ResynthResult{}, fmt.Errorf("resynth: no binding view registered for %s/%s", profile, vault)
 	}
 
-	res := ResynthResult{BacklogCount: len(stuck), Sample: sample}
+	// ListUnsynthesised returns the full backlog; its length IS the
+	// count (the SoR query caps at resynthScanLimit internally), so we no
+	// longer need a separate CountUnsynthesised round-trip.
+	recs, err := store.ListUnsynthesised(ctx, profile, vault)
+	if err != nil {
+		return ResynthResult{}, fmt.Errorf("resynth: list: %w", err)
+	}
+
+	stuck := make([]synthJob, 0, len(recs))
+	var sample []ResynthSampleItem
+	for _, rec := range recs {
+		stuck = append(stuck, synthJob{Profile: profile, Vault: vault, SHA: rec.Doc.SHA})
+		if len(sample) < resynthSampleCap {
+			sample = append(sample, ResynthSampleItem{SHA: rec.Doc.SHA, Title: rec.Doc.Title})
+		}
+	}
+
+	res := ResynthResult{BacklogCount: len(recs), Sample: sample}
 	if dryRun || len(stuck) == 0 {
 		return res, nil
 	}
@@ -331,90 +382,86 @@ func (w *SynthWorker) handle(ctx context.Context, job synthJob) {
 	}
 }
 
-// resolveForJob returns the per-binding views (osWriter +
-// AttachmentStore) for a job's (profile, vault). v3.2 per-binding
-// storage overrides: each (profile, vault) may resolve to its own
-// OS index prefix + MinIO bucket. The worker calls this once per
-// job and uses the result instead of the struct-level os/attach
-// fields.
+// resolveForJob returns the per-binding synthStore + AttachmentStore for
+// a job's (profile, vault). v3.2 per-binding storage overrides: each
+// (profile, vault) resolves to its own OS prefix + MinIO bucket; the PG
+// pool is per-profile. The worker calls this once per job.
 //
-// Returns ok=false on cache miss. Callers MUST drop the job rather
-// than fall back to shared infra — synthesising a doc into the
-// wrong tenant's indices/bucket is a worse failure than dropping
-// the job and waiting for a re-enqueue. The Resolve callback uses
-// the same fail-loud contract as Daemon.resolveOS/resolveAttach;
-// the shared fallback fields (w.os/w.attach) remain only for the
-// legacy single-tenant path where Resolve is nil.
-func (w *SynthWorker) resolveForJob(job synthJob) (osWriter, AttachmentStore, bool) {
-	if w.Resolve != nil {
-		if oc, at, ok := w.Resolve(job.Profile, job.Vault); ok {
-			return oc, at, true
-		}
+// Returns ok=false on cache miss. Callers MUST drop the job rather than
+// fall back to shared infra — synthesising into the wrong tenant's store
+// is a worse failure than dropping the job and waiting for a re-enqueue.
+func (w *SynthWorker) resolveForJob(job synthJob) (synthStore, AttachmentStore, bool) {
+	if w.Resolve == nil {
 		return nil, nil, false
 	}
-	if w.os == nil {
-		return nil, nil, false
-	}
-	return w.os, w.attach, true
+	return w.Resolve(job.Profile, job.Vault)
 }
 
-// processJob runs one (profile, vault, sha) item through the
-// pipeline. Returns nil on success; non-nil errors get logged at
-// Warn — the doc stays in raw-only state and a future re-enqueue
-// (operator-driven, e.g. brain_reflect) can retry.
+// processJob runs one (profile, vault, sha) item through the pipeline.
+// Returns nil on success; non-nil errors get logged at Warn by handle —
+// the record stays in raw-only state and a future re-enqueue
+// (operator-driven, e.g. brain_resynth) can retry.
+//
+// Phase D1: reads the raw record from the Postgres SoR (GetRecordBySHA),
+// maps it into an in-memory SummaryDoc so the existing pipeline logic
+// (CheckCoherence / RunGate / SummarizeContent / extractEntitiesBest)
+// keeps working unchanged, then persists results via WriteSynth.
 func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
-	osc, attach, ok := w.resolveForJob(job)
+	store, attach, ok := w.resolveForJob(job)
 	if !ok {
 		// Dropping the job is the correct response: we cannot synthesise
-		// without knowing which prefix/bucket the binding resolves to,
-		// and writing to the shared default would leak across tenants.
-		// A re-enqueue (e.g. brain_reflect) will retry once the binding
-		// view is registered.
+		// without knowing which binding the record belongs to, and
+		// writing to a shared default would leak across tenants. A
+		// re-enqueue (e.g. brain_resynth) retries once the binding view
+		// is registered.
 		w.logger.Error("phantom-brain: synth job dropped — no binding view registered",
 			slog.String("profile", job.Profile),
 			slog.String("vault", job.Vault),
 			slog.String("sha", job.SHA))
 		return nil
 	}
-	doc, err := osc.GetSummary(ctx, job.Profile, job.Vault, job.SHA)
+
+	rec, err := store.Fetch(ctx, job.Profile, job.Vault, job.SHA)
 	if err != nil {
 		return err
 	}
-	if doc == nil {
-		// No summary doc — could be a delete race, or this SHA belongs
-		// to an attachment doc instead. Try the attachment path before
-		// silently returning so PDFs get their daemon-side extraction.
-		return w.processAttachmentJob(ctx, job, osc, attach)
+	if rec == nil {
+		// Delete race / unknown SHA — nothing to synthesise.
+		return nil
 	}
-	if doc.Synthesised {
-		// Idempotent: re-enqueueing an already-synthed doc is fine
-		// and may even be useful (re-rate after a gate model upgrade),
-		// but for Day 5's "first cut" we skip the wasted work.
+	if rec.Synthesised {
+		// Idempotent: re-enqueueing an already-synthed record is fine but
+		// we skip the wasted work.
 		return nil
 	}
 
-	// Attachment stubs (v2.5.1, #48): before gate/distill, attempt PDF
-	// text extraction and fold it into the stub's RawBody so the
-	// downstream distill pass sees real attachment content rather than
-	// just the caller's description. Non-fatal — a failure leaves the
-	// stub with description-only RawBody, which is still recall-visible.
+	doc := rec.Doc
+
+	// Attachment records (kind "attachment" → KindAttachmentStub): before
+	// gate/distill, attempt text extraction (PDF/OCR/office) and fold it
+	// into the RawBody so the downstream distill pass sees real content
+	// rather than just the caller's description. Non-fatal — a failure
+	// leaves the description-only RawBody, which is still recall-visible.
 	if doc.Kind == osearch.KindAttachmentStub {
-		if err := w.enrichAttachmentStub(ctx, job, doc, osc, attach); err != nil {
-			w.logger.Warn("phantom-brain: attachment stub enrichment failed (non-fatal)",
+		if err := w.enrichAttachmentRecord(ctx, job, &doc, rec, store, attach); err != nil {
+			w.logger.Warn("phantom-brain: attachment enrichment failed (non-fatal)",
 				slog.String("sha", job.SHA), slog.String("err", err.Error()))
 		}
 	}
 
 	content := doc.RawBody
 	if content == "" {
-		content = doc.Body // shouldn't happen for handler-fed docs but defensible
+		content = doc.Body
 	}
 
-	// Raw-source capture (v2.4+): when capture is wired and the doc
-	// has a URL, fetch the page bytes and stash them in MinIO. Best-
-	// effort — fetch failures (URL unreachable, oversize, non-2xx)
-	// are logged and DON'T block gate/distill/index writes.
-	if attach != nil && w.capture.Enabled && doc.SourceURL != "" && doc.CaptureMinIOKey == "" {
+	// Raw-source capture (v2.4+): when capture is wired and the doc has a
+	// URL, fetch the page bytes and stash them in MinIO. Best-effort —
+	// fetch failures are logged and DON'T block gate/distill.
+	//
+	// Phase D1 limitation: the resulting CaptureMinIOKey has no SoR column,
+	// so we log it and drop it. The bytes are in MinIO but unreachable via
+	// handleCaptureGet until the SoR grows a capture_minio_key column.
+	if attach != nil && w.capture.Enabled && doc.SourceURL != "" {
 		ua := w.capture.UserAgent
 		timeout := time.Duration(w.capture.TimeoutSecs) * time.Second
 		res, cerr := CaptureURL(ctx, attach, job.Profile, job.Vault, job.SHA,
@@ -425,13 +472,14 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 				slog.String("url", doc.SourceURL),
 				slog.String("err", cerr.Error()))
 		} else {
-			doc.CaptureMinIOKey = res.Key
-			doc.CaptureSizeBytes = res.SizeBytes
+			w.logger.Debug("phantom-brain: capture stored in MinIO (key dropped — no SoR column yet)",
+				slog.String("sha", job.SHA),
+				slog.String("capture_key", res.Key))
 		}
 	}
 
-	// Coherence first — free and rejects obviously-broken input
-	// before paying for the LLM. Same shape as v5.0's pipeline.
+	// Coherence first — free and rejects obviously-broken input before
+	// paying for the LLM.
 	verdict := GateVerdict{Topic: TopicGeneral, Reliability: ReliabilityMedium}
 	if cr := CheckCoherence(content); !cr.Passed {
 		verdict = GateVerdict{
@@ -449,13 +497,12 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 			SourceURL:  doc.SourceURL,
 			Content:    content,
 			Format:     "markdown",
-			SourceType: gateSourceType(doc),
+			SourceType: gateSourceType(&doc),
 		})
 	}
 
-	// Distill. If the CLI is unavailable or fails we fall back to the
-	// raw content so the doc still becomes searchable as a summary —
-	// matches v5.0 behaviour.
+	// Distill. If the CLI is unavailable or fails we fall back to the raw
+	// content so the record still becomes searchable as a summary.
 	summary := ""
 	if w.cliAvailable {
 		s, sErr := SummarizeContent(ctx, doc.Title, content, "", 0)
@@ -470,58 +517,33 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 		summary = content
 	}
 
-	// Extract entities from RAW content per v5.0 rationale — entity
-	// coverage is more faithful on the original text than the LLM
-	// distillation.
-	// v2.4: LLM-driven entity extraction when claude is available —
-	// falls back to the regex extractor (heading + bold heuristics)
-	// otherwise. The LLM version filters out section labels +
-	// descriptive list items that the regex can't distinguish from
-	// real named entities; the regex stays as a resilient fallback.
+	// Extract entities from RAW content. LLM-driven when claude is
+	// available; falls back to the regex extractor otherwise.
 	entities := extractEntitiesBest(ctx, doc.Title, content, w.cliAvailable, w.logger)
-	entitySlugs := make([]string, 0, len(entities))
-	// entityNames maps slug → display name for the Phase B1 SoR mirror.
+	// entityNames maps slug → display name for the SoR entity upserts.
 	entityNames := make(map[string]string, len(entities))
 	for _, ent := range entities {
-		slug, err := w.upsertEntity(ctx, job, doc, ent, content, verdict, osc)
-		if err != nil {
-			w.logger.Warn("phantom-brain: entity upsert failed (continuing)",
-				slog.String("entity", ent), slog.String("err", err.Error()))
+		slug := osearch.EntitySlug(ent)
+		if slug == "" {
 			continue
 		}
-		entitySlugs = append(entitySlugs, slug)
 		entityNames[slug] = ent
 	}
 
-	now := time.Now().UTC()
-	doc.Body = summary
-	doc.Synthesised = true
-	doc.UpdatedAt = now
-	doc.Reliability = osearch.Reliability(verdict.Reliability)
-	doc.Topic = string(verdict.Topic)
-	doc.GateReason = verdict.Reason
-	doc.Entities = entitySlugs
-	if err := osc.UpsertSummary(ctx, *doc, false); err != nil {
-		return err
+	if w.WriteSynth == nil {
+		return errors.New("synth: WriteSynth not wired")
 	}
-
-	// Phase B1: mirror the distilled state into the Postgres SoR (the
-	// dual-write synth pass). Fired AFTER the legacy upsert succeeds; the
-	// callback is non-fatal and never changes this function's return. The
-	// embedding carried here is the doc's agent-computed vector (the daemon
-	// does not recompute) — empty for synth-only updates.
-	if w.OnSynthesised != nil {
-		w.OnSynthesised(job.Profile, job.Vault, job.SHA, synthResult{
-			Body:           summary,
-			Reliability:    string(doc.Reliability),
-			Topic:          doc.Topic,
-			GateReason:     doc.GateReason,
-			Embedding:      doc.Embedding,
-			EmbeddingModel: synthEmbeddingModel,
-			EntityNames:    entityNames,
-		})
-	}
-	return nil
+	// Embedding carried here is the record's agent-computed vector (the
+	// daemon does not recompute) — empty for records ingested without one.
+	return w.WriteSynth(ctx, job.Profile, job.Vault, job.SHA, synthResult{
+		Body:           summary,
+		Reliability:    string(verdict.Reliability),
+		Topic:          string(verdict.Topic),
+		GateReason:     verdict.Reason,
+		Embedding:      doc.Embedding,
+		EmbeddingModel: synthEmbeddingModel,
+		EntityNames:    entityNames,
+	})
 }
 
 // synthEmbeddingModel labels the agent-computed embedding the daemon
@@ -529,9 +551,9 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 // SoR records the model name so a future re-embed can detect drift.
 const synthEmbeddingModel = "nomic-embed-text"
 
-// gateSourceType maps the SummaryDoc shape onto the v5.0 GateOpts
-// SourceType field. Curated docs are stamped by handleLearn with
-// reliability=medium + a "curated" reason; everything else is gathered.
+// gateSourceType maps the SummaryDoc shape onto the GateOpts SourceType
+// field. Curated docs are stamped by handleLearn with reliability=medium +
+// a "curated" reason; everything else is gathered.
 func gateSourceType(doc *osearch.SummaryDoc) string {
 	if doc.Reliability == osearch.ReliabilityMedium && strings.HasPrefix(doc.GateReason, "curated") {
 		return "curated"
@@ -539,57 +561,11 @@ func gateSourceType(doc *osearch.SummaryDoc) string {
 	return "gathered"
 }
 
-// upsertEntity merges this synthesis into the (profile, vault, slug)
-// entity doc. Read-modify-write under the daemon's single-worker
-// constraint; with multiple workers we'd need OS's painless update
-// script for atomicity, which can land in Phase 7 if it ever matters.
-func (w *SynthWorker) upsertEntity(ctx context.Context, job synthJob, src *osearch.SummaryDoc, name, body string, v GateVerdict, osc osWriter) (string, error) {
-	slug := osearch.EntitySlug(name)
-	if slug == "" {
-		return "", nil
-	}
-	now := time.Now().UTC()
-	existing, err := osc.GetEntity(ctx, job.Profile, job.Vault, slug)
-	if err != nil {
-		return "", err
-	}
-	snippet := EntitySnippet(body, name)
-
-	var doc osearch.EntityDoc
-	if existing != nil {
-		doc = *existing
-		doc.UpdatedAt = now
-		if !containsString(doc.MentionedBy, src.SHA) {
-			doc.MentionedBy = append(doc.MentionedBy, src.SHA)
-		}
-		if snippet != "" && !strings.Contains(doc.Body, snippet) {
-			doc.Body = strings.TrimSpace(doc.Body + "\n\n" + snippet)
-		}
-	} else {
-		doc = osearch.EntityDoc{
-			Profile:     job.Profile,
-			Vault:       job.Vault,
-			Slug:        slug,
-			Name:        name,
-			Body:        snippet,
-			Topic:       string(v.Topic),
-			MentionedBy: []string{src.SHA},
-			CreatedAt:   now,
-			UpdatedAt:   now,
-		}
-	}
-	if err := osc.UpsertEntity(ctx, doc, false); err != nil {
-		return "", err
-	}
-	return slug, nil
-}
-
-// extractAttachmentText dispatches on the attachment's MIME type (with
-// a filename-extension fallback for the empty/octet-stream case the
-// bulk loader assigns) and runs the matching extractor. Every branch
-// is availability-gated and soft-fail: a fetch error, a missing tool,
-// or an extractor failure logs at Warn and returns "" so the caller
-// leaves ExtractedText empty exactly as the pre-v3.4 PDF path did.
+// extractAttachmentText dispatches on the attachment's MIME type (with a
+// filename-extension fallback for the empty/octet-stream case) and runs
+// the matching extractor. Every branch is availability-gated and
+// soft-fail: a fetch error, a missing tool, or an extractor failure logs
+// at Warn and returns "" so the caller leaves ExtractedText empty.
 //
 // Dispatch table:
 //
@@ -598,19 +574,11 @@ func (w *SynthWorker) upsertEntity(ctx context.Context, job synthJob, src *osear
 //	image/{png,jpeg,gif,bmp,     → OCRExtractImage (tesseract)
 //	       tiff,webp}
 //	docx/xlsx/pptx OOXML mimes   → OfficeExtract (pure-Go, always on)
-//	application/msword, …ms-     → OfficeExtract → unsupported-legacy log
-//	excel, …ms-powerpoint
-//
-// When MIMEType is empty or application/octet-stream, dispatch keys off
-// the OriginalFilename extension instead (the loader tags xlsx/pptx/doc/
-// xls as octet-stream — see guessAttachmentMIME).
+//	application/msword, …        → OfficeExtract → unsupported-legacy log
 func (w *SynthWorker) extractAttachmentText(ctx context.Context, job synthJob, att *osearch.AttachmentDoc, attach AttachmentStore) string {
 	mime := att.MIMEType
 	ext := strings.ToLower(filepath.Ext(att.OriginalFilename))
 
-	// fetch lazily — every branch needs the bytes, but office/legacy
-	// dispatch can short-circuit before we pay the MinIO round-trip only
-	// in the unsupported-legacy case (handled inside OfficeExtract).
 	fetch := func() ([]byte, bool) {
 		body, ferr := attach.GetAttachmentBytes(ctx, att.MinIOKey, 0)
 		if ferr != nil {
@@ -717,112 +685,59 @@ func isImageExt(ext string) bool {
 	return false
 }
 
-// enrichAttachmentStub is the v2.5.1 attachment path: fold the
-// AttachmentDoc's extracted text into the companion stub SummaryDoc's
-// RawBody so the existing gate + distill + UpsertSummary tail handles
-// the stub like any other summary. Runs pdftotext on demand when the
-// attachment hasn't been extracted yet.
+// enrichAttachmentRecord folds an attachment record's extracted text into
+// the in-memory SummaryDoc's RawBody so the existing gate + distill tail
+// handles it like any other summary. Runs the MIME-dispatch extractor on
+// demand when the record carries no extracted text yet, and persists newly
+// extracted text back to the SoR via synthStore.SetExtractedText.
 //
-// Mutates `summary` in place — caller continues with the standard
-// pipeline using the updated RawBody.
-func (w *SynthWorker) enrichAttachmentStub(ctx context.Context, job synthJob, summary *osearch.SummaryDoc, osc osWriter, attach AttachmentStore) error {
-	att, err := osc.GetAttachment(ctx, job.Profile, job.Vault, job.SHA)
-	if err != nil {
-		return err
-	}
-	if att == nil {
-		// Stub without companion AttachmentDoc — legacy or torn-write.
-		// Nothing to enrich from; stub still gets synthesised on its
-		// description-only RawBody.
-		return nil
+// Phase D1: the attachment IS the same record (same SHA) in the SoR — there
+// is no separate AttachmentDoc, and no SummarySHA cross-link concept. The
+// attachment metadata travels on the synthRecord (MIMEType / MinIOKey /
+// OriginalFilename / ExtractedText) so this path needs no pgx types.
+//
+// Mutates `doc` in place — caller continues with the standard pipeline
+// using the updated RawBody.
+func (w *SynthWorker) enrichAttachmentRecord(ctx context.Context, job synthJob, doc *osearch.SummaryDoc, rec *synthRecord, store synthStore, attach AttachmentStore) error {
+	// Build the AttachmentDoc shape the extractor dispatch expects from
+	// the synthRecord's attachment fields. Description carries the
+	// curator intent (the record's RawBody before enrichment).
+	att := osearch.AttachmentDoc{
+		Profile:          doc.Profile,
+		Vault:            doc.Vault,
+		SHA:              doc.SHA,
+		OriginalFilename: rec.OriginalFilename,
+		Title:            doc.Title,
+		MIMEType:         rec.MIMEType,
+		MinIOKey:         rec.MinIOKey,
+		Description:      doc.RawBody,
+		ExtractedText:    rec.ExtractedText,
 	}
 
-	// Extract searchable text when the attachment carries none yet and
-	// its type is one we can handle (PDF, image via OCR, OOXML office).
-	// Failures here are soft — the stub falls back to description-only
-	// RawBody.
+	// Extract searchable text when the record carries none yet and its
+	// type is one we can handle (PDF, image via OCR, OOXML office).
+	// Failures here are soft — the doc falls back to description-only.
 	if att.ExtractedText == "" && attach != nil {
-		if text := w.extractAttachmentText(ctx, job, att, attach); text != "" {
+		if text := w.extractAttachmentText(ctx, job, &att, attach); text != "" {
 			att.ExtractedText = text
+			if err := store.SetExtractedText(ctx, rec.RecordID, text); err != nil {
+				return err
+			}
 		}
 	}
 
-	// Backfill the AttachmentDoc <-> SummaryDoc cross-link when missing.
-	dirty := false
-	if att.SummarySHA == "" {
-		att.SummarySHA = summary.SHA
-		dirty = true
-	}
-	if att.ExtractedText != "" {
-		dirty = true // persist newly-extracted text
-	}
-	if dirty {
-		if err := osc.UpsertAttachment(ctx, *att, false); err != nil {
-			return err
-		}
-	}
-
-	// Compose the stub's RawBody. Description first (curator intent),
-	// extracted text after (machine signal). Either alone is fine.
+	// Compose the RawBody. Description first (curator intent), extracted
+	// text after (machine signal). Either alone is fine.
 	desc := strings.TrimSpace(att.Description)
 	extracted := strings.TrimSpace(att.ExtractedText)
 	switch {
 	case desc != "" && extracted != "":
-		summary.RawBody = desc + "\n\n---\n\n" + extracted
+		doc.RawBody = desc + "\n\n---\n\n" + extracted
 	case extracted != "":
-		summary.RawBody = extracted
+		doc.RawBody = extracted
 	case desc != "":
-		summary.RawBody = desc
-		// else: leave whatever the stub already carried (likely empty).
+		doc.RawBody = desc
+		// else: leave whatever the record already carried (likely empty).
 	}
 	return nil
-}
-
-// processAttachmentJob runs the attachment-specific synth pass for an
-// AttachmentDoc with no companion SummaryDoc. v3.4 (#86) generalized
-// the enrichment from PDF-only to a MIME dispatch (PDF + scanned-PDF
-// OCR, image OCR, OOXML office) via extractAttachmentText.
-//
-// Failure modes are all soft — log + return nil — because an
-// attachment with no extracted text is still a valid recall hit on
-// title/filename and re-enqueue via brain_reflect is the operator
-// escape hatch.
-func (w *SynthWorker) processAttachmentJob(ctx context.Context, job synthJob, osc osWriter, attach AttachmentStore) error {
-	doc, err := osc.GetAttachment(ctx, job.Profile, job.Vault, job.SHA)
-	if err != nil {
-		return err
-	}
-	if doc == nil {
-		// True delete race / unknown SHA — nothing to do.
-		return nil
-	}
-	if doc.ExtractedText != "" {
-		// Idempotent: agent-side extraction already populated this, or
-		// a previous synth pass did. Don't pay the subprocess cost twice.
-		return nil
-	}
-	if attach == nil {
-		w.logger.Info("phantom-brain: skipping attachment extraction (no store)",
-			slog.String("sha", job.SHA))
-		return nil
-	}
-	// Shared MIME dispatch (PDF/pdftotext+OCR, image OCR, OOXML office).
-	// Soft-fail: an unhandled type or a tool failure returns "" and we
-	// leave the doc alone rather than writing an empty body that signals
-	// "we tried" when a later re-enrich could succeed.
-	text := w.extractAttachmentText(ctx, job, doc, attach)
-	if strings.TrimSpace(text) == "" {
-		return nil
-	}
-	doc.ExtractedText = text
-	return osc.UpsertAttachment(ctx, *doc, false)
-}
-
-func containsString(xs []string, s string) bool {
-	for _, x := range xs {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }

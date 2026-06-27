@@ -77,6 +77,81 @@ func (v *pgBindingView) Recaller() *osproject.Recaller { return v.recaller }
 // Projector returns the per-binding SoR→OS write projector.
 func (v *pgBindingView) Projector() *osproject.Projector { return v.projector }
 
+// pgSynthStore is the production synthStore: it wraps a *pgBindingView and
+// satisfies the synth worker's read/extract seam by calling
+// pgstore.New(view.Pool()) and mapping pgdb.Record ↔ synthRecord. The
+// worker depends only on the synthStore interface so its read path is
+// fakeable in unit tests; this adapter is the live pgx-backed impl.
+type pgSynthStore struct {
+	view *pgBindingView
+}
+
+var _ synthStore = (*pgSynthStore)(nil)
+
+// Fetch returns the SoR record for (profile, vault, sha) as a synthRecord,
+// or (nil, nil) when no rows match (pgx.ErrNoRows → benign delete race /
+// unknown SHA, mirroring the old processJob behaviour).
+func (s *pgSynthStore) Fetch(ctx context.Context, profile, vault, sha string) (*synthRecord, error) {
+	q := pgstore.New(s.view.Pool())
+	rec, err := q.GetRecordBySHA(ctx, pgdb.GetRecordBySHAParams{
+		Profile: profile,
+		Vault:   vault,
+		Sha:     sha,
+	})
+	if err != nil {
+		if errIsNoRows(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return pgRecordToSynthRecord(rec), nil
+}
+
+// SetExtractedText persists newly extracted attachment text back to the
+// SoR record so a later re-synth won't re-extract.
+func (s *pgSynthStore) SetExtractedText(ctx context.Context, recordID int64, text string) error {
+	q := pgstore.New(s.view.Pool())
+	return q.SetRecordExtractedText(ctx, pgdb.SetRecordExtractedTextParams{
+		ExtractedText: optText(text),
+		ID:            recordID,
+	})
+}
+
+// ListUnsynthesised returns the Synthesised=false backlog for
+// (profile, vault), capped at resynthScanLimit (the same bound the old
+// ResynthBacklog passed to the SoR query).
+func (s *pgSynthStore) ListUnsynthesised(ctx context.Context, profile, vault string) ([]synthRecord, error) {
+	q := pgstore.New(s.view.Pool())
+	recs, err := q.ListUnsynthesised(ctx, pgdb.ListUnsynthesisedParams{
+		Profile: profile,
+		Vault:   vault,
+		Lim:     resynthScanLimit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]synthRecord, 0, len(recs))
+	for _, rec := range recs {
+		out = append(out, *pgRecordToSynthRecord(rec))
+	}
+	return out, nil
+}
+
+// pgRecordToSynthRecord maps a SoR pgdb.Record into the worker's read
+// view, reusing pgRecordToSummaryDoc for the SummaryDoc fields and pulling
+// the relational identity + attachment metadata across.
+func pgRecordToSynthRecord(rec pgdb.Record) *synthRecord {
+	return &synthRecord{
+		Doc:              pgRecordToSummaryDoc(rec),
+		RecordID:         rec.ID,
+		Synthesised:      rec.Synthesised,
+		MIMEType:         rec.MimeType.String,
+		OriginalFilename: rec.OriginalFilename.String,
+		MinIOKey:         rec.MinioKey.String,
+		ExtractedText:    rec.ExtractedText.String,
+	}
+}
+
 // resolvingProjector adapts the per-profile River worker (which is bound
 // to one River client serving many vaults) to per-binding OS prefixes. It
 // resolves the right osproject.Projector per record from (profile, vault),
@@ -117,9 +192,12 @@ func (p *resolvingProjector) DeleteProjection(ctx context.Context, profile, vaul
 // pool Close) before rebuilding, so reload never leaks pools/goroutines.
 // The cache is then rebuilt fresh from the current registry.
 //
-// NON-FATAL: every failure path logs a warning and leaves PG nil for the
-// affected scope; the daemon keeps serving the legacy path.
-func (d *Daemon) buildPGBindingDeps() {
+// Phase D1: Postgres is MANDATORY. This returns an error when PG is
+// unconfigured or any binding's PG view fails to build. Start propagates
+// the error (fail-loud at boot); reload logs + tolerates partial failure
+// per the documented reload semantics. Returning an error leaves the
+// affected binding's PG view nil — resolvePG then fails loud per request.
+func (d *Daemon) buildPGBindingDeps() error {
 	d.pgMu.Lock()
 	defer d.pgMu.Unlock()
 
@@ -128,26 +206,25 @@ func (d *Daemon) buildPGBindingDeps() {
 	d.closePGProfilesLocked()
 	d.pgProfiles = map[string]*pgProfileResources{}
 
-	// Disabled: ensure every binding's PG view is nil and return.
+	// Disabled: PG is mandatory in D1 — refuse to build.
 	if d.pgBaseDSN == "" {
 		for _, b := range d.registry.Vaults() {
 			if deps, ok := d.bindings.Get(b.Key); ok && deps != nil {
 				deps.PG = nil
 			}
 		}
-		return
+		return errors.New("server: postgres DSN not configured — the Postgres SoR is mandatory (set [postgres] dsn or PB_POSTGRES_DSN)")
 	}
 
 	// OS projection needs the base client to ensure indices + pipeline.
-	// Without it we can't project — disable PG entirely.
+	// Without it we can't project — fail loud.
 	if d.osBase == nil {
-		d.Logger.Warn("phantom-brain: postgres configured but opensearch is not — postgres disabled (no projection target)")
 		for _, b := range d.registry.Vaults() {
 			if deps, ok := d.bindings.Get(b.Key); ok && deps != nil {
 				deps.PG = nil
 			}
 		}
-		return
+		return errors.New("server: postgres requires opensearch for the pb_records projection target, but opensearch is not configured")
 	}
 
 	ctx := d.parentCtx
@@ -178,10 +255,7 @@ func (d *Daemon) buildPGBindingDeps() {
 	for profile := range profiles {
 		res, err := d.buildPGProfileResources(ctx, profile)
 		if err != nil {
-			d.Logger.Warn("phantom-brain: postgres profile resources failed — postgres disabled for profile (non-fatal)",
-				slog.String("profile", profile),
-				slog.String("err", err.Error()))
-			continue // leave this profile's bindings with PG nil
+			return fmt.Errorf("server: postgres profile resources for %q: %w", profile, err)
 		}
 		d.pgProfiles[profile] = res
 	}
@@ -190,27 +264,20 @@ func (d *Daemon) buildPGBindingDeps() {
 	for _, b := range d.registry.Vaults() {
 		deps, ok := d.bindings.Get(b.Key)
 		if !ok || deps == nil {
-			continue
+			return fmt.Errorf("server: no binding deps cached for %s (cannot attach postgres view)", b.Key)
 		}
 		res, ok := d.pgProfiles[b.Key.Profile]
 		if !ok {
-			deps.PG = nil // profile resources failed to build
-			continue
+			deps.PG = nil
+			return fmt.Errorf("server: postgres profile resources missing for %s", b.Key)
 		}
 		if err := osproject.EnsureIndex(ctx, d.osBase, b.Storage.IndexPrefix); err != nil {
-			d.Logger.Warn("phantom-brain: postgres projection index ensure failed — postgres disabled for binding (non-fatal)",
-				slog.String("vault", b.Key.String()),
-				slog.String("prefix", b.Storage.IndexPrefix),
-				slog.String("err", err.Error()))
 			deps.PG = nil
-			continue
+			return fmt.Errorf("server: postgres projection index ensure for %s (prefix %q): %w", b.Key, b.Storage.IndexPrefix, err)
 		}
 		if err := ensurePipeline(); err != nil {
-			d.Logger.Warn("phantom-brain: postgres search pipeline ensure failed — postgres disabled for binding (non-fatal)",
-				slog.String("vault", b.Key.String()),
-				slog.String("err", err.Error()))
 			deps.PG = nil
-			continue
+			return fmt.Errorf("server: postgres search pipeline ensure for %s: %w", b.Key, err)
 		}
 		deps.PG = &pgBindingView{
 			res:       res,
@@ -218,6 +285,7 @@ func (d *Daemon) buildPGBindingDeps() {
 			projector: osproject.New(d.osBase, b.Storage.IndexPrefix),
 		}
 	}
+	return nil
 }
 
 // buildPGProfileResources opens the per-profile pool, migrates River,

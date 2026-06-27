@@ -302,11 +302,11 @@ func runMCPAgentMode() error {
 		VaultDir:  lc.VaultDir(),
 		Lifecycle: lc,
 		Client:    daemonClient, // Phase 6: POST writes through here
-		// Phase C: online recall. Gated OFF by default; ANY daemon
-		// failure falls back to the local snapshot. Same HTTP client
-		// as Client — RecallClient is a narrow seam for testability.
+		// Phase D1: recall is ONLINE-ONLY — always wired, no env gate.
+		// brain_recall queries the daemon's live pb_records projection;
+		// there is no local-snapshot fallback. Same HTTP client as Client —
+		// RecallClient is a narrow seam for testability.
 		RecallClient: daemonClient,
-		OnlineRecall: envBool("CL_BRAIN_ONLINE_RECALL"),
 	}).Register(srv)
 
 	// Serve in a goroutine so signals can interrupt cleanly.
@@ -321,17 +321,6 @@ func runMCPAgentMode() error {
 	}
 }
 
-// envBool reports whether the named env var is set to a truthy value
-// ("1" or "true", case-insensitive). Used to gate opt-in features like
-// Phase C online recall (CL_BRAIN_ONLINE_RECALL); default false.
-func envBool(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
-	case "1", "true":
-		return true
-	default:
-		return false
-	}
-}
 
 // resolveLegacyIndexDir mirrors src/config.ts:resolveIndexPath from the
 // TS MCP server: the per-profile per-vault index lives at

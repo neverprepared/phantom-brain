@@ -16,31 +16,35 @@ import (
 	"github.com/neverprepared/phantom-brain/internal/projection"
 )
 
-// Phase B1 — dual-write to the Postgres System-of-Record (flag-gated,
-// NON-FATAL). Legacy pb_summaries stays authoritative; reads are
-// unchanged. Every new-store write here is best-effort: ANY failure (PG
-// disabled, pool/River/projection error, timeout) logs a warning,
-// increments d.dualWriteFailures, and returns — it must NEVER fail the
-// handler request or the synth job. The per-binding DualWrite flag
-// defaults OFF, so until an operator opts a binding in, these helpers are
-// no-ops.
+// Phase D1 — the Postgres System-of-Record + its pb_records projection
+// is now the SOLE authoritative store. The legacy pb_summaries/
+// pb_entities/pb_attachments indices are no longer written. These
+// helpers (writeRecordRaw / writeAttachRecord / writeSynthResult) are
+// THE write path: every failure PROPAGATES to the caller (the write
+// handlers return 502 so the agent's write-ahead queue retries; the
+// synth worker logs + leaves the record raw for a later re-enqueue).
+//
+// PG is mandatory: buildBindingDeps fails startup when any binding has
+// no Postgres view, so resolvePG returning ErrPostgresDisabled here is
+// a real configuration error, not a tolerated "PG off" state.
 //
 // Embedding handling: records.UpsertRecord (the raw insert) carries NO
-// embedding column — the SoR schema only sets the embedding at synth time
-// via MarkRecordSynthesised. So dualWriteRaw writes the record without a
-// vector; dualWriteSynth fills body/reliability/topic/embedding once the
-// distill pass has run.
+// embedding column — the SoR schema only sets the embedding at synth
+// time via MarkRecordSynthesised. So writeRecordRaw writes the record
+// without a vector; writeSynthResult fills body/reliability/topic/
+// embedding once the distill pass has run.
 
-// dualWriteTimeout bounds each new-store attempt so a slow or unreachable
-// Postgres can't stall the live request / synth job.
-const dualWriteTimeout = 5 * time.Second
+// pgWriteTimeout bounds each SoR write attempt so a slow or unreachable
+// Postgres can't stall the live request / synth job indefinitely.
+const pgWriteTimeout = 5 * time.Second
 
-// noteDualWriteFailure logs a warning with (profile, vault, sha) context
-// and bumps the daemon's failure counter. This is the "meter" for
-// dual-write divergence until phantom-brain grows a real metrics surface.
-func (d *Daemon) noteDualWriteFailure(stage, profile, vault, sha string, err error) {
+// noteSoRWriteFailure logs a warning with (profile, vault, sha) context
+// and bumps the daemon's failure counter. The error itself propagates
+// to the caller; this is the structured "meter" + log for SoR write
+// failures until phantom-brain grows a real metrics surface.
+func (d *Daemon) noteSoRWriteFailure(stage, profile, vault, sha string, err error) {
 	d.dualWriteFailures.Add(1)
-	d.Logger.Warn("phantom-brain: dual-write failed (non-fatal — legacy authoritative)",
+	d.Logger.Warn("phantom-brain: SoR write failed",
 		slog.String("stage", stage),
 		slog.String("profile", profile),
 		slog.String("vault", vault),
@@ -48,67 +52,45 @@ func (d *Daemon) noteDualWriteFailure(stage, profile, vault, sha string, err err
 		slog.String("err", err.Error()))
 }
 
-// noteDualWriteSkip is the quiet path: PG is simply not configured for the
-// binding (ErrPostgresDisabled). Not an error — debug only, no counter.
-func (d *Daemon) noteDualWriteSkip(stage, profile, vault, sha string) {
-	d.Logger.Debug("phantom-brain: dual-write skipped (postgres disabled for binding)",
-		slog.String("stage", stage),
-		slog.String("profile", profile),
-		slog.String("vault", vault),
-		slog.String("sha", sha))
-}
-
-// DualWriteFailureCount returns the cumulative count of non-fatal
-// dual-write failures since daemon start. Exposed for tests + (optionally)
+// DualWriteFailureCount returns the cumulative count of SoR write
+// failures since daemon start. Exposed for tests + (optionally)
 // observability surfaces.
 func (d *Daemon) DualWriteFailureCount() int64 {
 	return d.dualWriteFailures.Load()
 }
 
-// dualWriteRaw mirrors a freshly-written legacy SummaryDoc into the
+// writeRecordRaw writes a freshly-perceived/learned SummaryDoc into the
 // Postgres SoR as a raw (unsynthesised) record + enqueues its projection,
-// transactionally via projection.WriteRecordAndEnqueue. Called from the
-// write handlers AFTER the legacy UpsertSummary + synth Enqueue succeed.
-//
-// NON-FATAL throughout: flag-off, PG-disabled, or any error returns
-// without disturbing the caller. The handler has already returned its
-// success to the agent; this is pure parallel-run mirroring.
-func (d *Daemon) dualWriteRaw(ctx context.Context, b VaultBinding, doc osearch.SummaryDoc) {
-	if !b.DualWrite {
-		return
-	}
+// transactionally via projection.WriteRecordAndEnqueue. This is THE write
+// — the handler returns 502 on error so the agent's wqueue retries.
+func (d *Daemon) writeRecordRaw(ctx context.Context, b VaultBinding, doc osearch.SummaryDoc) error {
 	profile, vault, sha := doc.Profile, doc.Vault, doc.SHA
 
 	view, err := d.resolvePG(b)
 	if err != nil {
-		if errors.Is(err, ErrPostgresDisabled) {
-			d.noteDualWriteSkip("raw", profile, vault, sha)
-			return
-		}
-		d.noteDualWriteFailure("raw-resolve", profile, vault, sha, err)
-		return
+		d.noteSoRWriteFailure("raw-resolve", profile, vault, sha, err)
+		return err
 	}
 
-	ctx2, cancel := context.WithTimeout(ctx, dualWriteTimeout)
+	ctx2, cancel := context.WithTimeout(ctx, pgWriteTimeout)
 	defer cancel()
 
 	params := summaryDocToUpsertParams(doc)
 	if _, err := projection.WriteRecordAndEnqueue(ctx2, view.Pool(), view.River(), params); err != nil {
-		d.noteDualWriteFailure("raw-write", profile, vault, sha, err)
-		return
+		d.noteSoRWriteFailure("raw-write", profile, vault, sha, err)
+		return err
 	}
-	d.Logger.Debug("phantom-brain: dual-write raw record mirrored to postgres",
+	d.Logger.Debug("phantom-brain: raw record written to postgres SoR",
 		slog.String("profile", profile),
 		slog.String("vault", vault),
 		slog.String("sha", sha))
+	return nil
 }
 
-// summaryDocToUpsertParams maps a legacy osearch.SummaryDoc to the SoR
+// summaryDocToUpsertParams maps an osearch.SummaryDoc to the SoR
 // UpsertRecordParams. records.source / records.tags are NOT NULL DEFAULT
 // '{}' so they MUST be non-nil slices (nil → SQL NULL → constraint
-// violation). The attachment fields are populated when present (the attach
-// handler routes its companion SummaryDoc here too, but the binary
-// metadata lives on the AttachmentDoc — dualWriteAttachRaw fills it).
+// violation). The attachment fields are populated by writeAttachRecord.
 func summaryDocToUpsertParams(doc osearch.SummaryDoc) pgdb.UpsertRecordParams {
 	return pgdb.UpsertRecordParams{
 		Profile:    doc.Profile,
@@ -125,28 +107,22 @@ func summaryDocToUpsertParams(doc osearch.SummaryDoc) pgdb.UpsertRecordParams {
 	}
 }
 
-// dualWriteAttachRaw mirrors an attachment write into the SoR. The attach
-// handler builds both an AttachmentDoc (binary metadata) and a companion
-// SummaryDoc (recall stub). We write ONE SoR record carrying the stub's
-// identity + the attachment's minio_key/mime_type/size/filename so the
-// projection has the attachment fields. NON-FATAL like dualWriteRaw.
-func (d *Daemon) dualWriteAttachRaw(ctx context.Context, b VaultBinding, stub osearch.SummaryDoc, att osearch.AttachmentDoc) {
-	if !b.DualWrite {
-		return
-	}
+// writeAttachRecord writes an attachment into the SoR. The attach handler
+// builds an AttachmentDoc (binary metadata) and a companion stub
+// SummaryDoc (recall identity). We write ONE SoR record carrying the
+// stub's identity + the attachment's minio_key/mime_type/size/filename so
+// the projection has the attachment fields. THE write — handler returns
+// 502 on error so the agent's wqueue retries.
+func (d *Daemon) writeAttachRecord(ctx context.Context, b VaultBinding, stub osearch.SummaryDoc, att osearch.AttachmentDoc) error {
 	profile, vault, sha := stub.Profile, stub.Vault, stub.SHA
 
 	view, err := d.resolvePG(b)
 	if err != nil {
-		if errors.Is(err, ErrPostgresDisabled) {
-			d.noteDualWriteSkip("attach-raw", profile, vault, sha)
-			return
-		}
-		d.noteDualWriteFailure("attach-raw-resolve", profile, vault, sha, err)
-		return
+		d.noteSoRWriteFailure("attach-raw-resolve", profile, vault, sha, err)
+		return err
 	}
 
-	ctx2, cancel := context.WithTimeout(ctx, dualWriteTimeout)
+	ctx2, cancel := context.WithTimeout(ctx, pgWriteTimeout)
 	defer cancel()
 
 	params := summaryDocToUpsertParams(stub)
@@ -158,17 +134,18 @@ func (d *Daemon) dualWriteAttachRaw(ctx context.Context, b VaultBinding, stub os
 	}
 
 	if _, err := projection.WriteRecordAndEnqueue(ctx2, view.Pool(), view.River(), params); err != nil {
-		d.noteDualWriteFailure("attach-raw-write", profile, vault, sha, err)
-		return
+		d.noteSoRWriteFailure("attach-raw-write", profile, vault, sha, err)
+		return err
 	}
-	d.Logger.Debug("phantom-brain: dual-write attachment record mirrored to postgres",
+	d.Logger.Debug("phantom-brain: attachment record written to postgres SoR",
 		slog.String("profile", profile),
 		slog.String("vault", vault),
 		slog.String("sha", sha))
+	return nil
 }
 
 // synthResult carries the distilled state processJob computes, so the
-// OnSynthesised callback can mirror it into the SoR without coupling
+// synth-write helper can persist it into the SoR without coupling
 // synth_queue.go to Postgres types.
 type synthResult struct {
 	Body           string
@@ -183,37 +160,28 @@ type synthResult struct {
 	EntityNames map[string]string
 }
 
-// dualWriteSynth mirrors the distilled (synthesised) state into the SoR
-// and re-projects, using the transactional outbox so the record update,
-// entity upserts, links, and the re-projection enqueue all commit (or roll
-// back) atomically. Called from the synth worker's OnSynthesised callback
-// AFTER the legacy UpsertSummary(Synthesised=true) succeeds.
+// writeSynthResult persists the distilled (synthesised) state into the
+// SoR and re-projects, using the transactional outbox so the record
+// update, entity upserts, links, and the re-projection enqueue all commit
+// (or roll back) atomically. Called by the synth worker after the
+// gate/distill/entity passes run.
 //
-// If the raw dual-write never landed (no record for this SHA), we warn +
-// meter + return — the backfill / next write reconciles. NON-FATAL
-// throughout: any error rolls the tx back, bumps the counter, returns nil.
-func (d *Daemon) dualWriteSynth(ctx context.Context, b VaultBinding, profile, vault, sha string, res synthResult) {
-	if !b.DualWrite {
-		return
-	}
-
+// Error PROPAGATES: the worker logs it and leaves the record raw so a
+// later re-enqueue (brain_reflect / brain_resynth) retries.
+func (d *Daemon) writeSynthResult(ctx context.Context, b VaultBinding, profile, vault, sha string, res synthResult) error {
 	view, err := d.resolvePG(b)
 	if err != nil {
-		if errors.Is(err, ErrPostgresDisabled) {
-			d.noteDualWriteSkip("synth", profile, vault, sha)
-			return
-		}
-		d.noteDualWriteFailure("synth-resolve", profile, vault, sha, err)
-		return
+		d.noteSoRWriteFailure("synth-resolve", profile, vault, sha, err)
+		return err
 	}
 
-	ctx2, cancel := context.WithTimeout(ctx, dualWriteTimeout)
+	ctx2, cancel := context.WithTimeout(ctx, pgWriteTimeout)
 	defer cancel()
 
 	tx, err := view.Pool().Begin(ctx2)
 	if err != nil {
-		d.noteDualWriteFailure("synth-begin", profile, vault, sha, err)
-		return
+		d.noteSoRWriteFailure("synth-begin", profile, vault, sha, err)
+		return err
 	}
 	// Rollback is a no-op after a successful Commit; this guarantees
 	// rollback on every early-return path below.
@@ -232,15 +200,11 @@ func (d *Daemon) dualWriteSynth(ctx context.Context, b VaultBinding, profile, va
 		Sha:     sha,
 	})
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// The raw dual-write didn't land (flag flipped on between
-			// raw + synth, or the raw write failed). Backfill / next
-			// write reconciles. Meter it so divergence is visible.
-			d.noteDualWriteFailure("synth-missing-record", profile, vault, sha, err)
-			return
-		}
-		d.noteDualWriteFailure("synth-get", profile, vault, sha, err)
-		return
+		// No record for this SHA — the raw write never landed (it failed,
+		// so synth shouldn't have been enqueued). Meter + propagate so the
+		// worker logs it; a later re-enqueue reconciles.
+		d.noteSoRWriteFailure("synth-get", profile, vault, sha, err)
+		return err
 	}
 
 	if err := q.MarkRecordSynthesised(ctx2, pgdb.MarkRecordSynthesisedParams{
@@ -252,8 +216,8 @@ func (d *Daemon) dualWriteSynth(ctx context.Context, b VaultBinding, profile, va
 		EmbeddingModel: optText(res.EmbeddingModel),
 		ID:             rec.ID,
 	}); err != nil {
-		d.noteDualWriteFailure("synth-mark", profile, vault, sha, err)
-		return
+		d.noteSoRWriteFailure("synth-mark", profile, vault, sha, err)
+		return err
 	}
 
 	for slug, name := range res.EntityNames {
@@ -270,15 +234,15 @@ func (d *Daemon) dualWriteSynth(ctx context.Context, b VaultBinding, profile, va
 			Name:    pgstore.SanitizeText(name),
 		})
 		if err != nil {
-			d.noteDualWriteFailure("synth-entity", profile, vault, sha, err)
-			return
+			d.noteSoRWriteFailure("synth-entity", profile, vault, sha, err)
+			return err
 		}
 		if err := q.LinkRecordEntity(ctx2, pgdb.LinkRecordEntityParams{
 			RecordID: rec.ID,
 			EntityID: ent.ID,
 		}); err != nil {
-			d.noteDualWriteFailure("synth-link", profile, vault, sha, err)
-			return
+			d.noteSoRWriteFailure("synth-link", profile, vault, sha, err)
+			return err
 		}
 	}
 
@@ -286,19 +250,66 @@ func (d *Daemon) dualWriteSynth(ctx context.Context, b VaultBinding, profile, va
 	// updated body/reliability/topic land in pb_records. River won't start
 	// the job until the tx commits (snapshot visibility).
 	if err := projection.EnqueueProjectTx(ctx2, view.River(), tx, rec.ID); err != nil {
-		d.noteDualWriteFailure("synth-enqueue", profile, vault, sha, err)
-		return
+		d.noteSoRWriteFailure("synth-enqueue", profile, vault, sha, err)
+		return err
 	}
 
 	if err := tx.Commit(ctx2); err != nil {
-		d.noteDualWriteFailure("synth-commit", profile, vault, sha, err)
-		return
+		d.noteSoRWriteFailure("synth-commit", profile, vault, sha, err)
+		return err
 	}
 	committed = true
-	d.Logger.Debug("phantom-brain: dual-write synth mirror committed to postgres",
+	d.Logger.Debug("phantom-brain: synth result committed to postgres SoR",
 		slog.String("profile", profile),
 		slog.String("vault", vault),
 		slog.String("sha", sha))
+	return nil
+}
+
+// errIsNoRows reports whether err is pgx.ErrNoRows, kept as a small
+// helper for the synth read path.
+func errIsNoRows(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
+
+// pgRecordToSummaryDoc maps a SoR pgdb.Record back into an in-memory
+// osearch.SummaryDoc so the synth pipeline (CheckCoherence / RunGate /
+// SummarizeContent / extractEntitiesBest) keeps working against its
+// existing SummaryDoc shape with minimal churn. Only the fields the
+// pipeline reads are populated; the result is NEVER written to OpenSearch
+// — it is a read-side adapter only.
+//
+// Kind: the SoR stores "attachment" (singular) for attachments; the
+// pipeline keys off KindAttachmentStub, so we translate back. Everything
+// else passes through unchanged.
+func pgRecordToSummaryDoc(rec pgdb.Record) osearch.SummaryDoc {
+	kind := osearch.Kind(rec.Kind)
+	if rec.Kind == "attachment" {
+		kind = osearch.KindAttachmentStub
+	}
+	doc := osearch.SummaryDoc{
+		Profile:     rec.Profile,
+		Vault:       rec.Vault,
+		SHA:         rec.Sha,
+		Kind:        kind,
+		MemoryType:  osearch.MemoryType(rec.MemoryType.String),
+		Title:       rec.Title,
+		RawBody:     rec.RawBody.String,
+		Body:        rec.Body.String,
+		SourceURL:   rec.SourceUrl.String,
+		Source:      rec.Source,
+		Tags:        rec.Tags,
+		Reliability: osearch.Reliability(rec.Reliability.String),
+		Topic:       rec.Topic.String,
+		GateReason:  rec.GateReason.String,
+		Synthesised: rec.Synthesised,
+	}
+	if rec.CapturedAt.Valid {
+		t := rec.CapturedAt.Time
+		doc.CapturedAt = &t
+	}
+	if rec.Embedding != nil {
+		doc.Embedding = rec.Embedding.Slice()
+	}
+	return doc
 }
 
 // --- small mapping helpers ----------------------------------------
@@ -323,9 +334,8 @@ func optTimestamptz(t *time.Time) pgtype.Timestamptz {
 }
 
 // optVector returns nil for an empty embedding (pgvector column stays
-// NULL), else a *pgvector.Vector. OS rejects all-zero vectors but the SoR
-// pgvector column does not — an empty slice maps to NULL, never a zero
-// vector.
+// NULL), else a *pgvector.Vector. An empty slice maps to NULL, never a
+// zero vector.
 func optVector(emb []float32) *pgvector.Vector {
 	if len(emb) == 0 {
 		return nil

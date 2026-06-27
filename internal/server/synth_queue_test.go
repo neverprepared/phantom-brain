@@ -4,19 +4,25 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"strings"
-
 	"github.com/neverprepared/phantom-brain/internal/osearch"
 )
 
+// Phase D1 testability seam: the synth worker reads through synthStore
+// (fakeable) and writes through WriteSynth (fakeable), so its full
+// behaviour — read raw → gate/distill → extract → write back — is covered
+// here against in-memory fakes, no live Postgres. The PG-backed adapter
+// (pgSynthStore) is exercised by the integration suite
+// (dual_write_integration_test.go).
+
 // waitUntil polls fn until it returns true or the deadline passes.
-// Test-only helper for the worker drains — channels in Go don't
-// have a "give me a sync point after this enqueue completes" signal
-// without explicit coordination, so we poll instead.
+// Test-only helper for the worker drains — channels in Go don't have a
+// "give me a sync point after this enqueue completes" signal without
+// explicit coordination, so we poll instead.
 func waitUntil(t *testing.T, d time.Duration, fn func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(d)
@@ -29,35 +35,166 @@ func waitUntil(t *testing.T, d time.Duration, fn func() bool) {
 	t.Fatalf("waitUntil: condition still false after %s", d)
 }
 
-func newTestWorker(t *testing.T, os osWriter) (*SynthWorker, context.Context, func()) {
+// fakeSynthStore is the in-memory synthStore the worker reads through.
+// recs is keyed by sha → synthRecord. It records SetExtractedText calls
+// (extracted) and supports a forced Fetch error (fetchErr) + listErr for
+// the resynth list-error path.
+type fakeSynthStore struct {
+	mu        sync.Mutex
+	recs      map[string]*synthRecord
+	extracted map[int64]string // recordID → text set via SetExtractedText
+	setCalls  int
+	fetchErr  error
+	listErr   error
+}
+
+func newFakeSynthStore() *fakeSynthStore {
+	return &fakeSynthStore{
+		recs:      map[string]*synthRecord{},
+		extracted: map[int64]string{},
+	}
+}
+
+func (f *fakeSynthStore) put(rec synthRecord) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := rec
+	f.recs[rec.Doc.SHA] = &cp
+}
+
+func (f *fakeSynthStore) Fetch(_ context.Context, _, _, sha string) (*synthRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fetchErr != nil {
+		return nil, f.fetchErr
+	}
+	r, ok := f.recs[sha]
+	if !ok {
+		return nil, nil // delete race / unknown SHA, not an error
+	}
+	cp := *r
+	return &cp, nil
+}
+
+func (f *fakeSynthStore) SetExtractedText(_ context.Context, recordID int64, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setCalls++
+	f.extracted[recordID] = text
+	// Mirror onto the stored record so a re-enqueue sees the persisted
+	// text (idempotency: an already-extracted record won't re-extract).
+	for _, r := range f.recs {
+		if r.RecordID == recordID {
+			r.ExtractedText = text
+		}
+	}
+	return nil
+}
+
+func (f *fakeSynthStore) ListUnsynthesised(_ context.Context, profile, vault string) ([]synthRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	out := []synthRecord{}
+	for _, r := range f.recs {
+		if r.Doc.Profile == profile && r.Doc.Vault == vault && !r.Synthesised {
+			out = append(out, *r)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeSynthStore) setCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.setCalls
+}
+
+func (f *fakeSynthStore) extractedFor(id int64) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.extracted[id]
+}
+
+// synthCapture records the synthResults the worker hands to WriteSynth,
+// keyed by sha, so a test can assert on body / reliability / topic /
+// EntityNames. writeErr (when set) makes WriteSynth fail, exercising the
+// error-propagation path.
+type synthCapture struct {
+	mu       sync.Mutex
+	results  map[string]synthResult
+	writeErr error
+}
+
+func newSynthCapture() *synthCapture {
+	return &synthCapture{results: map[string]synthResult{}}
+}
+
+func (c *synthCapture) writeSynth(_ context.Context, _, _, sha string, res synthResult) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.writeErr != nil {
+		return c.writeErr
+	}
+	c.results[sha] = res
+	return nil
+}
+
+func (c *synthCapture) result(sha string) (synthResult, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	r, ok := c.results[sha]
+	return r, ok
+}
+
+// noteRecord seeds a raw (unsynthesised) note record (the state perceive /
+// learn leaves it in).
+func noteRecord(profile, vault, sha, title, body string, id int64) synthRecord {
+	now := time.Now().UTC()
+	return synthRecord{
+		Doc: osearch.SummaryDoc{
+			Profile: profile, Vault: vault, SHA: sha,
+			Kind: osearch.KindNote, Title: title, RawBody: body,
+			Tags: []string{"k8s"}, CreatedAt: now, UpdatedAt: now,
+			Synthesised: false,
+		},
+		RecordID: id,
+	}
+}
+
+// newWorkerWithFakes wires a started worker against an in-memory store +
+// attachment store + WriteSynth capture. DisableCLI keeps the pipeline
+// deterministic (regex entity extraction, raw-content distill fallback).
+func newWorkerWithFakes(t *testing.T, store synthStore, attach AttachmentStore, cap *synthCapture, extractor PDFExtractor) (*SynthWorker, func()) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	w := NewSynthWorker(SynthWorkerOpts{
-		OSClient:   os,
-		Logger:     slog.New(slog.DiscardHandler),
-		BufferSize: 16,
-		DisableCLI: true, // keep tests deterministic + fast
+		Logger:       slog.New(slog.DiscardHandler),
+		BufferSize:   16,
+		DisableCLI:   true,
+		PDFExtractor: extractor,
 	})
+	w.Resolve = func(string, string) (synthStore, AttachmentStore, bool) {
+		return store, attach, true
+	}
+	w.WriteSynth = cap.writeSynth
 	w.Start(ctx)
-	return w, ctx, func() {
+	return w, func() {
 		w.Stop()
 		cancel()
 	}
 }
 
 func TestSynthWorker_EnrichesRawDoc(t *testing.T) {
-	fos := newFakeOS()
-	// Seed a raw-only doc (the state /perceive leaves it in).
-	now := time.Now().UTC()
+	store := newFakeSynthStore()
 	sha := "abc"
-	fos.summaries[osearch.DocID("p", "v", sha)] = osearch.SummaryDoc{
-		Profile: "p", Vault: "v", SHA: sha,
-		Title: "Kubernetes pods", RawBody: "Pods are the smallest deployable unit of Kubernetes.",
-		Tags: []string{"k8s"}, CreatedAt: now, UpdatedAt: now,
-		Synthesised: false,
-	}
+	store.put(noteRecord("p", "v", sha, "Kubernetes pods",
+		"Pods are the smallest deployable unit of Kubernetes.", 1))
+	cap := newSynthCapture()
 
-	w, _, cleanup := newTestWorker(t, fos)
+	w, cleanup := newWorkerWithFakes(t, store, nil, cap, nil)
 	defer cleanup()
 
 	var completedFor string
@@ -69,21 +206,17 @@ func TestSynthWorker_EnrichesRawDoc(t *testing.T) {
 	}
 
 	w.Enqueue("p", "v", sha)
+	waitUntil(t, 5*time.Second, func() bool { _, ok := cap.result(sha); return ok })
 
-	waitUntil(t, 5*time.Second, func() bool {
-		d, _ := fos.GetSummary(context.Background(), "p", "v", sha)
-		return d != nil && d.Synthesised
-	})
-
-	out, _ := fos.GetSummary(context.Background(), "p", "v", sha)
-	if !out.Synthesised {
-		t.Fatal("doc not marked Synthesised")
-	}
-	if out.Body == "" {
+	res, _ := cap.result(sha)
+	if res.Body == "" {
 		t.Error("Body empty after synth — should at minimum fall back to raw content")
 	}
-	if out.Reliability == "" {
+	if res.Reliability == "" {
 		t.Error("Reliability not set after synth")
+	}
+	if res.Topic == "" {
+		t.Error("Topic not set after synth")
 	}
 	cmu.Lock()
 	got := completedFor
@@ -94,18 +227,17 @@ func TestSynthWorker_EnrichesRawDoc(t *testing.T) {
 }
 
 func TestSynthWorker_SkipsAlreadySynthesised(t *testing.T) {
-	fos := newFakeOS()
+	store := newFakeSynthStore()
 	sha := "abc"
-	fos.summaries[osearch.DocID("p", "v", sha)] = osearch.SummaryDoc{
-		Profile: "p", Vault: "v", SHA: sha,
-		Title: "T", Body: "already done", Synthesised: true,
-		Reliability: osearch.ReliabilityHigh,
-	}
-	w, _, cleanup := newTestWorker(t, fos)
+	rec := noteRecord("p", "v", sha, "T", "already done", 1)
+	rec.Synthesised = true
+	rec.Doc.Synthesised = true
+	store.put(rec)
+	cap := newSynthCapture()
+
+	w, cleanup := newWorkerWithFakes(t, store, nil, cap, nil)
 	defer cleanup()
 
-	// Drop a sentinel to detect that the worker processed the job
-	// but left the doc unchanged.
 	completed := make(chan string, 1)
 	w.OnComplete = func(_, _, sha string) { completed <- sha }
 
@@ -116,52 +248,46 @@ func TestSynthWorker_SkipsAlreadySynthesised(t *testing.T) {
 		t.Fatal("worker never reached OnComplete")
 	}
 
-	out, _ := fos.GetSummary(context.Background(), "p", "v", sha)
-	if out.Body != "already done" || out.Reliability != osearch.ReliabilityHigh {
-		t.Errorf("worker mutated already-synthesised doc: %+v", out)
+	// The worker skips the wasted gate/distill: WriteSynth must NOT fire
+	// for an already-synthesised record.
+	if _, ok := cap.result(sha); ok {
+		t.Error("worker re-synthesised an already-synthesised record")
 	}
 }
 
 func TestSynthWorker_MissingDocIsNotError(t *testing.T) {
-	fos := newFakeOS()
-	w, _, cleanup := newTestWorker(t, fos)
+	store := newFakeSynthStore()
+	cap := newSynthCapture()
+
+	w, cleanup := newWorkerWithFakes(t, store, nil, cap, nil)
 	defer cleanup()
 
 	completed := make(chan string, 1)
 	w.OnComplete = func(_, _, sha string) { completed <- sha }
 
+	// A missing-record enqueue is not an error; processJob returns nil
+	// WITHOUT calling WriteSynth, but still fires OnComplete (no error).
 	w.Enqueue("p", "v", "ghost")
-	// A missing-doc enqueue is not an error and still fires OnComplete
-	// (no enrichment to do — but worker shouldn't stall).
-	// Actually our processJob returns nil for missing docs WITHOUT
-	// calling OnComplete… verify the worker doesn't crash either way.
 	select {
 	case <-completed:
-		// fine
-	case <-time.After(500 * time.Millisecond):
-		// also fine — missing doc currently skips OnComplete; either
-		// behaviour is acceptable as long as the worker keeps running.
+		// fine — handle() fires OnComplete on a nil error.
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker stalled on a missing record")
+	}
+	if _, ok := cap.result("ghost"); ok {
+		t.Error("WriteSynth fired for a missing record")
 	}
 
-	// Verify the worker still drains a subsequent good job — the
-	// missing one didn't poison the queue.
-	now := time.Now().UTC()
-	fos.summaries[osearch.DocID("p", "v", "real")] = osearch.SummaryDoc{
-		Profile: "p", Vault: "v", SHA: "real",
-		Title: "x", RawBody: "some content", CreatedAt: now, UpdatedAt: now,
-	}
+	// Verify the worker still drains a subsequent good job — the missing
+	// one didn't poison the queue.
+	store.put(noteRecord("p", "v", "real", "x", "some content", 2))
 	w.Enqueue("p", "v", "real")
-	waitUntil(t, 5*time.Second, func() bool {
-		d, _ := fos.GetSummary(context.Background(), "p", "v", "real")
-		return d != nil && d.Synthesised
-	})
+	waitUntil(t, 5*time.Second, func() bool { _, ok := cap.result("real"); return ok })
 }
 
 func TestSynthWorker_EnqueueDropsOnFullQueue(t *testing.T) {
-	fos := newFakeOS()
 	// Don't Start the worker — backlog the buffer, then overflow.
 	w := NewSynthWorker(SynthWorkerOpts{
-		OSClient:   fos,
 		Logger:     slog.New(slog.DiscardHandler),
 		BufferSize: 2,
 	})
@@ -174,392 +300,219 @@ func TestSynthWorker_EnqueueDropsOnFullQueue(t *testing.T) {
 	}
 }
 
-func TestSynthWorker_ExtractsEntitiesIntoOS(t *testing.T) {
-	fos := newFakeOS()
-	now := time.Now().UTC()
+func TestSynthWorker_ExtractsEntitiesIntoWriteSynth(t *testing.T) {
+	store := newFakeSynthStore()
 	sha := "abc"
 	// ExtractEntities lifts capitalised tokens — give it some.
-	fos.summaries[osearch.DocID("p", "v", sha)] = osearch.SummaryDoc{
-		Profile: "p", Vault: "v", SHA: sha,
-		Title: "Notes on Kubernetes and Helm",
-		RawBody: "## Kubernetes\n\nA container orchestration platform.\n\n" +
-			"## Helm\n\nPackages **Kubernetes** manifests as charts.\n",
-		CreatedAt: now, UpdatedAt: now,
-	}
-	w, _, cleanup := newTestWorker(t, fos)
+	store.put(noteRecord("p", "v", sha, "Notes on Kubernetes and Helm",
+		"## Kubernetes\n\nA container orchestration platform.\n\n"+
+			"## Helm\n\nPackages **Kubernetes** manifests as charts.\n", 1))
+	cap := newSynthCapture()
+
+	w, cleanup := newWorkerWithFakes(t, store, nil, cap, nil)
 	defer cleanup()
 	w.Enqueue("p", "v", sha)
-	waitUntil(t, 5*time.Second, func() bool {
-		d, _ := fos.GetSummary(context.Background(), "p", "v", sha)
-		return d != nil && d.Synthesised
-	})
+	waitUntil(t, 5*time.Second, func() bool { _, ok := cap.result(sha); return ok })
 
-	out, _ := fos.GetSummary(context.Background(), "p", "v", sha)
-	if len(out.Entities) == 0 {
-		t.Fatal("Entities empty after synth")
+	res, _ := cap.result(sha)
+	if len(res.EntityNames) == 0 {
+		t.Fatal("EntityNames empty after synth")
 	}
-	// Every Entity in the summary should round-trip to an OS entity doc.
-	for _, slug := range out.Entities {
-		got, _ := fos.GetEntity(context.Background(), "p", "v", slug)
-		if got == nil {
-			t.Errorf("entity %q not written to OS", slug)
-			continue
+	// Each slug must canonicalise the display name (the SoR upsert keys on
+	// slug). Assert Kubernetes round-trips and no empty slugs leak.
+	found := false
+	for slug, name := range res.EntityNames {
+		if slug == "" {
+			t.Errorf("empty slug for name %q", name)
 		}
-		if !containsString(got.MentionedBy, sha) {
-			t.Errorf("entity %q missing MentionedBy=%s; got %v", slug, sha, got.MentionedBy)
+		if slug == osearch.EntitySlug("Kubernetes") {
+			found = true
 		}
+	}
+	if !found {
+		t.Errorf("expected a Kubernetes entity in EntityNames, got %v", res.EntityNames)
 	}
 }
 
-func TestSynthWorker_EntityAccumulatesMentionedBy(t *testing.T) {
-	fos := newFakeOS()
-	now := time.Now().UTC()
-	// Two docs mentioning the same entity. Synthesise both — the
-	// entity doc's MentionedBy should grow.
-	for _, sha := range []string{"d1", "d2"} {
-		fos.summaries[osearch.DocID("p", "v", sha)] = osearch.SummaryDoc{
-			Profile: "p", Vault: "v", SHA: sha,
-			Title: "About Kubernetes",
-			RawBody: "## Kubernetes\n\nOrchestrates containers in production.\n",
-			CreatedAt: now, UpdatedAt: now,
-		}
+// EntityAccumulatesMentionedBy was an OS-side assertion on the entity
+// doc's MentionedBy[] accumulating across two summaries. Post-D1 that
+// accumulation is RELATIONAL (record_entities links in Postgres,
+// established by writeSynthResult's UpsertEntity + LinkRecordEntity), NOT
+// the worker's job — the worker only hands EntityNames to WriteSynth. So
+// the worker-level assertion is "both records pass the SAME entity through
+// WriteSynth"; the mentioned-by relational accumulation is covered by the
+// dual_write integration test (TestSoRWrite_Integration/SynthWrite asserts
+// RecordsMentioningEntity).
+func TestSynthWorker_PassesSameEntityForBothDocs(t *testing.T) {
+	store := newFakeSynthStore()
+	for i, sha := range []string{"d1", "d2"} {
+		store.put(noteRecord("p", "v", sha, "About Kubernetes",
+			"## Kubernetes\n\nOrchestrates containers in production.\n", int64(i+1)))
 	}
-	w, _, cleanup := newTestWorker(t, fos)
+	cap := newSynthCapture()
+
+	w, cleanup := newWorkerWithFakes(t, store, nil, cap, nil)
 	defer cleanup()
 
 	for _, sha := range []string{"d1", "d2"} {
 		w.Enqueue("p", "v", sha)
 	}
-
 	waitUntil(t, 5*time.Second, func() bool {
-		a, _ := fos.GetSummary(context.Background(), "p", "v", "d1")
-		b, _ := fos.GetSummary(context.Background(), "p", "v", "d2")
-		return a != nil && a.Synthesised && b != nil && b.Synthesised
+		_, a := cap.result("d1")
+		_, b := cap.result("d2")
+		return a && b
 	})
 
-	// At least one entity should now list both SHAs in MentionedBy.
-	fos.mu.Lock()
-	defer fos.mu.Unlock()
-	merged := false
-	for _, e := range fos.entities {
-		if containsString(e.MentionedBy, "d1") && containsString(e.MentionedBy, "d2") {
-			merged = true
-			break
+	wantSlug := osearch.EntitySlug("Kubernetes")
+	for _, sha := range []string{"d1", "d2"} {
+		res, _ := cap.result(sha)
+		if _, ok := res.EntityNames[wantSlug]; !ok {
+			t.Errorf("record %s did not pass the Kubernetes entity to WriteSynth; got %v", sha, res.EntityNames)
 		}
 	}
-	if !merged {
-		t.Errorf("no entity merged both d1 + d2 into MentionedBy; entities = %+v", fos.entities)
-	}
 }
 
-func TestSynthWorker_PDFAttachmentGetsExtractedText(t *testing.T) {
-	fos := newFakeOS()
-	store := newCaptureStore()
-	sha := "pdfsha"
-	key := "p/v/attachments/" + sha + ".pdf"
-	// Seed store with fake bytes (the extractor below ignores them).
-	store.puts[key] = []byte("%PDF-fake-bytes")
+// attachStub seeds a raw attachment-stub record (kind attachment_stub) with
+// the binary metadata the worker's enrichment path reads off synthRecord.
+func attachStub(sha, filename, mime, key, desc string, id int64) synthRecord {
 	now := time.Now().UTC()
-	fos.attachments[osearch.DocID("p", "v", sha)] = osearch.AttachmentDoc{
-		Profile: "p", Vault: "v", SHA: sha,
-		OriginalFilename: "doc.pdf",
-		MIMEType:         "application/pdf",
+	return synthRecord{
+		Doc: osearch.SummaryDoc{
+			Profile: "p", Vault: "v", SHA: sha,
+			Kind: osearch.KindAttachmentStub, Title: filename, RawBody: desc,
+			CreatedAt: now, UpdatedAt: now, Synthesised: false,
+		},
+		RecordID:         id,
+		MIMEType:         mime,
+		OriginalFilename: filename,
 		MinIOKey:         key,
-		CreatedAt:        now,
-	}
-
-	called := 0
-	extractor := func(_ context.Context, body []byte) (string, error) {
-		called++
-		return "extracted text from PDF: " + string(body), nil
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	w := NewSynthWorker(SynthWorkerOpts{
-		OSClient:     fos,
-		Logger:       slog.New(slog.DiscardHandler),
-		BufferSize:   8,
-		DisableCLI:   true,
-		Attach:       store,
-		PDFExtractor: extractor,
-	})
-	w.Start(ctx)
-	defer w.Stop()
-
-	w.Enqueue("p", "v", sha)
-	waitUntil(t, 5*time.Second, func() bool {
-		d, _ := fos.GetAttachment(context.Background(), "p", "v", sha)
-		return d != nil && d.ExtractedText != ""
-	})
-
-	out, _ := fos.GetAttachment(context.Background(), "p", "v", sha)
-	if !strings.Contains(out.ExtractedText, "extracted text from PDF") {
-		t.Errorf("ExtractedText missing payload: %q", out.ExtractedText)
-	}
-	if called != 1 {
-		t.Errorf("extractor called %d times, want 1", called)
-	}
-
-	// Idempotency: re-enqueue should not re-extract.
-	w.Enqueue("p", "v", sha)
-	time.Sleep(150 * time.Millisecond)
-	if called != 1 {
-		t.Errorf("extractor called %d times after re-enqueue, want 1 (idempotent)", called)
 	}
 }
 
-func TestSynthWorker_NonPDFAttachmentSkipped(t *testing.T) {
-	fos := newFakeOS()
-	store := newCaptureStore()
-	sha := "imgsha"
-	key := "p/v/attachments/" + sha + ".png"
-	store.puts[key] = []byte("fake-png")
-	now := time.Now().UTC()
-	fos.attachments[osearch.DocID("p", "v", sha)] = osearch.AttachmentDoc{
-		Profile: "p", Vault: "v", SHA: sha,
-		OriginalFilename: "img.png",
-		MIMEType:         "image/png",
-		MinIOKey:         key,
-		CreatedAt:        now,
-	}
-
-	called := 0
-	extractor := func(_ context.Context, body []byte) (string, error) {
-		called++
-		return "should not be called", nil
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	w := NewSynthWorker(SynthWorkerOpts{
-		OSClient:     fos,
-		Logger:       slog.New(slog.DiscardHandler),
-		BufferSize:   8,
-		DisableCLI:   true,
-		Attach:       store,
-		PDFExtractor: extractor,
-	})
-	w.Start(ctx)
-	defer w.Stop()
-
-	done := make(chan string, 1)
-	w.OnComplete = func(_, _, sha string) { done <- sha }
-
-	w.Enqueue("p", "v", sha)
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("worker never finished non-pdf attachment job")
-	}
-	if called != 0 {
-		t.Errorf("extractor called %d times on non-pdf, want 0", called)
-	}
-	out, _ := fos.GetAttachment(context.Background(), "p", "v", sha)
-	if out.ExtractedText != "" {
-		t.Errorf("ExtractedText set on non-pdf: %q", out.ExtractedText)
-	}
-}
-
-// v2.5.1 (#48): attachment stub + PDF — synth folds pdftotext output
-// into the stub's RawBody/Body so brain_recall sees attachment content.
+// v2.5.1 (#48): attachment stub + PDF — synth folds pdftotext output into
+// the stub's RawBody so the distill pass (and recall) sees attachment
+// content, and persists the extracted text back to the SoR.
 func TestSynthWorker_AttachmentStub_PDFEnrichesSummary(t *testing.T) {
-	fos := newFakeOS()
-	store := newCaptureStore()
+	store := newFakeSynthStore()
+	attach := newCaptureStore()
 	sha := "pdfsha"
 	key := "p/v/attachments/" + sha + ".pdf"
-	store.puts[key] = []byte("%PDF-fake")
-	now := time.Now().UTC()
-	// Companion AttachmentDoc and stub SummaryDoc at the same SHA.
-	fos.attachments[osearch.DocID("p", "v", sha)] = osearch.AttachmentDoc{
-		Profile: "p", Vault: "v", SHA: sha,
-		OriginalFilename: "doc.pdf",
-		MIMEType:         "application/pdf",
-		MinIOKey:         key,
-		Description:      "kept for billing",
-		CreatedAt:        now,
-	}
-	fos.summaries[osearch.DocID("p", "v", sha)] = osearch.SummaryDoc{
-		Profile: "p", Vault: "v", SHA: sha,
-		Kind:        osearch.KindAttachmentStub,
-		Title:       "doc.pdf",
-		RawBody:     "kept for billing",
-		Reliability: osearch.ReliabilityMedium,
-		GateReason:  "curated (attachment)",
-		CreatedAt:   now, UpdatedAt: now,
-	}
+	attach.puts[key] = []byte("%PDF-fake")
+	store.put(attachStub(sha, "doc.pdf", "application/pdf", key, "kept for billing", 1))
+	cap := newSynthCapture()
 
-	extractor := func(_ context.Context, body []byte) (string, error) {
+	extractor := func(_ context.Context, _ []byte) (string, error) {
 		return "INVOICE TOTAL $42", nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	w := NewSynthWorker(SynthWorkerOpts{
-		OSClient:     fos,
-		Logger:       slog.New(slog.DiscardHandler),
-		BufferSize:   8,
-		DisableCLI:   true,
-		Attach:       store,
-		PDFExtractor: extractor,
-	})
-	w.Start(ctx)
-	defer w.Stop()
+	w, cleanup := newWorkerWithFakes(t, store, attach, cap, extractor)
+	defer cleanup()
 
 	w.Enqueue("p", "v", sha)
-	waitUntil(t, 5*time.Second, func() bool {
-		d, _ := fos.GetSummary(context.Background(), "p", "v", sha)
-		return d != nil && d.Synthesised
-	})
+	waitUntil(t, 5*time.Second, func() bool { _, ok := cap.result(sha); return ok })
 
-	stub, _ := fos.GetSummary(context.Background(), "p", "v", sha)
-	if !strings.Contains(stub.RawBody, "kept for billing") {
-		t.Errorf("stub.RawBody dropped description: %q", stub.RawBody)
+	res, _ := cap.result(sha)
+	if !strings.Contains(res.Body, "kept for billing") {
+		t.Errorf("Body dropped description: %q", res.Body)
 	}
-	if !strings.Contains(stub.RawBody, "INVOICE TOTAL $42") {
-		t.Errorf("stub.RawBody missing pdftotext output: %q", stub.RawBody)
+	if !strings.Contains(res.Body, "INVOICE TOTAL $42") {
+		t.Errorf("Body missing pdftotext output: %q", res.Body)
 	}
-	if stub.Body == "" {
-		t.Error("stub.Body empty after synth (should fall back to RawBody at minimum)")
+	// Extracted text persisted back to the SoR via SetExtractedText.
+	if store.extractedFor(1) != "INVOICE TOTAL $42" {
+		t.Errorf("SetExtractedText(recordID=1) = %q, want pdf text", store.extractedFor(1))
 	}
-	att, _ := fos.GetAttachment(context.Background(), "p", "v", sha)
-	if att.ExtractedText != "INVOICE TOTAL $42" {
-		t.Errorf("AttachmentDoc.ExtractedText = %q", att.ExtractedText)
-	}
-	if att.SummarySHA != sha {
-		t.Errorf("AttachmentDoc.SummarySHA cross-link missing: %q", att.SummarySHA)
+	if store.setCallCount() != 1 {
+		t.Errorf("SetExtractedText called %d times, want 1", store.setCallCount())
 	}
 }
 
-// Idempotency: re-enqueueing a synthesised stub MUST NOT re-run pdftotext.
+// Idempotency: re-enqueueing a stub whose record already carries extracted
+// text MUST NOT re-run pdftotext (or re-persist).
 func TestSynthWorker_AttachmentStub_Idempotent(t *testing.T) {
-	fos := newFakeOS()
-	store := newCaptureStore()
+	store := newFakeSynthStore()
+	attach := newCaptureStore()
 	sha := "pdfsha2"
 	key := "p/v/attachments/" + sha + ".pdf"
-	store.puts[key] = []byte("%PDF-fake")
-	now := time.Now().UTC()
-	fos.attachments[osearch.DocID("p", "v", sha)] = osearch.AttachmentDoc{
-		Profile: "p", Vault: "v", SHA: sha,
-		OriginalFilename: "doc.pdf",
-		MIMEType:         "application/pdf",
-		MinIOKey:         key,
-		Description:      "ctx",
-		CreatedAt:        now,
-	}
-	fos.summaries[osearch.DocID("p", "v", sha)] = osearch.SummaryDoc{
-		Profile: "p", Vault: "v", SHA: sha,
-		Kind: osearch.KindAttachmentStub, Title: "x", RawBody: "ctx",
-		CreatedAt: now, UpdatedAt: now,
-	}
+	attach.puts[key] = []byte("%PDF-fake")
+	store.put(attachStub(sha, "doc.pdf", "application/pdf", key, "ctx", 7))
+	cap := newSynthCapture()
+
 	called := 0
+	var cmu sync.Mutex
 	extractor := func(_ context.Context, _ []byte) (string, error) {
+		cmu.Lock()
 		called++
+		cmu.Unlock()
 		return "extracted", nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	w := NewSynthWorker(SynthWorkerOpts{
-		OSClient: fos, Logger: slog.New(slog.DiscardHandler),
-		BufferSize: 8, DisableCLI: true,
-		Attach: store, PDFExtractor: extractor,
-	})
-	w.Start(ctx)
-	defer w.Stop()
+	w, cleanup := newWorkerWithFakes(t, store, attach, cap, extractor)
+	defer cleanup()
 
 	w.Enqueue("p", "v", sha)
-	waitUntil(t, 5*time.Second, func() bool {
-		d, _ := fos.GetSummary(context.Background(), "p", "v", sha)
-		return d != nil && d.Synthesised
-	})
+	waitUntil(t, 5*time.Second, func() bool { _, ok := cap.result(sha); return ok })
+	// SetExtractedText mirrored the text onto the stored record; the record
+	// is still Synthesised=false in the fake (WriteSynth, which would flip
+	// it, is faked out). Re-enqueue must still skip re-extraction because
+	// ExtractedText is now non-empty.
 	w.Enqueue("p", "v", sha)
 	time.Sleep(150 * time.Millisecond)
-	if called != 1 {
-		t.Errorf("extractor called %d times on re-enqueue of synthesised stub, want 1", called)
+	cmu.Lock()
+	got := called
+	cmu.Unlock()
+	if got != 1 {
+		t.Errorf("extractor called %d times on re-enqueue, want 1 (idempotent via persisted ExtractedText)", got)
 	}
 }
 
-// Non-PDF stub: synth still completes; RawBody stays description-only.
+// Non-PDF stub: synth still completes; the extractor never runs and the
+// RawBody stays description-only.
 func TestSynthWorker_AttachmentStub_NonPDF(t *testing.T) {
-	fos := newFakeOS()
-	store := newCaptureStore()
+	store := newFakeSynthStore()
+	attach := newCaptureStore()
 	sha := "imgsha"
 	key := "p/v/attachments/" + sha + ".png"
-	store.puts[key] = []byte("fake-png")
-	now := time.Now().UTC()
-	fos.attachments[osearch.DocID("p", "v", sha)] = osearch.AttachmentDoc{
-		Profile: "p", Vault: "v", SHA: sha,
-		OriginalFilename: "img.png",
-		MIMEType:         "image/png",
-		MinIOKey:         key,
-		Description:      "screenshot",
-		CreatedAt:        now,
-	}
-	fos.summaries[osearch.DocID("p", "v", sha)] = osearch.SummaryDoc{
-		Profile: "p", Vault: "v", SHA: sha,
-		Kind: osearch.KindAttachmentStub, Title: "img.png", RawBody: "screenshot",
-		CreatedAt: now, UpdatedAt: now,
-	}
+	attach.puts[key] = []byte("fake-png")
+	store.put(attachStub(sha, "img.png", "image/png", key, "screenshot", 1))
+	cap := newSynthCapture()
+
 	called := 0
 	extractor := func(_ context.Context, _ []byte) (string, error) {
 		called++
 		return "no", nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	w := NewSynthWorker(SynthWorkerOpts{
-		OSClient: fos, Logger: slog.New(slog.DiscardHandler),
-		BufferSize: 8, DisableCLI: true,
-		Attach: store, PDFExtractor: extractor,
-	})
-	w.Start(ctx)
-	defer w.Stop()
-	w.Enqueue("p", "v", sha)
-	waitUntil(t, 5*time.Second, func() bool {
-		d, _ := fos.GetSummary(context.Background(), "p", "v", sha)
-		return d != nil && d.Synthesised
-	})
-	if called != 0 {
-		t.Errorf("extractor called %d on non-pdf stub, want 0", called)
-	}
-	stub, _ := fos.GetSummary(context.Background(), "p", "v", sha)
-	if !strings.Contains(stub.RawBody, "screenshot") {
-		t.Errorf("non-pdf stub lost description: %q", stub.RawBody)
-	}
-}
-
-// failingOS lets us assert that an UpsertSummary error doesn't crash
-// the worker.
-type failingOS struct{ *fakeOS }
-
-func (f failingOS) UpsertSummary(context.Context, osearch.SummaryDoc, bool) error {
-	return errors.New("os write failed")
-}
-
-func TestSynthWorker_SurvivesUpsertFailure(t *testing.T) {
-	inner := newFakeOS()
-	now := time.Now().UTC()
-	inner.summaries[osearch.DocID("p", "v", "x")] = osearch.SummaryDoc{
-		Profile: "p", Vault: "v", SHA: "x", Title: "t", RawBody: "body",
-		CreatedAt: now, UpdatedAt: now,
-	}
-	fos := failingOS{inner}
-
-	w, _, cleanup := newTestWorker(t, fos)
+	w, cleanup := newWorkerWithFakes(t, store, attach, cap, extractor)
 	defer cleanup()
 
-	// Enqueue a job that will fail mid-process. Then enqueue another
-	// against a fresh doc to verify the worker is still alive.
+	w.Enqueue("p", "v", sha)
+	waitUntil(t, 5*time.Second, func() bool { _, ok := cap.result(sha); return ok })
+
+	if called != 0 {
+		t.Errorf("PDF extractor called %d times on non-pdf stub, want 0", called)
+	}
+	if store.setCallCount() != 0 {
+		t.Errorf("SetExtractedText called %d times on non-pdf, want 0", store.setCallCount())
+	}
+	res, _ := cap.result(sha)
+	if !strings.Contains(res.Body, "screenshot") {
+		t.Errorf("non-pdf stub lost description: %q", res.Body)
+	}
+}
+
+func TestSynthWorker_SurvivesWriteSynthFailure(t *testing.T) {
+	store := newFakeSynthStore()
+	store.put(noteRecord("p", "v", "x", "t", "body", 1))
+	store.put(noteRecord("p", "v", "y", "t", "body", 2))
+	cap := newSynthCapture()
+	cap.writeErr = errors.New("synth write failed")
+
+	w, cleanup := newWorkerWithFakes(t, store, nil, cap, nil)
+	defer cleanup()
+
+	// Enqueue a job that fails in WriteSynth. The worker logs + moves on;
+	// it must not deadlock or stop draining.
 	w.Enqueue("p", "v", "x")
 	time.Sleep(100 * time.Millisecond) // give the failure time to log
 
-	inner.mu.Lock()
-	inner.summaries[osearch.DocID("p", "v", "y")] = osearch.SummaryDoc{
-		Profile: "p", Vault: "v", SHA: "y", Title: "t", RawBody: "body",
-		CreatedAt: now, UpdatedAt: now,
-	}
-	inner.mu.Unlock()
-	// y will also fail to write back, but the worker should still
-	// drain it. The assertion is just "worker did not deadlock".
 	done := make(chan struct{})
 	go func() {
 		w.Enqueue("p", "v", "y")
@@ -568,6 +521,6 @@ func TestSynthWorker_SurvivesUpsertFailure(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("worker appears to have deadlocked after upsert failure")
+		t.Fatal("worker appears to have deadlocked after WriteSynth failure")
 	}
 }

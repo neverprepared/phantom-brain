@@ -2,13 +2,10 @@ package server
 
 import (
 	"archive/tar"
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -256,37 +253,17 @@ func TestSnapshot_RetentionPrunesOldestButRespectsClaims(t *testing.T) {
 }
 
 // --- HTTP snapshot handlers --------------------------------------------
-
-func startDaemonWithSeed(t *testing.T) (*Daemon, string, func()) {
-	t.Helper()
-	cfgDir := t.TempDir()
-	dataDir := t.TempDir()
-	writeServerConfig(t, cfgDir, "[server]\nport = 0\n")
-	tok := seedVault(t, cfgDir, "personal", "memory", "")
-	d, err := Start(StartOpts{
-		ConfigDir: cfgDir,
-		DataDir:   DataDir(dataDir),
-		Logger:    slog.New(slog.DiscardHandler),
-	})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	cleanup := func() { _ = d.Shutdown(context.Background()) }
-	return d, tok, cleanup
-}
+//
+// Phase D1: these drove a fully started daemon (startDaemonWithSeed →
+// Start), which now mandates a live Postgres SoR. But the snapshot HTTP
+// handlers (current / by-gen / tarball) are purely DataDir-backed — they
+// never touch Postgres — so they're restored here against the no-Start
+// router rig (newRouterRig in handlers_test.go) rather than dropped to
+// integration.
 
 func TestHandler_SnapshotCurrent_FreshVaultReturnsGenZero(t *testing.T) {
-	d, tok, cleanup := startDaemonWithSeed(t)
-	defer cleanup()
-	ts := httptest.NewServer(d.Router())
-	defer ts.Close()
-
-	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/brain/snapshot/current", nil)
-	req.Header.Set("Authorization", "Bearer "+tok)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
+	r := newRouterRig(t)
+	resp := r.do(t, http.MethodGet, "/api/brain/snapshot/current", nil)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -302,28 +279,21 @@ func TestHandler_SnapshotCurrent_FreshVaultReturnsGenZero(t *testing.T) {
 }
 
 func TestHandler_SnapshotByGen_AndTarballDownload(t *testing.T) {
-	d, tok, cleanup := startDaemonWithSeed(t)
-	defer cleanup()
-	seedCollective(t, d.DataDir, "personal", "memory", "# served\n")
-	if _, err := BuildSnapshot(d.DataDir, "personal", "memory", 30); err != nil {
+	r := newRouterRig(t)
+	seedCollective(t, r.d.DataDir, "personal", "memory", "# served\n")
+	if _, err := BuildSnapshot(r.d.DataDir, "personal", "memory", 30); err != nil {
 		t.Fatal(err)
 	}
-	ts := httptest.NewServer(d.Router())
-	defer ts.Close()
 
 	// Manifest by gen.
-	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/brain/snapshot/1", nil)
-	req.Header.Set("Authorization", "Bearer "+tok)
-	resp, _ := http.DefaultClient.Do(req)
+	resp := r.do(t, http.MethodGet, "/api/brain/snapshot/1", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("manifest gen=1 status=%d", resp.StatusCode)
 	}
 	resp.Body.Close()
 
 	// Tarball download.
-	req, _ = http.NewRequest(http.MethodGet, ts.URL+"/api/brain/snapshot/1/tarball", nil)
-	req.Header.Set("Authorization", "Bearer "+tok)
-	resp, _ = http.DefaultClient.Do(req)
+	resp = r.do(t, http.MethodGet, "/api/brain/snapshot/1/tarball", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("tarball status=%d", resp.StatusCode)
 	}
@@ -338,18 +308,12 @@ func TestHandler_SnapshotByGen_AndTarballDownload(t *testing.T) {
 }
 
 func TestHandler_Snapshot_UnknownGenReturns404(t *testing.T) {
-	d, tok, cleanup := startDaemonWithSeed(t)
-	defer cleanup()
-	ts := httptest.NewServer(d.Router())
-	defer ts.Close()
-
-	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/brain/snapshot/999", nil)
-	req.Header.Set("Authorization", "Bearer "+tok)
-	resp, _ := http.DefaultClient.Do(req)
+	r := newRouterRig(t)
+	resp := r.do(t, http.MethodGet, "/api/brain/snapshot/999", nil)
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", resp.StatusCode)
 	}
-	resp.Body.Close()
 }
 
 // --- helpers ----------------------------------------------------------

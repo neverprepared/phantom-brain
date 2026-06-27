@@ -1,19 +1,20 @@
 //go:build integration
 
-// Phase B1 integration coverage for the dual-write write path. Build-tagged
-// OFF by default so `make test` neither compiles this file nor needs Docker.
-// Run with:
+// Phase D1 integration coverage for the Postgres-SoR write path (the sole
+// authoritative store). Build-tagged OFF by default so `make test` neither
+// compiles this file nor needs Docker. Run with:
 //
-//	GOFLAGS="-tags=sqlite_fts5,integration" go test ./internal/server/ -run DualWrite -count=1 -v
+//	GOFLAGS="-tags=sqlite_fts5,integration" go test ./internal/server/ -run SoRWrite -count=1 -v
 //
 // Reuses the Phase A harness (startPGForServer / startOSForServer /
 // newPGTestDaemon / binding / pgstore.Provision). Proves:
-//  1. Flag ON, raw write  → record lands in PG + projects to pb_records.
-//  2. Flag ON, synth mirror → synthesised=true + body + entity + link, and
-//     pb_records re-projected with the distilled body.
-//  3. Flag OFF             → nothing written to PG.
-//  4. Non-fatal on PG down → no panic/error; counter increments; the legacy
-//     write path is untouched.
+//  1. Raw write   → record lands in PG + projects to pb_records.
+//  2. Synth write → synthesised=true + body + entity + link, and pb_records
+//     re-projected with the distilled body.
+//  3. Missing raw record on synth → write returns an error + the counter
+//     increments (the raw write never landed; a re-enqueue reconciles).
+//  4. PG disabled → the SoR write returns an error + counter increments
+//     (PG is mandatory in D1, so this is a real configuration error).
 package server
 
 import (
@@ -29,14 +30,6 @@ import (
 	"github.com/neverprepared/phantom-brain/internal/pgstore"
 	"github.com/neverprepared/phantom-brain/internal/pgstore/pgdb"
 )
-
-// dwBinding builds a VaultBinding with a resolved prefix + the DualWrite
-// flag set as requested.
-func dwBinding(profile, vault, prefix string, dualWrite bool) VaultBinding {
-	b := binding(profile, vault, prefix)
-	b.DualWrite = dualWrite
-	return b
-}
 
 // dwEmbedding builds a 768-dim vector with a single hot dimension so the
 // kNN reach is unambiguous under cosine.
@@ -60,7 +53,7 @@ func dwSummaryDoc(profile, vault, sha, title, body string, emb []float32) osearc
 		Kind:        osearch.KindNote,
 		Title:       title,
 		RawBody:     body,
-		Tags:        []string{"phaseb1"},
+		Tags:        []string{"phased1"},
 		CreatedAt:   now,
 		UpdatedAt:   now,
 		Synthesised: false,
@@ -112,7 +105,7 @@ func waitForRecall(ctx context.Context, t *testing.T, view *pgBindingView, profi
 	}
 }
 
-func TestDualWrite_Integration(t *testing.T) {
+func TestSoRWrite_Integration(t *testing.T) {
 	ctx := context.Background()
 	baseDSN := startPGForServer(ctx, t)
 	osc := startOSForServer(ctx, t)
@@ -121,12 +114,14 @@ func TestDualWrite_Integration(t *testing.T) {
 		t.Fatalf("provision tctest db: %v", err)
 	}
 
-	t.Run("FlagOn_RawWrite", func(t *testing.T) {
-		b := dwBinding("tctest", "main", "pbb_raw_", true)
+	t.Run("RawWrite", func(t *testing.T) {
+		b := binding("tctest", "main", "pbd_raw_")
 		d := newPGTestDaemon(t, b)
 		d.osBase, d.osClient, d.osExport = osc, osc, osc
 		d.pgBaseDSN = baseDSN
-		d.buildBindingDeps()
+		if err := d.buildBindingDeps(); err != nil {
+			t.Fatalf("buildBindingDeps: %v", err)
+		}
 		t.Cleanup(d.closePGProfiles)
 
 		view, err := d.resolvePG(b)
@@ -138,8 +133,9 @@ func TestDualWrite_Integration(t *testing.T) {
 			"aaaa000000000000000000000000000000000000000000000000000000000001",
 			"Quarterly invoices", "We reconciled every quarterly invoice.", dwEmbedding(5))
 
-		d.dualWriteRaw(ctx, b, doc)
-
+		if err := d.writeRecordRaw(ctx, b, doc); err != nil {
+			t.Fatalf("writeRecordRaw: %v", err)
+		}
 		if d.DualWriteFailureCount() != 0 {
 			t.Fatalf("no failure expected on happy raw write, got %d", d.DualWriteFailureCount())
 		}
@@ -155,12 +151,14 @@ func TestDualWrite_Integration(t *testing.T) {
 		waitForRecall(ctx, t, view, "tctest", "main", "invoice", doc.SHA)
 	})
 
-	t.Run("FlagOn_SynthMirror", func(t *testing.T) {
-		b := dwBinding("tctest", "main", "pbb_synth_", true)
+	t.Run("SynthWrite", func(t *testing.T) {
+		b := binding("tctest", "main", "pbd_synth_")
 		d := newPGTestDaemon(t, b)
 		d.osBase, d.osClient, d.osExport = osc, osc, osc
 		d.pgBaseDSN = baseDSN
-		d.buildBindingDeps()
+		if err := d.buildBindingDeps(); err != nil {
+			t.Fatalf("buildBindingDeps: %v", err)
+		}
 		t.Cleanup(d.closePGProfiles)
 
 		view, err := d.resolvePG(b)
@@ -171,11 +169,13 @@ func TestDualWrite_Integration(t *testing.T) {
 		sha := "bbbb000000000000000000000000000000000000000000000000000000000002"
 		doc := dwSummaryDoc("tctest", "main", sha,
 			"Ledger reconciliation", "stardust accounting raw body", dwEmbedding(7))
-		d.dualWriteRaw(ctx, b, doc)
+		if err := d.writeRecordRaw(ctx, b, doc); err != nil {
+			t.Fatalf("writeRecordRaw: %v", err)
+		}
 		waitForRecord(ctx, t, view, "tctest", "main", sha)
 
-		// Now the synth mirror: distilled body + reliability/topic + one entity.
-		d.dualWriteSynth(ctx, b, "tctest", "main", sha, synthResult{
+		// Now the synth write: distilled body + reliability/topic + one entity.
+		if err := d.writeSynthResult(ctx, b, "tctest", "main", sha, synthResult{
 			Body:           "The general ledger was reconciled against vendor statements thoroughly.",
 			Reliability:    "high",
 			Topic:          "memory",
@@ -183,9 +183,11 @@ func TestDualWrite_Integration(t *testing.T) {
 			Embedding:      dwEmbedding(7),
 			EmbeddingModel: "nomic-embed-text",
 			EntityNames:    map[string]string{"acme-corp": "Acme Corp"},
-		})
+		}); err != nil {
+			t.Fatalf("writeSynthResult: %v", err)
+		}
 		if d.DualWriteFailureCount() != 0 {
-			t.Fatalf("no failure expected on happy synth mirror, got %d", d.DualWriteFailureCount())
+			t.Fatalf("no failure expected on happy synth write, got %d", d.DualWriteFailureCount())
 		}
 
 		q := pgstore.New(view.Pool())
@@ -194,13 +196,13 @@ func TestDualWrite_Integration(t *testing.T) {
 			t.Fatalf("GetRecordBySHA post-synth: %v", err)
 		}
 		if !rec.Synthesised {
-			t.Fatal("record must be synthesised after the mirror")
+			t.Fatal("record must be synthesised after the write")
 		}
 		if rec.Body.String != "The general ledger was reconciled against vendor statements thoroughly." {
-			t.Fatalf("body not mirrored: %q", rec.Body.String)
+			t.Fatalf("body not written: %q", rec.Body.String)
 		}
 		if rec.Reliability.String != "high" || rec.Topic.String != "memory" {
-			t.Fatalf("reliability/topic not mirrored: %q / %q", rec.Reliability.String, rec.Topic.String)
+			t.Fatalf("reliability/topic not written: %q / %q", rec.Reliability.String, rec.Topic.String)
 		}
 
 		// Entity + link exist.
@@ -223,82 +225,55 @@ func TestDualWrite_Integration(t *testing.T) {
 		waitForRecall(ctx, t, view, "tctest", "main", "vendor statements", sha)
 	})
 
-	t.Run("FlagOff_NoWrite", func(t *testing.T) {
-		b := dwBinding("tctest", "main", "pbb_off_", false)
+	t.Run("SynthMissingRecord_ErrorsAndCounts", func(t *testing.T) {
+		// PG up, but NO raw record for this SHA → writeSynthResult hits
+		// pgx.ErrNoRows → returns an error + the counter increments (the
+		// raw write never landed; a re-enqueue reconciles).
+		b := binding("tctest", "main", "pbd_miss_")
 		d := newPGTestDaemon(t, b)
 		d.osBase, d.osClient, d.osExport = osc, osc, osc
 		d.pgBaseDSN = baseDSN
-		d.buildBindingDeps()
-		t.Cleanup(d.closePGProfiles)
-
-		// resolvePG must still WORK (PG configured) — the no-op is purely
-		// the flag gate inside dualWriteRaw.
-		view, err := d.resolvePG(b)
-		if err != nil {
-			t.Fatalf("resolvePG (flag off, PG configured): %v", err)
+		if err := d.buildBindingDeps(); err != nil {
+			t.Fatalf("buildBindingDeps: %v", err)
 		}
-
-		sha := "cccc000000000000000000000000000000000000000000000000000000000003"
-		doc := dwSummaryDoc("tctest", "main", sha, "Should not persist", "body", dwEmbedding(9))
-		d.dualWriteRaw(ctx, b, doc)
-
-		q := pgstore.New(view.Pool())
-		_, err = q.GetRecordBySHA(ctx, pgdb.GetRecordBySHAParams{Profile: "tctest", Vault: "main", Sha: sha})
-		if !errors.Is(err, pgx.ErrNoRows) {
-			t.Fatalf("flag-off write must NOT persist; expected ErrNoRows, got %v", err)
-		}
-		if d.DualWriteFailureCount() != 0 {
-			t.Fatalf("flag-off must not count as a failure, got %d", d.DualWriteFailureCount())
-		}
-	})
-
-	t.Run("SynthMissingRecord_NonFatalCounter", func(t *testing.T) {
-		// Flag ON, PG up, but NO raw record for this SHA → dualWriteSynth
-		// hits pgx.ErrNoRows → non-fatal, counter increments, no panic.
-		b := dwBinding("tctest", "main", "pbb_miss_", true)
-		d := newPGTestDaemon(t, b)
-		d.osBase, d.osClient, d.osExport = osc, osc, osc
-		d.pgBaseDSN = baseDSN
-		d.buildBindingDeps()
 		t.Cleanup(d.closePGProfiles)
 
 		before := d.DualWriteFailureCount()
-		d.dualWriteSynth(ctx, b, "tctest", "main",
+		err := d.writeSynthResult(ctx, b, "tctest", "main",
 			"dddd000000000000000000000000000000000000000000000000000000000004",
 			synthResult{Body: "orphan", Reliability: "low", Topic: "general"})
+		if err == nil {
+			t.Fatal("expected an error when synth-writing a SHA with no raw record")
+		}
 		if d.DualWriteFailureCount() != before+1 {
 			t.Fatalf("expected exactly one failure increment, before=%d after=%d", before, d.DualWriteFailureCount())
 		}
 	})
 }
 
-// TestDualWrite_Disabled_NoContainers proves the flag-off + PG-disabled
-// paths are non-fatal WITHOUT any containers (compiles + runs in CI without
-// Docker). It exercises: flag off → no-op; flag on + PG disabled → skip
-// (no counter, no panic).
-func TestDualWrite_Disabled_NoContainers(t *testing.T) {
+// TestSoRWrite_PGDisabled_NoContainers proves the PG-disabled path returns
+// an error + increments the counter WITHOUT any containers (compiles + runs
+// in CI without Docker). Phase D1: Postgres is mandatory, so a write with PG
+// disabled is a real configuration error (resolvePG → ErrPostgresDisabled),
+// not a tolerated no-op.
+func TestSoRWrite_PGDisabled_NoContainers(t *testing.T) {
 	ctx := context.Background()
 
-	// Flag OFF: returns immediately, never touches resolvePG.
-	bOff := dwBinding("tctest", "main", "x_", false)
-	dOff := newPGTestDaemon(t, bOff)
-	dOff.buildBindingDeps() // no pgBaseDSN ⇒ PG disabled
+	b := binding("tctest", "main", "x_")
+	d := newPGTestDaemon(t, b)
+	// No pgBaseDSN ⇒ PG disabled. buildBindingDeps returns an error in D1;
+	// we ignore it here and exercise the per-write error path directly.
+	_ = d.buildBindingDeps()
 	doc := dwSummaryDoc("tctest", "main",
 		"eeee000000000000000000000000000000000000000000000000000000000005", "t", "b", nil)
-	dOff.dualWriteRaw(ctx, bOff, doc)
-	dOff.dualWriteSynth(ctx, bOff, "tctest", "main", doc.SHA, synthResult{})
-	if dOff.DualWriteFailureCount() != 0 {
-		t.Fatalf("flag-off must not increment counter, got %d", dOff.DualWriteFailureCount())
-	}
 
-	// Flag ON but PG disabled (no pgBaseDSN): resolvePG → ErrPostgresDisabled
-	// → skip path. Non-fatal, no counter, no panic.
-	bOn := dwBinding("tctest", "main", "y_", true)
-	dOn := newPGTestDaemon(t, bOn)
-	dOn.buildBindingDeps()
-	dOn.dualWriteRaw(ctx, bOn, doc)
-	dOn.dualWriteSynth(ctx, bOn, "tctest", "main", doc.SHA, synthResult{})
-	if dOn.DualWriteFailureCount() != 0 {
-		t.Fatalf("PG-disabled skip must not increment counter, got %d", dOn.DualWriteFailureCount())
+	if err := d.writeRecordRaw(ctx, b, doc); !errors.Is(err, ErrPostgresDisabled) {
+		t.Fatalf("PG-disabled raw write: want ErrPostgresDisabled, got %v", err)
+	}
+	if err := d.writeSynthResult(ctx, b, "tctest", "main", doc.SHA, synthResult{}); !errors.Is(err, ErrPostgresDisabled) {
+		t.Fatalf("PG-disabled synth write: want ErrPostgresDisabled, got %v", err)
+	}
+	if d.DualWriteFailureCount() != 2 {
+		t.Fatalf("PG-disabled writes must each increment the counter, got %d", d.DualWriteFailureCount())
 	}
 }

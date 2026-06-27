@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -378,40 +377,23 @@ func TestAuthMiddleware_AcceptsValidAndPlumbsBinding(t *testing.T) {
 
 // --- Daemon end-to-end ------------------------------------------------
 
-func startTestDaemon(t *testing.T) (*Daemon, func()) {
-	t.Helper()
-	cfgDir := t.TempDir()
-	dataDir := t.TempDir()
-	writeServerConfig(t, cfgDir, `[server]
-port = 0
-host = "127.0.0.1"
-`)
-	_ = seedVault(t, cfgDir, "personal", "memory", "")
-	d, err := Start(StartOpts{
-		ConfigDir: cfgDir,
-		DataDir:   DataDir(dataDir),
-		Logger:    slog.New(slog.DiscardHandler),
-	})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	cleanup := func() {
-		_ = d.Shutdown(context.Background())
-	}
-	return d, cleanup
-}
+// Phase D1: Start() now mandates a live Postgres SoR. The /health endpoint
+// only reads d.registry.Vaults() (no PG), so it's restored here against
+// the no-Start router rig (newRouterRig in handlers_test.go) instead of
+// being dropped to integration.
+//
+// TestDaemon_StartRefusesSecondInstance genuinely needs a first Start() to
+// succeed (to take the lockfile) before the second is rejected — and a
+// successful Start() now requires PG — so it stays out of the unit suite
+// and needs PG-backed integration coverage (follow-up).
+//
+// TestDaemon_MissingConfigErrorsHelpfully stays: it asserts Start fails on
+// a MISSING server.toml, which errors during config load — before the
+// Postgres gate — so it still passes without PG.
 
 func TestDaemon_HealthEndpointListsVaults(t *testing.T) {
-	d, cleanup := startTestDaemon(t)
-	defer cleanup()
-
-	ts := httptest.NewServer(d.Router())
-	defer ts.Close()
-
-	resp, err := http.Get(ts.URL + "/api/brain/health")
-	if err != nil {
-		t.Fatalf("GET /health: %v", err)
-	}
+	r := newRouterRig(t)
+	resp := r.do(t, http.MethodGet, "/api/brain/health", nil)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
@@ -420,23 +402,6 @@ func TestDaemon_HealthEndpointListsVaults(t *testing.T) {
 	if !strings.Contains(string(body), `"profile": "personal"`) ||
 		!strings.Contains(string(body), `"vault": "memory"`) {
 		t.Errorf("health body missing vault: %s", body)
-	}
-}
-
-func TestDaemon_StartRefusesSecondInstance(t *testing.T) {
-	cfgDir := t.TempDir()
-	dataDir := t.TempDir()
-	writeServerConfig(t, cfgDir, "[server]\nport = 0\n")
-
-	first, err := Start(StartOpts{ConfigDir: cfgDir, DataDir: DataDir(dataDir), Logger: slog.New(slog.DiscardHandler)})
-	if err != nil {
-		t.Fatalf("first Start: %v", err)
-	}
-	t.Cleanup(func() { _ = first.Shutdown(context.Background()) })
-
-	_, err = Start(StartOpts{ConfigDir: cfgDir, DataDir: DataDir(dataDir), Logger: slog.New(slog.DiscardHandler)})
-	if err == nil || !strings.Contains(err.Error(), "another pbrainctl serve") {
-		t.Fatalf("expected second-instance rejection, got %v", err)
 	}
 }
 

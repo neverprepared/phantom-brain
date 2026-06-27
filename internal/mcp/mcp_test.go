@@ -237,79 +237,24 @@ func TestPerceiveSlugFallbackOnNoFilenameButOddTitle(t *testing.T) {
 
 // --- brain_recall ---
 
-func TestRecallReturnsHitsForKnownContent(t *testing.T) {
-	// Ingest one doc, then recall by title.
-	plan := map[string][]float32{
-		"Alpha Topic\n\nthe body":      {1, 0, 0}, // embed at ingest
-		"Alpha": {1, 0, 0},                        // embed at query
-	}
-	s, _ := setup(t, 3, plan)
-
-	if _, isErr := callTool(t, s.handlePerceive, map[string]any{
-		"content": "the body",
-		"title":   "Alpha Topic",
-	}); isErr {
-		t.Fatal("perceive failed")
-	}
-
-	text, isErr := callTool(t, s.handleRecall, map[string]any{
-		"query": "Alpha",
-		"limit": float64(5),
-	})
-	if isErr {
-		t.Fatalf("recall err: %s", text)
-	}
-	if !strings.Contains(text, "alpha-topic.md") {
-		t.Errorf("recall should mention the ingested page; got %q", text)
-	}
-	if !strings.Contains(text, "SHA:") {
-		t.Errorf("recall output should include SHA; got %q", text)
-	}
-}
-
-func TestRecallNoResultsRendersHelpfully(t *testing.T) {
-	plan := map[string][]float32{
-		"never-ingested": {0, 1, 0},
-	}
-	s, _ := setup(t, 3, plan)
-
-	text, isErr := callTool(t, s.handleRecall, map[string]any{
-		"query": "never-ingested",
-	})
-	if isErr {
-		t.Fatalf("recall err: %s", text)
-	}
-	if !strings.Contains(strings.ToLower(text), "no results") {
-		t.Errorf("expected 'No results' message; got %q", text)
-	}
-}
+// Phase D1: brain_recall is now online-only — the legacy local-snapshot
+// recall path was removed in the Postgres cutover (see recall.go). The
+// hit-rendering / no-results / default-limit / limit-cap behaviours that
+// used to be exercised against the local index now live behind the daemon
+// online-recall call and are covered by recall_online_test.go's
+// fakeRecallClient seam. The following snapshot-recall unit tests were
+// removed (superseded by the online tests; deeper coverage needs the
+// PG-backed integration suite):
+//
+//   - TestRecallReturnsHitsForKnownContent
+//   - TestRecallNoResultsRendersHelpfully
+//   - TestRecallDefaultLimit
+//   - TestRecallLimitCappedAt50
 
 func TestRecallRejectsEmptyQuery(t *testing.T) {
 	s, _ := setup(t, 3, nil)
 	text, isErr := callTool(t, s.handleRecall, map[string]any{"query": ""})
 	if !isErr {
 		t.Errorf("empty query should error; got %q", text)
-	}
-}
-
-func TestRecallDefaultLimit(t *testing.T) {
-	// limit absent -> uses defaultRecallLimit (10). Just exercise the
-	// path; correctness of hits ordering is covered by index tests.
-	plan := map[string][]float32{"q": {1, 0, 0}}
-	s, _ := setup(t, 3, plan)
-	if _, isErr := callTool(t, s.handleRecall, map[string]any{"query": "q"}); isErr {
-		t.Errorf("missing limit should not error")
-	}
-}
-
-func TestRecallLimitCappedAt50(t *testing.T) {
-	plan := map[string][]float32{"q": {1, 0, 0}}
-	s, _ := setup(t, 3, plan)
-	// limit=9999 should not panic or surface an error
-	if _, isErr := callTool(t, s.handleRecall, map[string]any{
-		"query": "q",
-		"limit": float64(9999),
-	}); isErr {
-		t.Errorf("oversized limit should cap silently")
 	}
 }
