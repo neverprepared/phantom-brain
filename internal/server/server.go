@@ -429,6 +429,9 @@ func (d *Daemon) buildRouter() chi.Router {
 			// Postgres projection. 503 when PG isn't enabled for the
 			// binding — the agent falls back to its local snapshot.
 			r.Post("/recall", d.handleRecall)
+			// Phase D2a: always-online fetch — full record body by SHA
+			// from the Postgres SoR. Companion to /recall.
+			r.Get("/fetch/{sha}", d.handleFetch)
 			r.Post("/attach", d.handleAttach)
 			r.Post("/trace", d.handleTrace)
 			r.Get("/attach/{sha}", d.handleAttachGet)

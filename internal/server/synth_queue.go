@@ -110,10 +110,9 @@ type SynthWorker struct {
 	// the doc's source URL and stores response bytes in MinIO before
 	// running gate + distill. Failures are logged and non-fatal.
 	//
-	// Phase D1 NOTE: the resulting CaptureMinIOKey has NO Postgres
-	// column, so the capture bytes land in MinIO but the key is logged
-	// and dropped — capture-retrieval (handleCaptureGet) will not see it
-	// until the SoR grows a capture_minio_key column (follow-up).
+	// Phase D2a: the resulting CaptureMinIOKey + size are persisted on the
+	// SoR record (capture_minio_key/capture_size_bytes) so handleCaptureGet
+	// can presign post-cutover captures.
 	capture CaptureConfig
 
 	// Resolve returns the per-binding synthStore + AttachmentStore for a
@@ -456,11 +455,12 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 
 	// Raw-source capture (v2.4+): when capture is wired and the doc has a
 	// URL, fetch the page bytes and stash them in MinIO. Best-effort —
-	// fetch failures are logged and DON'T block gate/distill.
-	//
-	// Phase D1 limitation: the resulting CaptureMinIOKey has no SoR column,
-	// so we log it and drop it. The bytes are in MinIO but unreachable via
-	// handleCaptureGet until the SoR grows a capture_minio_key column.
+	// fetch failures are logged and DON'T block gate/distill. The resulting
+	// key + size are threaded into the synthResult so writeSynthResult
+	// persists them on the SoR record (capture_minio_key/capture_size_bytes),
+	// making the bytes reachable via handleCaptureGet (Phase D2a).
+	var captureKey string
+	var captureSize int64
 	if attach != nil && w.capture.Enabled && doc.SourceURL != "" {
 		ua := w.capture.UserAgent
 		timeout := time.Duration(w.capture.TimeoutSecs) * time.Second
@@ -472,7 +472,9 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 				slog.String("url", doc.SourceURL),
 				slog.String("err", cerr.Error()))
 		} else {
-			w.logger.Debug("phantom-brain: capture stored in MinIO (key dropped — no SoR column yet)",
+			captureKey = res.Key
+			captureSize = res.SizeBytes
+			w.logger.Debug("phantom-brain: capture stored in MinIO",
 				slog.String("sha", job.SHA),
 				slog.String("capture_key", res.Key))
 		}
@@ -536,13 +538,15 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 	// Embedding carried here is the record's agent-computed vector (the
 	// daemon does not recompute) — empty for records ingested without one.
 	return w.WriteSynth(ctx, job.Profile, job.Vault, job.SHA, synthResult{
-		Body:           summary,
-		Reliability:    string(verdict.Reliability),
-		Topic:          string(verdict.Topic),
-		GateReason:     verdict.Reason,
-		Embedding:      doc.Embedding,
-		EmbeddingModel: synthEmbeddingModel,
-		EntityNames:    entityNames,
+		Body:             summary,
+		Reliability:      string(verdict.Reliability),
+		Topic:            string(verdict.Topic),
+		GateReason:       verdict.Reason,
+		Embedding:        doc.Embedding,
+		EmbeddingModel:   synthEmbeddingModel,
+		CaptureMinIOKey:  captureKey,
+		CaptureSizeBytes: captureSize,
+		EntityNames:      entityNames,
 	})
 }
 

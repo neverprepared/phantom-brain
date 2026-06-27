@@ -84,6 +84,10 @@ type Record struct {
 	Embedding        *pgvector.Vector
 	EmbeddingModel   pgtype.Text
 	EmbeddingVersion pgtype.Text
+	// MinIO key of the raw page bytes captured at synth time. NULL when capture is off, the source_url is absent, or the fetch failed.
+	CaptureMinioKey pgtype.Text
+	// Size in bytes of the captured raw-source blob. NULL when no capture was stored.
+	CaptureSizeBytes pgtype.Int8
 }
 
 type RecordEntity struct {

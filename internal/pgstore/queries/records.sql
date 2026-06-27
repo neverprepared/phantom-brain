@@ -39,14 +39,16 @@ WHERE profile = @profile AND vault = @vault AND NOT synthesised;
 -- Fill in the derived fields after the synthesis pipeline runs.
 -- updated_at is bumped by the records_set_updated_at trigger.
 UPDATE records SET
-    body              = @body,
-    reliability       = @reliability,
-    topic             = @topic,
-    gate_reason       = @gate_reason,
-    synthesised       = true,
-    embedding         = @embedding,
-    embedding_model   = @embedding_model,
-    embedding_version = @embedding_version
+    body               = @body,
+    reliability        = @reliability,
+    topic              = @topic,
+    gate_reason        = @gate_reason,
+    synthesised        = true,
+    embedding          = @embedding,
+    embedding_model    = @embedding_model,
+    embedding_version  = @embedding_version,
+    capture_minio_key  = @capture_minio_key,
+    capture_size_bytes = @capture_size_bytes
 WHERE id = @id;
 
 -- name: SetRecordExtractedText :exec

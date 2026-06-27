@@ -307,3 +307,30 @@ func TestHandlerTrace_RejectsMissingKindMessage(t *testing.T) {
 		t.Errorf("status = %d, want 400 for missing kind/message", resp.StatusCode)
 	}
 }
+
+// --- GET /attach/{sha} + /capture/{sha} guards (no PG) -------------
+//
+// Phase D2a: these read the Postgres SoR. The unit rig wires a fake attach
+// store but NO Postgres, so resolvePG → ErrPostgresDisabled and both
+// handlers must 503 ("postgres not configured") rather than panic or fall
+// through. The live PG read (200/404) is covered in the integration suite
+// (handlers_get_integration_test.go). validSHA() keeps the request past
+// SHA-shape rejection so the PG guard is what's under test.
+
+func TestHandlerAttachGet_NoPGIs503(t *testing.T) {
+	r := newRouterRig(t)
+	resp := r.do(t, http.MethodGet, "/api/brain/attach/"+validSHA(), nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 when PG disabled", resp.StatusCode)
+	}
+}
+
+func TestHandlerCaptureGet_NoPGIs503(t *testing.T) {
+	r := newRouterRig(t)
+	resp := r.do(t, http.MethodGet, "/api/brain/capture/"+validSHA(), nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 when PG disabled", resp.StatusCode)
+	}
+}

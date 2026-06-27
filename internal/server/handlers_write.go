@@ -561,21 +561,25 @@ func (d *Daemon) handleTrace(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
-// handleAttachGet / handleCaptureGet still read the LEGACY OpenSearch
-// indices (pb_attachments / pb_summaries) for the presign metadata. Phase
-// D1 stopped WRITING those indices, so these GET paths only work for docs
-// written before the cutover; they will be migrated to read the Postgres
-// SoR / pb_records in the D2 follow-up. capture/{sha} additionally has no
-// SoR column for capture_minio_key yet (see synth_queue.go).
+// handleAttachGet / handleCaptureGet read the Postgres SoR (records) for
+// the presign metadata (Phase D2a). The blob bytes still live in MinIO;
+// these handlers look up the record by (profile, vault, sha), then presign
+// the stored MinIO key. Post-cutover docs are written ONLY to the SoR, so
+// these reads cover them; the legacy OpenSearch read paths were retired.
 func (d *Daemon) handleAttachGet(w http.ResponseWriter, r *http.Request) {
-	if d.osClient == nil || d.attach == nil {
+	if d.attach == nil {
 		WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
-			"attach get disabled (opensearch or attachment store missing)", nil)
+			"attach get disabled (attachment store missing)", nil)
 		return
 	}
 	binding, _ := BindingFromContext(r.Context())
-	osc, err := d.resolveOS(binding)
+	view, err := d.resolvePG(binding)
 	if err != nil {
+		if errors.Is(err, ErrPostgresDisabled) {
+			WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
+				"attach get disabled (postgres not configured for binding)", nil)
+			return
+		}
 		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
 		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
 		return
@@ -592,17 +596,26 @@ func (d *Daemon) handleAttachGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	doc, err := osc.GetAttachment(r.Context(), binding.Key.Profile, binding.Key.Vault, sha)
+	q := pgstore.New(view.Pool())
+	rec, err := q.GetRecordBySHA(r.Context(), pgdb.GetRecordBySHAParams{
+		Profile: binding.Key.Profile,
+		Vault:   binding.Key.Vault,
+		Sha:     sha,
+	})
 	if err != nil {
+		if errIsNoRows(err) {
+			WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound, "attachment not found", nil)
+			return
+		}
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
-			"opensearch get failed: "+err.Error(), nil)
+			"postgres get failed: "+err.Error(), nil)
 		return
 	}
-	if doc == nil {
+	if !rec.MinioKey.Valid || rec.MinioKey.String == "" {
 		WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound, "attachment not found", nil)
 		return
 	}
-	url, err := attach.PresignGet(r.Context(), doc.MinIOKey, 10*time.Minute)
+	url, err := attach.PresignGet(r.Context(), rec.MinioKey.String, 10*time.Minute)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"presign failed: "+err.Error(), nil)
@@ -610,12 +623,12 @@ func (d *Daemon) handleAttachGet(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"sha":         doc.SHA,
-		"original":    doc.OriginalFilename,
-		"mime_type":   doc.MIMEType,
-		"size_bytes":  doc.SizeBytes,
-		"url":         url,
-		"expires_in":  600,
+		"sha":        rec.Sha,
+		"original":   rec.OriginalFilename.String,
+		"mime_type":  rec.MimeType.String,
+		"size_bytes": rec.SizeBytes.Int64,
+		"url":        url,
+		"expires_in": 600,
 	})
 }
 
@@ -624,14 +637,19 @@ func (d *Daemon) handleAttachGet(w http.ResponseWriter, r *http.Request) {
 // off, the URL was unreachable at synth time, or the doc isn't
 // from a URL source (brain_learn, task_summary).
 func (d *Daemon) handleCaptureGet(w http.ResponseWriter, r *http.Request) {
-	if d.osClient == nil || d.attach == nil {
+	if d.attach == nil {
 		WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
-			"capture get disabled (opensearch or attachment store missing)", nil)
+			"capture get disabled (attachment store missing)", nil)
 		return
 	}
 	binding, _ := BindingFromContext(r.Context())
-	osc, err := d.resolveOS(binding)
+	view, err := d.resolvePG(binding)
 	if err != nil {
+		if errors.Is(err, ErrPostgresDisabled) {
+			WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
+				"capture get disabled (postgres not configured for binding)", nil)
+			return
+		}
 		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
 		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
 		return
@@ -647,22 +665,28 @@ func (d *Daemon) handleCaptureGet(w http.ResponseWriter, r *http.Request) {
 		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error(), nil)
 		return
 	}
-	doc, err := osc.GetSummary(r.Context(), binding.Key.Profile, binding.Key.Vault, sha)
+	q := pgstore.New(view.Pool())
+	rec, err := q.GetRecordBySHA(r.Context(), pgdb.GetRecordBySHAParams{
+		Profile: binding.Key.Profile,
+		Vault:   binding.Key.Vault,
+		Sha:     sha,
+	})
 	if err != nil {
+		if errIsNoRows(err) {
+			WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound,
+				"no capture stored for this doc (capture disabled, URL absent, or fetch failed)", nil)
+			return
+		}
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
-			"opensearch get failed: "+err.Error(), nil)
+			"postgres get failed: "+err.Error(), nil)
 		return
 	}
-	if doc == nil {
-		WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound, "summary not found", nil)
-		return
-	}
-	if doc.CaptureMinIOKey == "" {
+	if !rec.CaptureMinioKey.Valid || rec.CaptureMinioKey.String == "" {
 		WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound,
 			"no capture stored for this doc (capture disabled, URL absent, or fetch failed)", nil)
 		return
 	}
-	url, err := attach.PresignGet(r.Context(), doc.CaptureMinIOKey, 10*time.Minute)
+	url, err := attach.PresignGet(r.Context(), rec.CaptureMinioKey.String, 10*time.Minute)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"presign failed: "+err.Error(), nil)
@@ -670,11 +694,11 @@ func (d *Daemon) handleCaptureGet(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"sha":         doc.SHA,
-		"source_url":  doc.SourceURL,
-		"size_bytes":  doc.CaptureSizeBytes,
-		"url":         url,
-		"expires_in":  600,
+		"sha":        rec.Sha,
+		"source_url": rec.SourceUrl.String,
+		"size_bytes": rec.CaptureSizeBytes.Int64,
+		"url":        url,
+		"expires_in": 600,
 	})
 }
 

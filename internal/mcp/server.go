@@ -29,6 +29,13 @@ type recallClient interface {
 	Recall(ctx context.Context, req brain.RecallRequest) (*brain.RecallResponse, error)
 }
 
+// fetchClient is the minimal seam handleFetch needs from the daemon HTTP
+// client for online fetch (Phase D2a). *brain.Client satisfies it; tests
+// inject a fake. Like recallClient, kept deliberately tiny — one method.
+type fetchClient interface {
+	Fetch(ctx context.Context, sha string) (*brain.FetchResponse, error)
+}
+
 // ServerDeps is the dependency container the MCP tool handlers close
 // over.
 type ServerDeps struct {
@@ -73,6 +80,14 @@ type ServerDeps struct {
 	// clear "online-only, not configured" error. In production it is the
 	// same *brain.Client as Client; tests inject a fake.
 	RecallClient recallClient
+
+	// FetchClient is the seam brain_fetch uses for online fetch (Phase
+	// D2a). brain_fetch is ONLINE-ONLY — it reads the daemon's Postgres
+	// SoR by SHA (no local-snapshot fallback). REQUIRED in production; a
+	// nil client makes brain_fetch return a clear "online-only, not
+	// configured" error. In production it is the same *brain.Client as
+	// Client; tests inject a fake.
+	FetchClient fetchClient
 }
 
 // Server is the MCP tool registry. Construct once per process, hand

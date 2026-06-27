@@ -30,7 +30,7 @@ func (q *Queries) CountUnsynthesised(ctx context.Context, arg CountUnsynthesised
 }
 
 const getRecordByID = `-- name: GetRecordByID :one
-SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version FROM records WHERE id = $1
+SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes FROM records WHERE id = $1
 `
 
 func (q *Queries) GetRecordByID(ctx context.Context, id int64) (Record, error) {
@@ -64,12 +64,14 @@ func (q *Queries) GetRecordByID(ctx context.Context, id int64) (Record, error) {
 		&i.Embedding,
 		&i.EmbeddingModel,
 		&i.EmbeddingVersion,
+		&i.CaptureMinioKey,
+		&i.CaptureSizeBytes,
 	)
 	return i, err
 }
 
 const getRecordBySHA = `-- name: GetRecordBySHA :one
-SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version FROM records
+SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes FROM records
 WHERE profile = $1 AND vault = $2 AND sha = $3
 `
 
@@ -110,12 +112,14 @@ func (q *Queries) GetRecordBySHA(ctx context.Context, arg GetRecordBySHAParams) 
 		&i.Embedding,
 		&i.EmbeddingModel,
 		&i.EmbeddingVersion,
+		&i.CaptureMinioKey,
+		&i.CaptureSizeBytes,
 	)
 	return i, err
 }
 
 const listUnsynthesised = `-- name: ListUnsynthesised :many
-SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version FROM records
+SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes FROM records
 WHERE profile = $1 AND vault = $2 AND NOT synthesised
 ORDER BY id
 LIMIT $3
@@ -166,6 +170,8 @@ func (q *Queries) ListUnsynthesised(ctx context.Context, arg ListUnsynthesisedPa
 			&i.Embedding,
 			&i.EmbeddingModel,
 			&i.EmbeddingVersion,
+			&i.CaptureMinioKey,
+			&i.CaptureSizeBytes,
 		); err != nil {
 			return nil, err
 		}
@@ -179,15 +185,17 @@ func (q *Queries) ListUnsynthesised(ctx context.Context, arg ListUnsynthesisedPa
 
 const markRecordSynthesised = `-- name: MarkRecordSynthesised :exec
 UPDATE records SET
-    body              = $1,
-    reliability       = $2,
-    topic             = $3,
-    gate_reason       = $4,
-    synthesised       = true,
-    embedding         = $5,
-    embedding_model   = $6,
-    embedding_version = $7
-WHERE id = $8
+    body               = $1,
+    reliability        = $2,
+    topic              = $3,
+    gate_reason        = $4,
+    synthesised        = true,
+    embedding          = $5,
+    embedding_model    = $6,
+    embedding_version  = $7,
+    capture_minio_key  = $8,
+    capture_size_bytes = $9
+WHERE id = $10
 `
 
 type MarkRecordSynthesisedParams struct {
@@ -198,6 +206,8 @@ type MarkRecordSynthesisedParams struct {
 	Embedding        *pgvector.Vector
 	EmbeddingModel   pgtype.Text
 	EmbeddingVersion pgtype.Text
+	CaptureMinioKey  pgtype.Text
+	CaptureSizeBytes pgtype.Int8
 	ID               int64
 }
 
@@ -212,6 +222,8 @@ func (q *Queries) MarkRecordSynthesised(ctx context.Context, arg MarkRecordSynth
 		arg.Embedding,
 		arg.EmbeddingModel,
 		arg.EmbeddingVersion,
+		arg.CaptureMinioKey,
+		arg.CaptureSizeBytes,
 		arg.ID,
 	)
 	return err
@@ -244,7 +256,7 @@ INSERT INTO records (
     $12, $13, $14, $15
 )
 ON CONFLICT (profile, vault, sha) DO NOTHING
-RETURNING id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version
+RETURNING id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes
 `
 
 type UpsertRecordParams struct {
@@ -316,6 +328,8 @@ func (q *Queries) UpsertRecord(ctx context.Context, arg UpsertRecordParams) (Rec
 		&i.Embedding,
 		&i.EmbeddingModel,
 		&i.EmbeddingVersion,
+		&i.CaptureMinioKey,
+		&i.CaptureSizeBytes,
 	)
 	return i, err
 }

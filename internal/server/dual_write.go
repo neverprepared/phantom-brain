@@ -155,6 +155,13 @@ type synthResult struct {
 	Embedding      []float32
 	EmbeddingModel string
 
+	// CaptureMinIOKey / CaptureSizeBytes carry the raw-source capture
+	// pointer the synth pass stashed in MinIO (best-effort, gated on
+	// [capture]). Empty/zero when capture is off, the source had no URL,
+	// or the fetch failed — writeSynthResult then persists SQL NULL.
+	CaptureMinIOKey  string
+	CaptureSizeBytes int64
+
 	// EntityNames maps entity slug → display name, faithful to the synth
 	// loop's parallel entities[]/entitySlugs[] (names + their slugs).
 	EntityNames map[string]string
@@ -208,13 +215,15 @@ func (d *Daemon) writeSynthResult(ctx context.Context, b VaultBinding, profile, 
 	}
 
 	if err := q.MarkRecordSynthesised(ctx2, pgdb.MarkRecordSynthesisedParams{
-		Body:           optText(res.Body),
-		Reliability:    optText(res.Reliability),
-		Topic:          optText(res.Topic),
-		GateReason:     optText(res.GateReason),
-		Embedding:      optVector(res.Embedding),
-		EmbeddingModel: optText(res.EmbeddingModel),
-		ID:             rec.ID,
+		Body:             optText(res.Body),
+		Reliability:      optText(res.Reliability),
+		Topic:            optText(res.Topic),
+		GateReason:       optText(res.GateReason),
+		Embedding:        optVector(res.Embedding),
+		EmbeddingModel:   optText(res.EmbeddingModel),
+		CaptureMinioKey:  optText(res.CaptureMinIOKey),
+		CaptureSizeBytes: optInt8(res.CaptureSizeBytes),
+		ID:               rec.ID,
 	}); err != nil {
 		d.noteSoRWriteFailure("synth-mark", profile, vault, sha, err)
 		return err
@@ -331,6 +340,16 @@ func optTimestamptz(t *time.Time) pgtype.Timestamptz {
 		return pgtype.Timestamptz{}
 	}
 	return pgtype.Timestamptz{Time: *t, Valid: true}
+}
+
+// optInt8 returns a NULL pgtype.Int8 for a non-positive value, else a
+// valid one. Mirrors the >0 guard used for attachment size_bytes so an
+// absent/zero capture size lands as SQL NULL rather than 0.
+func optInt8(n int64) pgtype.Int8 {
+	if n <= 0 {
+		return pgtype.Int8{}
+	}
+	return pgtype.Int8{Int64: n, Valid: true}
 }
 
 // optVector returns nil for an empty embedding (pgvector column stays

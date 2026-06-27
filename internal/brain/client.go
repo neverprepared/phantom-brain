@@ -369,6 +369,31 @@ func (c *Client) Recall(ctx context.Context, req RecallRequest) (*RecallResponse
 	return &out, nil
 }
 
+// FetchResponse is the 200 body of GET /api/brain/fetch/{sha}. Mirrors
+// server.FetchDTO field-for-field (identical JSON tags). Body is the full
+// (untruncated) stored document — the read companion to Recall's snippet.
+type FetchResponse struct {
+	SHA        string   `json:"sha"`
+	Title      string   `json:"title"`
+	Kind       string   `json:"kind"`
+	SourcePath string   `json:"source_path,omitempty"`
+	SourceURL  string   `json:"source_url,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
+	Body       string   `json:"body"`
+}
+
+// Fetch GETs the full body of one record by SHA from the daemon. Transport
+// failures wrap ErrDaemonUnreachable; non-2xx (e.g. 404 unknown SHA, 503
+// when online fetch isn't enabled for the binding) returns the decoded
+// *APIError. brain_fetch is online-only and surfaces either as a tool error.
+func (c *Client) Fetch(ctx context.Context, sha string) (*FetchResponse, error) {
+	var out FetchResponse
+	if err := c.do(ctx, http.MethodGet, "/api/brain/fetch/"+sha, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // AttachGet retrieves a presigned URL the agent can fetch to pull
 // the binary. Returns *APIError 404 when the SHA isn't in this
 // vault's attachments index.

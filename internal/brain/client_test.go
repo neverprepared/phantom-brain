@@ -160,6 +160,63 @@ func TestClient_UploadTarball(t *testing.T) {
 	}
 }
 
+// TestClient_Fetch covers the Phase D2a online-fetch path: GET
+// /api/brain/fetch/{sha} with the bearer token, decoding the FetchResponse.
+func TestClient_Fetch(t *testing.T) {
+	want := FetchResponse{
+		SHA:       "deadbeef",
+		Title:     "A Doc",
+		Kind:      "note",
+		SourceURL: "https://example.com/x",
+		Tags:      []string{"a", "b"},
+		Body:      "the full body",
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %q, want GET", r.Method)
+		}
+		if r.URL.Path != "/api/brain/fetch/deadbeef" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer tok" {
+			t.Errorf("missing bearer; got %q", r.Header.Get("Authorization"))
+		}
+		_ = json.NewEncoder(w).Encode(want)
+	}))
+	defer ts.Close()
+	c, _ := NewClient(ClientOpts{BaseURL: ts.URL, Token: "tok"})
+	got, err := c.Fetch(context.Background(), "deadbeef")
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if got.SHA != want.SHA || got.Title != want.Title || got.Body != want.Body {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+	if len(got.Tags) != 2 {
+		t.Errorf("tags = %v", got.Tags)
+	}
+}
+
+// TestClient_Fetch_NotFound: a 404 envelope decodes to *APIError so
+// brain_fetch can render the friendly "no such doc" message.
+func TestClient_Fetch_NotFound(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":{"code":"NOT_FOUND","message":"no document with that SHA"}}`)
+	}))
+	defer ts.Close()
+	c, _ := NewClient(ClientOpts{BaseURL: ts.URL, Token: "tok"})
+	_, err := c.Fetch(context.Background(), "deadbeef")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err is not *APIError: %T %v", err, err)
+	}
+	if apiErr.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", apiErr.StatusCode)
+	}
+}
+
 // ShipQueue + /merge tests removed in Phase 6 — agents POST writes
 // to the daemon during life, so death produces no payload and the
 // /merge handshake is retired.

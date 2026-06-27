@@ -307,6 +307,9 @@ func runMCPAgentMode() error {
 		// there is no local-snapshot fallback. Same HTTP client as Client —
 		// RecallClient is a narrow seam for testability.
 		RecallClient: daemonClient,
+		// Phase D2a: brain_fetch is ONLINE-ONLY too — it reads the daemon's
+		// Postgres SoR by SHA. Same HTTP client as Client/RecallClient.
+		FetchClient: daemonClient,
 	}).Register(srv)
 
 	// Serve in a goroutine so signals can interrupt cleanly.
