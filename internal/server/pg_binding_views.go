@@ -112,7 +112,7 @@ func (s *pgSynthStore) Fetch(ctx context.Context, profile, vault, sha string) (*
 func (s *pgSynthStore) SetExtractedText(ctx context.Context, recordID int64, text string) error {
 	q := pgstore.New(s.view.Pool())
 	return q.SetRecordExtractedText(ctx, pgdb.SetRecordExtractedTextParams{
-		ExtractedText: optText(text),
+		ExtractedText: pgstore.OptText(text),
 		ID:            recordID,
 	})
 }

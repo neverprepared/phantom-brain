@@ -2,7 +2,6 @@ package server
 
 import (
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -65,7 +64,8 @@ type RecallResponse struct {
 //   - 400 BAD_REQUEST          — empty query / malformed JSON
 //   - 503 STORAGE_BACKEND_ERROR — online recall not enabled for this
 //     binding (Postgres not configured): resolvePG → ErrPostgresDisabled
-//   - 500 INTERNAL_ERROR       — other binding-resolution failure
+//   - 500 STORAGE_BACKEND_ERROR — other binding-resolution failure
+//     (canonicalised via resolvePGOrError; was INTERNAL_ERROR pre-audit-D)
 //   - 502 STORAGE_BACKEND_ERROR — Recaller (OpenSearch) query failed
 func (d *Daemon) handleRecall(w http.ResponseWriter, r *http.Request) {
 	binding, ok := BindingFromContext(r.Context())
@@ -88,15 +88,8 @@ func (d *Daemon) handleRecall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	view, err := d.resolvePG(binding)
-	if err != nil {
-		if errors.Is(err, ErrPostgresDisabled) {
-			WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
-				"online recall not enabled for this binding", nil)
-			return
-		}
-		d.Logger.Error("phantom-brain: recall binding configuration error", slog.String("err", err.Error()))
-		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeInternal, "binding configuration error", nil)
+	view, ok := d.resolvePGOrError(w, binding, "online recall")
+	if !ok {
 		return
 	}
 

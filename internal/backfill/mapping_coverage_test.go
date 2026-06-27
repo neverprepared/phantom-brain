@@ -157,62 +157,8 @@ func TestSummaryDocToUpsertParams_NulStrippedFromTitleAndBody(t *testing.T) {
 	}
 }
 
-func TestOptText(t *testing.T) {
-	tests := []struct {
-		in        string
-		wantValid bool
-		wantStr   string
-	}{
-		{"", false, ""},
-		{"hello", true, "hello"},
-		{"\x00\x00", false, ""}, // sanitises to empty -> invalid
-		{"a\x00b", true, "ab"},
-	}
-	for _, tt := range tests {
-		got := optText(tt.in)
-		if got.Valid != tt.wantValid || got.String != tt.wantStr {
-			t.Errorf("optText(%q) = {%q,%v}, want {%q,%v}", tt.in, got.String, got.Valid, tt.wantStr, tt.wantValid)
-		}
-	}
-}
-
-func TestOptTimestamptz(t *testing.T) {
-	if got := optTimestamptz(nil); got.Valid {
-		t.Errorf("optTimestamptz(nil) Valid = true, want false")
-	}
-	now := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
-	got := optTimestamptz(&now)
-	if !got.Valid || !got.Time.Equal(now) {
-		t.Errorf("optTimestamptz(&now) = %+v, want valid %v", got, now)
-	}
-}
-
-func TestOptVector(t *testing.T) {
-	if got := optVector(nil); got != nil {
-		t.Errorf("optVector(nil) = %v, want nil", got)
-	}
-	if got := optVector([]float32{}); got != nil {
-		t.Errorf("optVector(empty) = %v, want nil", got)
-	}
-	emb := []float32{0.1, 0.2, 0.3}
-	got := optVector(emb)
-	if got == nil {
-		t.Fatalf("optVector(non-empty) = nil")
-	}
-	if slice := got.Slice(); len(slice) != 3 || slice[0] != 0.1 || slice[2] != 0.3 {
-		t.Errorf("optVector slice = %v, want %v", slice, emb)
-	}
-}
-
-func TestNonNilStrings(t *testing.T) {
-	if got := nonNilStrings(nil); got == nil || len(got) != 0 {
-		t.Errorf("nonNilStrings(nil) = %#v, want non-nil empty", got)
-	}
-	got := nonNilStrings([]string{"a\x00", "b"})
-	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
-		t.Errorf("nonNilStrings sanitise = %v", got)
-	}
-}
+// The opt*/nonNilStrings mappers moved to internal/pgstore (audit set D, D2);
+// their unit tests now live in pgstore/mappers_test.go.
 
 func TestVaultStats_noteErr_CapsSampleErrors(t *testing.T) {
 	var vs VaultStats

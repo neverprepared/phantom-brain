@@ -73,8 +73,8 @@ func (s *Server) ingestMarkdown(ctx context.Context, p ingestParams) (*ingestRes
 	}
 
 	fm := map[string]any{
-		"title":      p.Title,
-		p.StampKey:   time.Now().UTC().Format(time.RFC3339),
+		"title":    p.Title,
+		p.StampKey: time.Now().UTC().Format(time.RFC3339),
 	}
 	if p.SourceURL != "" {
 		fm["source_url"] = p.SourceURL
@@ -111,7 +111,7 @@ func (s *Server) ingestMarkdown(ctx context.Context, p ingestParams) (*ingestRes
 	// return a clear error rather than silently dropping the write.
 	client := lifecycleClient(s)
 	if client == nil {
-		return nil, "daemon client not configured (set CL_BRAIN_API / CL_BRAIN_API_TOKEN); writes are daemon-only", false
+		return nil, errDaemonClientUnconfigured, false
 	}
 	{
 		dest := relativeRawPath(p.Subdir, p.Filename, p.Title)
@@ -196,6 +196,12 @@ func (s *Server) ingestMarkdown(ctx context.Context, p ingestParams) (*ingestRes
 		return &ingestResult{Status: "stored", RelativePath: dest, SHA: sha, Notice: notice}, "", true
 	}
 }
+
+// errDaemonClientUnconfigured is the single user-facing message the write
+// tools return when no daemon client is wired (Phase D2b: writes are
+// daemon-only). Kept in one place so the env-var guidance can't drift
+// between attach.go and ingest.go.
+const errDaemonClientUnconfigured = "daemon client not configured (set CL_BRAIN_API / CL_BRAIN_API_TOKEN); writes are daemon-only"
 
 // lifecycleClient returns the daemon client if one is wired (either
 // injected directly via deps.Client or derived from deps.Lifecycle).

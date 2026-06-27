@@ -17,81 +17,9 @@ func pgTimestamptz(t time.Time) pgtype.Timestamptz {
 	return pgtype.Timestamptz{Time: t, Valid: true}
 }
 
-// --- small mapping helpers ----------------------------------------
-
-func TestOptText(t *testing.T) {
-	if got := optText(""); got.Valid {
-		t.Errorf("empty string should map to NULL, got valid=%v", got.Valid)
-	}
-	if got := optText("hello"); !got.Valid || got.String != "hello" {
-		t.Errorf("non-empty should map to valid text, got %+v", got)
-	}
-	// NUL-only string sanitizes to "" → NULL.
-	if got := optText("\x00"); got.Valid {
-		t.Errorf("NUL-only string should sanitize to empty → NULL, got %+v", got)
-	}
-	// Embedded NUL is stripped but the rest survives.
-	if got := optText("a\x00b"); !got.Valid || got.String != "ab" {
-		t.Errorf("embedded NUL should be stripped, got %+v", got)
-	}
-}
-
-func TestOptTimestamptz(t *testing.T) {
-	if got := optTimestamptz(nil); got.Valid {
-		t.Errorf("nil time should map to NULL, got valid=%v", got.Valid)
-	}
-	now := time.Date(2026, 6, 27, 10, 0, 0, 0, time.UTC)
-	got := optTimestamptz(&now)
-	if !got.Valid || !got.Time.Equal(now) {
-		t.Errorf("non-nil time should map to valid, got %+v", got)
-	}
-}
-
-func TestOptInt8(t *testing.T) {
-	for _, n := range []int64{0, -1, -1000} {
-		if got := optInt8(n); got.Valid {
-			t.Errorf("optInt8(%d) should be NULL, got valid=%v", n, got.Valid)
-		}
-	}
-	if got := optInt8(42); !got.Valid || got.Int64 != 42 {
-		t.Errorf("optInt8(42) should be valid 42, got %+v", got)
-	}
-}
-
-func TestOptVector(t *testing.T) {
-	if got := optVector(nil); got != nil {
-		t.Errorf("nil embedding should map to nil vector, got %+v", got)
-	}
-	if got := optVector([]float32{}); got != nil {
-		t.Errorf("empty embedding should map to nil vector, got %+v", got)
-	}
-	emb := []float32{0.1, 0.2, 0.3}
-	got := optVector(emb)
-	if got == nil {
-		t.Fatal("non-empty embedding should map to a vector, got nil")
-	}
-	slice := got.Slice()
-	if len(slice) != len(emb) {
-		t.Fatalf("vector length = %d, want %d", len(slice), len(emb))
-	}
-	for i := range emb {
-		if slice[i] != emb[i] {
-			t.Errorf("vector[%d] = %v, want %v", i, slice[i], emb[i])
-		}
-	}
-}
-
-func TestNonNilStrings(t *testing.T) {
-	if got := nonNilStrings(nil); got == nil {
-		t.Error("nil input must become a non-nil slice (NOT NULL DEFAULT '{}')")
-	} else if len(got) != 0 {
-		t.Errorf("nil input should become empty slice, got %v", got)
-	}
-	got := nonNilStrings([]string{"a\x00", "b"})
-	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
-		t.Errorf("NULs should be stripped per element, got %v", got)
-	}
-}
+// The opt*/nonNilStrings mappers moved to internal/pgstore (audit set D, D2);
+// their unit tests now live in pgstore/mappers_test.go. The tests below cover
+// the server-package mapping shims that consume them.
 
 func TestSummaryDocToUpsertParams(t *testing.T) {
 	captured := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)

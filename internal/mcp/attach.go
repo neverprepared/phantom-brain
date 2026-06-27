@@ -127,7 +127,7 @@ func (s *Server) handleAttach(ctx context.Context, req mcp.CallToolRequest) (*mc
 	// configured — return a clear error rather than dropping the write.
 	client := lifecycleClient(s)
 	if client == nil {
-		return mcp.NewToolResultError("daemon client not configured (set CL_BRAIN_API / CL_BRAIN_API_TOKEN); writes are daemon-only"), nil
+		return mcp.NewToolResultError(errDaemonClientUnconfigured), nil
 	}
 	{
 		mimeType := strings.TrimSpace(contentType)

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
 
 	"github.com/neverprepared/phantom-brain/internal/pgstore"
@@ -41,15 +40,8 @@ type ForgetResponse struct {
 
 func (d *Daemon) handleReflect(w http.ResponseWriter, r *http.Request) {
 	binding, _ := BindingFromContext(r.Context())
-	view, err := d.resolvePG(binding)
-	if err != nil {
-		if errors.Is(err, ErrPostgresDisabled) {
-			WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
-				"postgres not configured; reflect disabled", nil)
-			return
-		}
-		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
-		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
+	view, ok := d.resolvePGOrError(w, binding, "reflect")
+	if !ok {
 		return
 	}
 
@@ -69,21 +61,13 @@ func (d *Daemon) handleReflect(w http.ResponseWriter, r *http.Request) {
 
 func (d *Daemon) handleForget(w http.ResponseWriter, r *http.Request) {
 	binding, _ := BindingFromContext(r.Context())
-	view, err := d.resolvePG(binding)
-	if err != nil {
-		if errors.Is(err, ErrPostgresDisabled) {
-			WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
-				"postgres not configured; forget disabled", nil)
-			return
-		}
-		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
-		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
+	view, ok := d.resolvePGOrError(w, binding, "forget")
+	if !ok {
 		return
 	}
 
 	var req ForgetRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid JSON body", nil)
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	if err := validateSHA(req.SHA); err != nil {

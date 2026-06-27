@@ -7,9 +7,6 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
-
-	"github.com/neverprepared/phantom-brain/internal/pgstore"
-	"github.com/neverprepared/phantom-brain/internal/pgstore/pgdb"
 )
 
 // FetchDTO is the 200 body of GET /api/brain/fetch/{sha}. It carries the
@@ -34,7 +31,8 @@ type FetchDTO struct {
 //   - 400 BAD_REQUEST           — malformed SHA
 //   - 404 NOT_FOUND             — no record for that SHA
 //   - 503 STORAGE_BACKEND_ERROR — Postgres not enabled for this binding
-//   - 500 INTERNAL_ERROR        — other binding-resolution failure
+//   - 500 STORAGE_BACKEND_ERROR — other binding-resolution failure
+//     (canonicalised via resolvePGOrError; was INTERNAL_ERROR pre-audit-D)
 //   - 502 STORAGE_BACKEND_ERROR — Postgres query failed
 func (d *Daemon) handleFetch(w http.ResponseWriter, r *http.Request) {
 	binding, ok := BindingFromContext(r.Context())
@@ -50,26 +48,14 @@ func (d *Daemon) handleFetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	view, err := d.resolvePG(binding)
-	if err != nil {
-		if errors.Is(err, ErrPostgresDisabled) {
-			WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
-				"online fetch not enabled for this binding", nil)
-			return
-		}
-		d.Logger.Error("phantom-brain: fetch binding configuration error", slog.String("err", err.Error()))
-		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeInternal, "binding configuration error", nil)
+	view, ok := d.resolvePGOrError(w, binding, "online fetch")
+	if !ok {
 		return
 	}
 
-	q := pgstore.New(view.Pool())
-	rec, err := q.GetRecordBySHA(r.Context(), pgdb.GetRecordBySHAParams{
-		Profile: binding.Key.Profile,
-		Vault:   binding.Key.Vault,
-		Sha:     sha,
-	})
+	rec, err := d.getRecordBySHA(r.Context(), view, binding, sha)
 	if err != nil {
-		if errIsNoRows(err) {
+		if errors.Is(err, errRecordNotFound) {
 			WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound, "no document with that SHA", nil)
 			return
 		}

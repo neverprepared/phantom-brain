@@ -8,7 +8,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
-	pgvector "github.com/pgvector/pgvector-go"
 
 	"github.com/neverprepared/phantom-brain/internal/osearch"
 	"github.com/neverprepared/phantom-brain/internal/pgstore"
@@ -99,14 +98,14 @@ func summaryDocToUpsertParams(doc osearch.SummaryDoc) pgdb.UpsertRecordParams {
 		Vault:      doc.Vault,
 		Sha:        doc.SHA,
 		Kind:       osearch.SoRKind(doc.Kind),
-		MemoryType: optText(string(doc.MemoryType)),
+		MemoryType: pgstore.OptText(string(doc.MemoryType)),
 		Title:      pgstore.SanitizeText(doc.Title),
-		RawBody:    optText(doc.RawBody),
-		SourceUrl:  optText(doc.SourceURL),
-		Source:     nonNilStrings(doc.Source),
-		Tags:       nonNilStrings(doc.Tags),
-		CapturedAt: optTimestamptz(doc.CapturedAt),
-		Embedding:  optVector(doc.Embedding),
+		RawBody:    pgstore.OptText(doc.RawBody),
+		SourceUrl:  pgstore.OptText(doc.SourceURL),
+		Source:     pgstore.NonNilStrings(doc.Source),
+		Tags:       pgstore.NonNilStrings(doc.Tags),
+		CapturedAt: pgstore.OptTimestamptz(doc.CapturedAt),
+		Embedding:  pgstore.OptVector(doc.Embedding),
 	}
 }
 
@@ -129,9 +128,9 @@ func (d *Daemon) writeAttachRecord(ctx context.Context, b VaultBinding, stub ose
 	defer cancel()
 
 	params := summaryDocToUpsertParams(stub)
-	params.MinioKey = optText(att.MinIOKey)
-	params.MimeType = optText(att.MIMEType)
-	params.OriginalFilename = optText(att.OriginalFilename)
+	params.MinioKey = pgstore.OptText(att.MinIOKey)
+	params.MimeType = pgstore.OptText(att.MIMEType)
+	params.OriginalFilename = pgstore.OptText(att.OriginalFilename)
 	if att.SizeBytes > 0 {
 		params.SizeBytes = pgtype.Int8{Int64: att.SizeBytes, Valid: true}
 	}
@@ -218,14 +217,14 @@ func (d *Daemon) writeSynthResult(ctx context.Context, b VaultBinding, profile, 
 	}
 
 	if err := q.MarkRecordSynthesised(ctx2, pgdb.MarkRecordSynthesisedParams{
-		Body:             optText(res.Body),
-		Reliability:      optText(res.Reliability),
-		Topic:            optText(res.Topic),
-		GateReason:       optText(res.GateReason),
-		Embedding:        optVector(res.Embedding),
-		EmbeddingModel:   optText(res.EmbeddingModel),
-		CaptureMinioKey:  optText(res.CaptureMinIOKey),
-		CaptureSizeBytes: optInt8(res.CaptureSizeBytes),
+		Body:             pgstore.OptText(res.Body),
+		Reliability:      pgstore.OptText(res.Reliability),
+		Topic:            pgstore.OptText(res.Topic),
+		GateReason:       pgstore.OptText(res.GateReason),
+		Embedding:        pgstore.OptVector(res.Embedding),
+		EmbeddingModel:   pgstore.OptText(res.EmbeddingModel),
+		CaptureMinioKey:  pgstore.OptText(res.CaptureMinIOKey),
+		CaptureSizeBytes: pgstore.OptInt8(res.CaptureSizeBytes),
 		ID:               rec.ID,
 	}); err != nil {
 		d.noteSoRWriteFailure("synth-mark", profile, vault, sha, err)
@@ -322,53 +321,4 @@ func pgRecordToSummaryDoc(rec pgdb.Record) osearch.SummaryDoc {
 		doc.Embedding = rec.Embedding.Slice()
 	}
 	return doc
-}
-
-// --- small mapping helpers ----------------------------------------
-
-// optText returns a NULL pgtype.Text for an empty string, else a valid
-// one. Keeps empty optional fields out of the SoR as SQL NULL.
-func optText(s string) pgtype.Text {
-	s = pgstore.SanitizeText(s)
-	if s == "" {
-		return pgtype.Text{}
-	}
-	return pgtype.Text{String: s, Valid: true}
-}
-
-// optTimestamptz returns a NULL pgtype.Timestamptz for a nil time, else a
-// valid one.
-func optTimestamptz(t *time.Time) pgtype.Timestamptz {
-	if t == nil {
-		return pgtype.Timestamptz{}
-	}
-	return pgtype.Timestamptz{Time: *t, Valid: true}
-}
-
-// optInt8 returns a NULL pgtype.Int8 for a non-positive value, else a
-// valid one. Mirrors the >0 guard used for attachment size_bytes so an
-// absent/zero capture size lands as SQL NULL rather than 0.
-func optInt8(n int64) pgtype.Int8 {
-	if n <= 0 {
-		return pgtype.Int8{}
-	}
-	return pgtype.Int8{Int64: n, Valid: true}
-}
-
-// optVector returns nil for an empty embedding (pgvector column stays
-// NULL), else a *pgvector.Vector. An empty slice maps to NULL, never a
-// zero vector.
-func optVector(emb []float32) *pgvector.Vector {
-	if len(emb) == 0 {
-		return nil
-	}
-	v := pgvector.NewVector(emb)
-	return &v
-}
-
-// nonNilStrings guarantees a non-nil slice for NOT NULL DEFAULT '{}'
-// columns (records.source / records.tags). A nil input becomes an empty
-// (non-nil) slice so pgx sends '{}' rather than NULL.
-func nonNilStrings(in []string) []string {
-	return pgstore.SanitizeTexts(in)
 }

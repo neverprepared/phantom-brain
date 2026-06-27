@@ -20,12 +20,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
-	pgvector "github.com/pgvector/pgvector-go"
 
 	"github.com/neverprepared/phantom-brain/internal/osearch"
 	"github.com/neverprepared/phantom-brain/internal/osproject"
@@ -227,12 +225,12 @@ func backfillOneRecord(ctx context.Context, q *pgdb.Queries, projector *osprojec
 	// distilled body + verdict + (usually) a 768-dim vector.
 	if d.Synthesised {
 		if err := q.MarkRecordSynthesised(ctx, pgdb.MarkRecordSynthesisedParams{
-			Body:             optText(d.Body),
-			Reliability:      optText(string(d.Reliability)),
-			Topic:            optText(d.Topic),
-			GateReason:       optText(d.GateReason),
-			Embedding:        optVector(d.Embedding),
-			EmbeddingModel:   optText(embeddingModel),
+			Body:             pgstore.OptText(d.Body),
+			Reliability:      pgstore.OptText(string(d.Reliability)),
+			Topic:            pgstore.OptText(d.Topic),
+			GateReason:       pgstore.OptText(d.GateReason),
+			Embedding:        pgstore.OptVector(d.Embedding),
+			EmbeddingModel:   pgstore.OptText(embeddingModel),
 			EmbeddingVersion: pgtype.Text{},
 			ID:               rec.ID,
 		}); err != nil {
@@ -290,21 +288,21 @@ func summaryDocToUpsertParams(d osearch.SummaryDoc, att osearch.AttachmentDoc, h
 		Vault:      d.Vault,
 		Sha:        d.SHA,
 		Kind:       osearch.SoRKind(d.Kind),
-		MemoryType: optText(string(d.MemoryType)),
+		MemoryType: pgstore.OptText(string(d.MemoryType)),
 		Title:      pgstore.SanitizeText(d.Title),
-		RawBody:    optText(d.RawBody),
-		SourceUrl:  optText(d.SourceURL),
-		Source:     nonNilStrings(d.Source),
-		Tags:       nonNilStrings(d.Tags),
-		CapturedAt: optTimestamptz(d.CapturedAt),
+		RawBody:    pgstore.OptText(d.RawBody),
+		SourceUrl:  pgstore.OptText(d.SourceURL),
+		Source:     pgstore.NonNilStrings(d.Source),
+		Tags:       pgstore.NonNilStrings(d.Tags),
+		CapturedAt: pgstore.OptTimestamptz(d.CapturedAt),
 	}
 	// Attachment metadata lives on the companion pb_attachments doc, joined
 	// here by SHA (the pb_summaries attachment_stub is only the recall
 	// sidecar). Populate the fetch-time fields the projection renders.
 	if hasAtt {
-		p.MinioKey = optText(att.MinIOKey)
-		p.MimeType = optText(att.MIMEType)
-		p.OriginalFilename = optText(att.OriginalFilename)
+		p.MinioKey = pgstore.OptText(att.MinIOKey)
+		p.MimeType = pgstore.OptText(att.MIMEType)
+		p.OriginalFilename = pgstore.OptText(att.OriginalFilename)
 		if att.SizeBytes > 0 {
 			p.SizeBytes = pgtype.Int8{Int64: att.SizeBytes, Valid: true}
 		}
@@ -368,8 +366,8 @@ func backfillOneEntity(ctx context.Context, q *pgdb.Queries, opts Options, vr Va
 		Vault:       vr.Vault,
 		Slug:        pgstore.SanitizeText(slug),
 		Name:        pgstore.SanitizeText(name),
-		Description: optText(e.Body),
-		Embedding:   optVector(e.Embedding),
+		Description: pgstore.OptText(e.Body),
+		Embedding:   pgstore.OptVector(e.Embedding),
 	})
 	if err != nil {
 		return fmt.Errorf("upsert entity: %w", err)
@@ -406,33 +404,4 @@ func backfillOneEntity(ctx context.Context, q *pgdb.Queries, opts Options, vr Va
 		vs.LinksCreated++
 	}
 	return nil
-}
-
-// --- small mapping helpers (kept in step with internal/server/dual_write.go) ---
-
-func optText(s string) pgtype.Text {
-	s = pgstore.SanitizeText(s)
-	if s == "" {
-		return pgtype.Text{}
-	}
-	return pgtype.Text{String: s, Valid: true}
-}
-
-func optTimestamptz(t *time.Time) pgtype.Timestamptz {
-	if t == nil {
-		return pgtype.Timestamptz{}
-	}
-	return pgtype.Timestamptz{Time: *t, Valid: true}
-}
-
-func optVector(emb []float32) *pgvector.Vector {
-	if len(emb) == 0 {
-		return nil
-	}
-	v := pgvector.NewVector(emb)
-	return &v
-}
-
-func nonNilStrings(in []string) []string {
-	return pgstore.SanitizeTexts(in)
 }

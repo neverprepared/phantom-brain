@@ -167,10 +167,10 @@ var ErrAttachmentStoreUnavailable = errors.New("attachment store not configured"
 // agent side. The daemon validates Kind against osearch.Kind's
 // closed enum and rejects unknowns at the boundary.
 type MemoryFields struct {
-	Kind       string    `json:"kind,omitempty"`        // closed enum: see osearch.Kind
-	MemoryType string    `json:"memory_type,omitempty"` // semantic | episodic | procedural | ""
-	Source     []string  `json:"source,omitempty"`      // provenance: URLs, task IDs, agent IDs, file paths
-	References []string  `json:"references,omitempty"`  // SHAs of related summaries
+	Kind       string     `json:"kind,omitempty"`        // closed enum: see osearch.Kind
+	MemoryType string     `json:"memory_type,omitempty"` // semantic | episodic | procedural | ""
+	Source     []string   `json:"source,omitempty"`      // provenance: URLs, task IDs, agent IDs, file paths
+	References []string   `json:"references,omitempty"`  // SHAs of related summaries
 	CapturedAt *time.Time `json:"captured_at,omitempty"` // when the content was authored, not when OS got it; nil = unset
 }
 
@@ -248,9 +248,9 @@ func applyMemoryFields(doc *osearch.SummaryDoc, m MemoryFields) {
 // the v5.0 _log.md format (line-per-event); the wiring lives in the
 // existing trace logic, which Day 8 will rehome.
 type TraceRequest struct {
-	Kind    string                 `json:"kind"`
-	Message string                 `json:"message"`
-	Meta    map[string]any         `json:"meta,omitempty"`
+	Kind    string         `json:"kind"`
+	Message string         `json:"message"`
+	Meta    map[string]any `json:"meta,omitempty"`
 }
 
 // WriteResponse is what perceive/learn/attach return after a
@@ -274,20 +274,10 @@ func (d *Daemon) handlePerceive(w http.ResponseWriter, r *http.Request) {
 	binding, _ := BindingFromContext(r.Context())
 
 	var req PerceiveRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid JSON body", nil)
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
-	if err := validateSHA(req.SHA); err != nil {
-		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error(), nil)
-		return
-	}
-	if strings.TrimSpace(req.Title) == "" || strings.TrimSpace(req.Body) == "" {
-		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, "title and body required", nil)
-		return
-	}
-	if msg := validateMemoryFields(req.MemoryFields); msg != "" {
-		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, msg, nil)
+	if !validateWriteContent(w, req.SHA, req.Title, req.Body, req.MemoryFields) {
 		return
 	}
 
@@ -307,37 +297,21 @@ func (d *Daemon) handlePerceive(w http.ResponseWriter, r *http.Request) {
 		Embedding:   req.Embedding,
 	}
 	applyMemoryFields(&doc, req.MemoryFields)
-	// Phase D1: the Postgres SoR is THE write. On error return 502 so the
-	// agent's write-ahead queue retries (the daemon SHA-dedups, so retries
-	// are safe). The pb_records projection follows asynchronously via River.
-	if err := d.writeRecordRaw(r.Context(), binding, doc); err != nil {
-		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
-			"record write failed: "+err.Error(), nil)
-		return
-	}
-	d.synth.Enqueue(binding.Key.Profile, binding.Key.Vault, req.SHA)
-
-	writeWriteResponse(w, http.StatusAccepted, req.SHA, true)
+	// Phase D1: the Postgres SoR is THE write. On error finishRecordWrite
+	// returns 502 so the agent's write-ahead queue retries (the daemon
+	// SHA-dedups, so retries are safe). The pb_records projection follows
+	// asynchronously via River.
+	d.finishRecordWrite(w, r, binding, doc)
 }
 
 func (d *Daemon) handleLearn(w http.ResponseWriter, r *http.Request) {
 	binding, _ := BindingFromContext(r.Context())
 
 	var req LearnRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid JSON body", nil)
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
-	if err := validateSHA(req.SHA); err != nil {
-		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error(), nil)
-		return
-	}
-	if strings.TrimSpace(req.Title) == "" || strings.TrimSpace(req.Body) == "" {
-		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, "title and body required", nil)
-		return
-	}
-	if msg := validateMemoryFields(req.MemoryFields); msg != "" {
-		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, msg, nil)
+	if !validateWriteContent(w, req.SHA, req.Title, req.Body, req.MemoryFields) {
 		return
 	}
 
@@ -361,16 +335,10 @@ func (d *Daemon) handleLearn(w http.ResponseWriter, r *http.Request) {
 		Embedding:   req.Embedding,
 	}
 	applyMemoryFields(&doc, req.MemoryFields)
-	// Phase D1: the Postgres SoR is THE write. 502 on error so the agent's
-	// write-ahead queue retries (SHA-dedup makes retries safe).
-	if err := d.writeRecordRaw(r.Context(), binding, doc); err != nil {
-		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
-			"record write failed: "+err.Error(), nil)
-		return
-	}
-	d.synth.Enqueue(binding.Key.Profile, binding.Key.Vault, req.SHA)
-
-	writeWriteResponse(w, http.StatusAccepted, req.SHA, true)
+	// Phase D1: the Postgres SoR is THE write. finishRecordWrite returns 502
+	// on error so the agent's write-ahead queue retries (SHA-dedup makes
+	// retries safe).
+	d.finishRecordWrite(w, r, binding, doc)
 }
 
 func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
@@ -382,14 +350,12 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 	binding, _ := BindingFromContext(r.Context())
 	attach, err := d.resolveAttach(binding)
 	if err != nil {
-		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
-		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
+		d.writeBindingConfigError(w, err)
 		return
 	}
 
 	var req AttachRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid JSON body", nil)
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	if err := validateSHA(req.SHA); err != nil {
@@ -466,11 +432,7 @@ func (d *Daemon) handleAttach(w http.ResponseWriter, r *http.Request) {
 	// the attachment IS the same record in the SoR — read it back by SHA.
 	if req.ExtractedText == "" {
 		if view, perr := d.resolvePG(binding); perr == nil {
-			if existing, gerr := pgstore.New(view.Pool()).GetRecordBySHA(r.Context(), pgdb.GetRecordBySHAParams{
-				Profile: binding.Key.Profile,
-				Vault:   binding.Key.Vault,
-				Sha:     req.SHA,
-			}); gerr == nil && existing.ExtractedText.Valid && existing.ExtractedText.String != "" {
+			if existing, gerr := d.getRecordBySHA(r.Context(), view, binding, req.SHA); gerr == nil && existing.ExtractedText.Valid && existing.ExtractedText.String != "" {
 				doc.ExtractedText = existing.ExtractedText.String
 			}
 		}
@@ -526,8 +488,7 @@ func (d *Daemon) handleTrace(w http.ResponseWriter, r *http.Request) {
 	binding, _ := BindingFromContext(r.Context())
 
 	var req TraceRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid JSON body", nil)
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 	if strings.TrimSpace(req.Kind) == "" || strings.TrimSpace(req.Message) == "" {
@@ -566,69 +527,23 @@ func (d *Daemon) handleTrace(w http.ResponseWriter, r *http.Request) {
 // the stored MinIO key. Post-cutover docs are written ONLY to the SoR, so
 // these reads cover them; the legacy OpenSearch read paths were retired.
 func (d *Daemon) handleAttachGet(w http.ResponseWriter, r *http.Request) {
-	if d.attach == nil {
-		WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
-			"attach get disabled (attachment store missing)", nil)
-		return
-	}
-	binding, _ := BindingFromContext(r.Context())
-	view, err := d.resolvePG(binding)
-	if err != nil {
-		if errors.Is(err, ErrPostgresDisabled) {
-			WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
-				"attach get disabled (postgres not configured for binding)", nil)
-			return
-		}
-		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
-		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
-		return
-	}
-	attach, err := d.resolveAttach(binding)
-	if err != nil {
-		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
-		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
-		return
-	}
-	sha := chi.URLParam(r, "sha")
-	if err := validateSHA(sha); err != nil {
-		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error(), nil)
-		return
-	}
-
-	q := pgstore.New(view.Pool())
-	rec, err := q.GetRecordBySHA(r.Context(), pgdb.GetRecordBySHAParams{
-		Profile: binding.Key.Profile,
-		Vault:   binding.Key.Vault,
-		Sha:     sha,
-	})
-	if err != nil {
-		if errIsNoRows(err) {
-			WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound, "attachment not found", nil)
-			return
-		}
-		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
-			"postgres get failed: "+err.Error(), nil)
-		return
-	}
-	if !rec.MinioKey.Valid || rec.MinioKey.String == "" {
-		WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound, "attachment not found", nil)
-		return
-	}
-	url, err := attach.PresignGet(r.Context(), rec.MinioKey.String, 10*time.Minute)
-	if err != nil {
-		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
-			"presign failed: "+err.Error(), nil)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"sha":        rec.Sha,
-		"original":   rec.OriginalFilename.String,
-		"mime_type":  rec.MimeType.String,
-		"size_bytes": rec.SizeBytes.Int64,
-		"url":        url,
-		"expires_in": 600,
-	})
+	d.servePresignedRecordKey(w, r, "attach get", "attachment not found",
+		func(rec pgdb.Record) (string, bool) {
+			if rec.MinioKey.Valid && rec.MinioKey.String != "" {
+				return rec.MinioKey.String, true
+			}
+			return "", false
+		},
+		func(rec pgdb.Record, url string) map[string]any {
+			return map[string]any{
+				"sha":        rec.Sha,
+				"original":   rec.OriginalFilename.String,
+				"mime_type":  rec.MimeType.String,
+				"size_bytes": rec.SizeBytes.Int64,
+				"url":        url,
+				"expires_in": 600,
+			}
+		})
 }
 
 // handleCaptureGet returns a presigned MinIO URL for the raw-source
@@ -636,27 +551,104 @@ func (d *Daemon) handleAttachGet(w http.ResponseWriter, r *http.Request) {
 // off, the URL was unreachable at synth time, or the doc isn't
 // from a URL source (brain_learn, task_summary).
 func (d *Daemon) handleCaptureGet(w http.ResponseWriter, r *http.Request) {
-	if d.attach == nil {
-		WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
-			"capture get disabled (attachment store missing)", nil)
-		return
-	}
-	binding, _ := BindingFromContext(r.Context())
-	view, err := d.resolvePG(binding)
+	const notFound = "no capture stored for this doc (capture disabled, URL absent, or fetch failed)"
+	d.servePresignedRecordKey(w, r, "capture get", notFound,
+		func(rec pgdb.Record) (string, bool) {
+			if rec.CaptureMinioKey.Valid && rec.CaptureMinioKey.String != "" {
+				return rec.CaptureMinioKey.String, true
+			}
+			return "", false
+		},
+		func(rec pgdb.Record, url string) map[string]any {
+			return map[string]any{
+				"sha":        rec.Sha,
+				"source_url": rec.SourceUrl.String,
+				"size_bytes": rec.CaptureSizeBytes.Int64,
+				"url":        url,
+				"expires_in": 600,
+			}
+		})
+}
+
+// --- helpers ------------------------------------------------------
+
+// writeBindingConfigError emits the one canonical 500 envelope for a
+// binding-view resolve failure (resolveOS / resolveAttach, or resolvePG's
+// non-disabled branch). A cache miss here means buildBindingDeps never ran
+// for the binding — a configuration error, not a storage outage.
+func (d *Daemon) writeBindingConfigError(w http.ResponseWriter, err error) {
+	d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
+	WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
+}
+
+// resolvePGOrError resolves the per-binding Postgres view and, on failure,
+// emits the canonical envelope and returns ok=false (the common Go
+// `if !ok { return }` handler idiom). ErrPostgresDisabled → 503
+// "<op> not enabled for this binding"; any other resolve failure → the
+// canonical 500 binding-config envelope. op names the feature for the 503
+// message (e.g. "online recall", "online fetch", "reflect").
+func (d *Daemon) resolvePGOrError(w http.ResponseWriter, b VaultBinding, op string) (*pgBindingView, bool) {
+	view, err := d.resolvePG(b)
 	if err != nil {
 		if errors.Is(err, ErrPostgresDisabled) {
 			WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
-				"capture get disabled (postgres not configured for binding)", nil)
-			return
+				op+" not enabled for this binding", nil)
+			return nil, false
 		}
-		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
-		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
+		d.writeBindingConfigError(w, err)
+		return nil, false
+	}
+	return view, true
+}
+
+// errRecordNotFound is the sentinel getRecordBySHA returns when no record
+// matches (profile, vault, sha). Callers map it to 404; any other error is a
+// 502 Postgres-query failure.
+var errRecordNotFound = errors.New("server: record not found")
+
+// getRecordBySHA looks up one SoR record for the binding by SHA, returning
+// errRecordNotFound (not pgx.ErrNoRows) when nothing matches. Centralises the
+// params-from-binding construction and the no-rows classification shared by
+// the read handlers.
+func (d *Daemon) getRecordBySHA(ctx context.Context, view *pgBindingView, b VaultBinding, sha string) (pgdb.Record, error) {
+	rec, err := pgstore.New(view.Pool()).GetRecordBySHA(ctx, pgdb.GetRecordBySHAParams{
+		Profile: b.Key.Profile,
+		Vault:   b.Key.Vault,
+		Sha:     sha,
+	})
+	if err != nil {
+		if errIsNoRows(err) {
+			return pgdb.Record{}, errRecordNotFound
+		}
+		return pgdb.Record{}, err
+	}
+	return rec, nil
+}
+
+// servePresignedRecordKey is the shared body of handleAttachGet /
+// handleCaptureGet: both look up a SoR record by SHA, presign a MinIO key
+// stored on it, and return a small JSON envelope. They differ only in which
+// key field is presigned (keySel), the not-found message, and the response
+// shape (respBuilder). op labels the feature for the disabled-store / 503
+// messages.
+func (d *Daemon) servePresignedRecordKey(
+	w http.ResponseWriter, r *http.Request, op, notFoundMsg string,
+	keySel func(pgdb.Record) (string, bool),
+	respBuilder func(rec pgdb.Record, url string) map[string]any,
+) {
+	if d.attach == nil {
+		WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
+			op+" disabled (attachment store missing)", nil)
+		return
+	}
+	binding, _ := BindingFromContext(r.Context())
+	view, ok := d.resolvePGOrError(w, binding, op)
+	if !ok {
 		return
 	}
 	attach, err := d.resolveAttach(binding)
 	if err != nil {
-		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
-		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
+		d.writeBindingConfigError(w, err)
 		return
 	}
 	sha := chi.URLParam(r, "sha")
@@ -664,44 +656,73 @@ func (d *Daemon) handleCaptureGet(w http.ResponseWriter, r *http.Request) {
 		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error(), nil)
 		return
 	}
-	q := pgstore.New(view.Pool())
-	rec, err := q.GetRecordBySHA(r.Context(), pgdb.GetRecordBySHAParams{
-		Profile: binding.Key.Profile,
-		Vault:   binding.Key.Vault,
-		Sha:     sha,
-	})
+	rec, err := d.getRecordBySHA(r.Context(), view, binding, sha)
 	if err != nil {
-		if errIsNoRows(err) {
-			WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound,
-				"no capture stored for this doc (capture disabled, URL absent, or fetch failed)", nil)
+		if errors.Is(err, errRecordNotFound) {
+			WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound, notFoundMsg, nil)
 			return
 		}
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"postgres get failed: "+err.Error(), nil)
 		return
 	}
-	if !rec.CaptureMinioKey.Valid || rec.CaptureMinioKey.String == "" {
-		WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound,
-			"no capture stored for this doc (capture disabled, URL absent, or fetch failed)", nil)
+	key, ok := keySel(rec)
+	if !ok {
+		WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound, notFoundMsg, nil)
 		return
 	}
-	url, err := attach.PresignGet(r.Context(), rec.CaptureMinioKey.String, 10*time.Minute)
+	url, err := attach.PresignGet(r.Context(), key, 10*time.Minute)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"presign failed: "+err.Error(), nil)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"sha":        rec.Sha,
-		"source_url": rec.SourceUrl.String,
-		"size_bytes": rec.CaptureSizeBytes.Int64,
-		"url":        url,
-		"expires_in": 600,
-	})
+	_ = json.NewEncoder(w).Encode(respBuilder(rec, url))
 }
 
-// --- helpers ------------------------------------------------------
+// decodeJSONBody decodes the request body into dst, emitting the canonical
+// 400 "invalid JSON body" envelope and returning false on failure.
+func decodeJSONBody[T any](w http.ResponseWriter, r *http.Request, dst *T) bool {
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, "invalid JSON body", nil)
+		return false
+	}
+	return true
+}
+
+// validateWriteContent runs the perceive/learn SHA + title/body +
+// memory-field checks, emitting the matching 400 envelope and returning false
+// on the first failure. Preserves every message verbatim.
+func validateWriteContent(w http.ResponseWriter, sha, title, body string, m MemoryFields) bool {
+	if err := validateSHA(sha); err != nil {
+		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error(), nil)
+		return false
+	}
+	if strings.TrimSpace(title) == "" || strings.TrimSpace(body) == "" {
+		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, "title and body required", nil)
+		return false
+	}
+	if msg := validateMemoryFields(m); msg != "" {
+		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, msg, nil)
+		return false
+	}
+	return true
+}
+
+// finishRecordWrite is the shared tail of handlePerceive / handleLearn:
+// write the raw record to the SoR (502 on failure so the agent's
+// write-ahead queue retries — SHA-dedup makes that safe), fire the synth
+// enqueue, and return 202.
+func (d *Daemon) finishRecordWrite(w http.ResponseWriter, r *http.Request, binding VaultBinding, doc osearch.SummaryDoc) {
+	if err := d.writeRecordRaw(r.Context(), binding, doc); err != nil {
+		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
+			"record write failed: "+err.Error(), nil)
+		return
+	}
+	d.synth.Enqueue(binding.Key.Profile, binding.Key.Vault, doc.SHA)
+	writeWriteResponse(w, http.StatusAccepted, doc.SHA, true)
+}
 
 func writeWriteResponse(w http.ResponseWriter, status int, sha string, enqueued bool) {
 	w.Header().Set("Content-Type", "application/json")
