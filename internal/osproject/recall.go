@@ -180,6 +180,14 @@ func (r *Recaller) Recall(ctx context.Context, q RecallQuery) ([]RecallHit, erro
 			},
 			"fragment_size":       160,
 			"number_of_fragments": 1,
+			// Query-level cap so a single oversized doc cannot fail the whole
+			// recall query. Without this, OpenSearch enforces the index-level
+			// index.highlight.max_analyzed_offset (default 1,000,000) by
+			// throwing illegal_argument_exception → all shards failed → the
+			// entire recall 400s. Set at query level, OS instead stops
+			// analyzing past the offset (partial/no snippet for the giant doc)
+			// and the query still succeeds. Must be <= the index-level setting.
+			"max_analyzed_offset": 1000000,
 		},
 	}
 
