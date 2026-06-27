@@ -2,18 +2,24 @@
 -- Dedup is by (profile, vault, sha): a conflict means "already have it".
 
 -- name: UpsertRecord :one
--- Content-addressed insert. ON CONFLICT DO NOTHING returns no row when the
--- (profile, vault, sha) already exists — callers fall back to GetRecordBySHA.
+-- Content-addressed insert carrying the agent-computed embedding so kNN /
+-- semantic recall works off the raw write (the synth pass later overwrites
+-- it with the canonical embedding via MarkRecordSynthesised). ON CONFLICT
+-- DO UPDATE backfills a previously-NULL embedding on re-ingest WITHOUT
+-- clobbering an existing one (or any other field) — COALESCE keeps the
+-- stored value when present. Unlike DO NOTHING, DO UPDATE RETURNS the row
+-- on conflict too, so callers always get the record back.
 INSERT INTO records (
     profile, vault, sha, kind, memory_type,
     title, raw_body, source_url, source, tags, captured_at,
-    minio_key, mime_type, size_bytes, original_filename
+    minio_key, mime_type, size_bytes, original_filename, embedding
 ) VALUES (
     @profile, @vault, @sha, @kind, @memory_type,
     @title, @raw_body, @source_url, @source, @tags, @captured_at,
-    @minio_key, @mime_type, @size_bytes, @original_filename
+    @minio_key, @mime_type, @size_bytes, @original_filename, @embedding
 )
-ON CONFLICT (profile, vault, sha) DO NOTHING
+ON CONFLICT (profile, vault, sha) DO UPDATE SET
+    embedding = COALESCE(records.embedding, EXCLUDED.embedding)
 RETURNING *;
 
 -- name: GetRecordBySHA :one
@@ -22,6 +28,15 @@ WHERE profile = @profile AND vault = @vault AND sha = @sha;
 
 -- name: GetRecordByID :one
 SELECT * FROM records WHERE id = @id;
+
+-- name: DeleteRecordBySHA :one
+-- The brain_forget primitive (issue #72): delete one record by its
+-- content-addressed identity, RETURNING its id so the caller can enqueue
+-- a projection delete in the same tx. Returns pgx.ErrNoRows when the SHA
+-- isn't present — the handler reports forgotten=false rather than lying.
+DELETE FROM records
+WHERE profile = @profile AND vault = @vault AND sha = @sha
+RETURNING id;
 
 -- name: ListUnsynthesised :many
 -- The resynth scan: records still awaiting the gate + distill + embed pass.

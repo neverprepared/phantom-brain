@@ -12,6 +12,11 @@ type Querier interface {
 	// Alternate names that resolve to the same entity (renames, "Bob"↔"Robert").
 	AddEntityAlias(ctx context.Context, arg AddEntityAliasParams) error
 	CountUnsynthesised(ctx context.Context, arg CountUnsynthesisedParams) (int64, error)
+	// The brain_forget primitive (issue #72): delete one record by its
+	// content-addressed identity, RETURNING its id so the caller can enqueue
+	// a projection delete in the same tx. Returns pgx.ErrNoRows when the SHA
+	// isn't present — the handler reports forgotten=false rather than lying.
+	DeleteRecordBySHA(ctx context.Context, arg DeleteRecordBySHAParams) (int64, error)
 	GetEntityBySlug(ctx context.Context, arg GetEntityBySlugParams) (Entity, error)
 	// facts.sql — mutable state: the referent-keyed projection.
 	// (entity, attribute) is unique: the CURRENT value is one row you UPSERT;
@@ -49,8 +54,13 @@ type Querier interface {
 	UpsertFact(ctx context.Context, arg UpsertFactParams) (Fact, error)
 	// records.sql — the immutable content-addressed knowledge log.
 	// Dedup is by (profile, vault, sha): a conflict means "already have it".
-	// Content-addressed insert. ON CONFLICT DO NOTHING returns no row when the
-	// (profile, vault, sha) already exists — callers fall back to GetRecordBySHA.
+	// Content-addressed insert carrying the agent-computed embedding so kNN /
+	// semantic recall works off the raw write (the synth pass later overwrites
+	// it with the canonical embedding via MarkRecordSynthesised). ON CONFLICT
+	// DO UPDATE backfills a previously-NULL embedding on re-ingest WITHOUT
+	// clobbering an existing one (or any other field) — COALESCE keeps the
+	// stored value when present. Unlike DO NOTHING, DO UPDATE RETURNS the row
+	// on conflict too, so callers always get the record back.
 	UpsertRecord(ctx context.Context, arg UpsertRecordParams) (Record, error)
 }
 

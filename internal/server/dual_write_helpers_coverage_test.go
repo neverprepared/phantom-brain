@@ -132,6 +132,33 @@ func TestSummaryDocToUpsertParams(t *testing.T) {
 	}
 }
 
+func TestSummaryDocToUpsertParams_Embedding(t *testing.T) {
+	// Non-empty embedding maps to a non-nil vector param so the raw write
+	// persists records.embedding (restoring kNN / semantic recall).
+	withEmb := osearch.SummaryDoc{
+		Profile: "p", Vault: "v", SHA: "s", Kind: osearch.KindNote, Title: "t",
+		Embedding: []float32{0.1, 0.2, 0.3},
+	}
+	p := summaryDocToUpsertParams(withEmb)
+	if p.Embedding == nil {
+		t.Fatal("non-empty embedding must map to a non-nil vector param")
+	}
+	if got := p.Embedding.Slice(); len(got) != 3 || got[0] != 0.1 {
+		t.Errorf("embedding param not mapped faithfully: %v", got)
+	}
+
+	// Nil and empty embeddings map to a nil param → SQL NULL, never an
+	// all-zero vector (which pgvector rejects under cosine).
+	for name, doc := range map[string]osearch.SummaryDoc{
+		"nil":   {Profile: "p", Vault: "v", SHA: "s", Kind: osearch.KindNote, Title: "t", Embedding: nil},
+		"empty": {Profile: "p", Vault: "v", SHA: "s", Kind: osearch.KindNote, Title: "t", Embedding: []float32{}},
+	} {
+		if got := summaryDocToUpsertParams(doc).Embedding; got != nil {
+			t.Errorf("%s embedding must map to nil param, got %+v", name, got)
+		}
+	}
+}
+
 func TestSummaryDocToUpsertParams_AttachmentKindCollapses(t *testing.T) {
 	// SoR collapses the dual-index attachment shape to a single
 	// "attachment" record — the check constraint rejects the stub kind.

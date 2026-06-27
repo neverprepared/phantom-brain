@@ -5,39 +5,43 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/neverprepared/phantom-brain/internal/osearch"
+	"github.com/neverprepared/phantom-brain/internal/pgstore/pgdb"
 )
 
-// fakeScroller is an in-memory summaryScroller for unit-testing the
-// reflect detectors without a live OpenSearch. It replays a fixed
-// slice and filters on (profile, vault) like the real scroll does.
-type fakeScroller struct {
-	docs []osearch.SummaryDoc
+// fakeUnsynthScanner is an in-memory unsynthScanner for unit-testing the
+// reflect detector without a live Postgres. It mimics the SQL query
+// (ListUnsynthesised) by filtering on (profile, vault) AND NOT
+// synthesised, so the test exercises staleGateCandidates' row→candidate
+// mapping rather than re-testing the SQL filter.
+type fakeUnsynthScanner struct {
+	recs []pgdb.Record
 	err  error
 }
 
-func (f *fakeScroller) ScrollSummaries(_ context.Context, profile, vault string, _ int, fn func(osearch.SummaryDoc) error) error {
+func (f *fakeUnsynthScanner) ListUnsynthesised(_ context.Context, arg pgdb.ListUnsynthesisedParams) ([]pgdb.Record, error) {
 	if f.err != nil {
-		return f.err
+		return nil, f.err
 	}
-	for _, d := range f.docs {
-		if d.Profile != profile || d.Vault != vault {
+	var out []pgdb.Record
+	for _, r := range f.recs {
+		if r.Profile != arg.Profile || r.Vault != arg.Vault {
 			continue
 		}
-		if err := fn(d); err != nil {
-			return err
+		if r.Synthesised {
+			continue
 		}
+		out = append(out, r)
 	}
-	return nil
+	return out, nil
 }
 
 func TestStaleGateCandidates_OnlyUnsynthesised(t *testing.T) {
-	sc := &fakeScroller{docs: []osearch.SummaryDoc{
-		{Profile: "p", Vault: "v", SHA: "aaa", Title: "stale one", Synthesised: false},
-		{Profile: "p", Vault: "v", SHA: "bbb", Title: "enriched", Synthesised: true},
-		{Profile: "p", Vault: "v", SHA: "ccc", Title: "stale two", Synthesised: false},
-		// Different binding — must be excluded by the scroll filter.
-		{Profile: "other", Vault: "v", SHA: "ddd", Title: "wrong tenant", Synthesised: false},
+	sc := &fakeUnsynthScanner{recs: []pgdb.Record{
+		{Profile: "p", Vault: "v", Sha: "aaa", Title: "stale one", Synthesised: false},
+		{Profile: "p", Vault: "v", Sha: "bbb", Title: "enriched", Synthesised: true},
+		{Profile: "p", Vault: "v", Sha: "ccc", Title: "stale two", Synthesised: false},
+		// Different binding — must be excluded by the scan filter.
+		{Profile: "other", Vault: "v", Sha: "ddd", Title: "wrong tenant", Synthesised: false},
 	}}
 
 	got, err := staleGateCandidates(context.Background(), sc, "p", "v")
@@ -70,9 +74,9 @@ func TestStaleGateCandidates_OnlyUnsynthesised(t *testing.T) {
 }
 
 func TestStaleGateCandidates_NoneWhenAllSynthesised(t *testing.T) {
-	sc := &fakeScroller{docs: []osearch.SummaryDoc{
-		{Profile: "p", Vault: "v", SHA: "aaa", Synthesised: true},
-		{Profile: "p", Vault: "v", SHA: "bbb", Synthesised: true},
+	sc := &fakeUnsynthScanner{recs: []pgdb.Record{
+		{Profile: "p", Vault: "v", Sha: "aaa", Synthesised: true},
+		{Profile: "p", Vault: "v", Sha: "bbb", Synthesised: true},
 	}}
 	got, err := staleGateCandidates(context.Background(), sc, "p", "v")
 	if err != nil {
@@ -83,14 +87,14 @@ func TestStaleGateCandidates_NoneWhenAllSynthesised(t *testing.T) {
 	}
 }
 
-func TestStaleGateCandidates_ScrollError(t *testing.T) {
+func TestStaleGateCandidates_ScanError(t *testing.T) {
 	sentinel := errors.New("boom")
-	sc := &fakeScroller{err: sentinel}
+	sc := &fakeUnsynthScanner{err: sentinel}
 	_, err := staleGateCandidates(context.Background(), sc, "p", "v")
 	if err == nil {
-		t.Fatal("expected error from scroll failure")
+		t.Fatal("expected error from scan failure")
 	}
 	if !errors.Is(err, sentinel) {
-		t.Errorf("error should wrap the scroll error, got %v", err)
+		t.Errorf("error should wrap the scan error, got %v", err)
 	}
 }

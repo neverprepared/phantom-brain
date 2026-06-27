@@ -28,11 +28,13 @@ import (
 // no Postgres view, so resolvePG returning ErrPostgresDisabled here is
 // a real configuration error, not a tolerated "PG off" state.
 //
-// Embedding handling: records.UpsertRecord (the raw insert) carries NO
-// embedding column — the SoR schema only sets the embedding at synth
-// time via MarkRecordSynthesised. So writeRecordRaw writes the record
-// without a vector; writeSynthResult fills body/reliability/topic/
-// embedding once the distill pass has run.
+// Embedding handling: records.UpsertRecord now carries the agent-computed
+// embedding so kNN / semantic recall works off the raw write (otherwise
+// records.embedding stays NULL until synth and recall has no vector to
+// search). On re-ingest the ON CONFLICT DO UPDATE backfills a previously-
+// NULL embedding without clobbering an existing one. writeSynthResult
+// later overwrites body/reliability/topic/embedding with the canonical
+// distilled values once the synth pass has run.
 
 // pgWriteTimeout bounds each SoR write attempt so a slow or unreachable
 // Postgres can't stall the live request / synth job indefinitely.
@@ -104,6 +106,7 @@ func summaryDocToUpsertParams(doc osearch.SummaryDoc) pgdb.UpsertRecordParams {
 		Source:     nonNilStrings(doc.Source),
 		Tags:       nonNilStrings(doc.Tags),
 		CapturedAt: optTimestamptz(doc.CapturedAt),
+		Embedding:  optVector(doc.Embedding),
 	}
 }
 

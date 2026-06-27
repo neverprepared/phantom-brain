@@ -6,16 +6,22 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+
+	"github.com/neverprepared/phantom-brain/internal/pgstore"
+	"github.com/neverprepared/phantom-brain/internal/pgstore/pgdb"
+	"github.com/neverprepared/phantom-brain/internal/projection"
 )
 
 // brain_reflect / brain_forget HTTP surface (issue #72, Phase 1).
 //
 //   GET  /api/brain/reflect  — read-only report of forget-candidates.
-//   POST /api/brain/forget   — delete one summary by SHA + trigger a
-//                              snapshot rebuild so the forget propagates.
+//   POST /api/brain/forget   — delete one record by SHA from the SoR +
+//                              enqueue a projection delete so it leaves
+//                              the pb_records read path.
 //
-// Both go through resolveOS so per-binding storage overrides (v3.2)
-// route to the right tenant's indices. Modeled on handlePerceive.
+// Phase D: both target the Postgres System-of-Record via resolvePG (the
+// legacy pb_summaries index is no longer written — scanning/deleting it
+// produced an empty report and a no-op delete that lied "forgotten").
 
 // ReflectResponse is the GET /api/brain/reflect envelope.
 type ReflectResponse struct {
@@ -34,20 +40,21 @@ type ForgetResponse struct {
 }
 
 func (d *Daemon) handleReflect(w http.ResponseWriter, r *http.Request) {
-	if d.osClient == nil {
-		WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
-			"opensearch not configured; reflect disabled", nil)
-		return
-	}
 	binding, _ := BindingFromContext(r.Context())
-	osc, err := d.resolveOS(binding)
+	view, err := d.resolvePG(binding)
 	if err != nil {
+		if errors.Is(err, ErrPostgresDisabled) {
+			WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
+				"postgres not configured; reflect disabled", nil)
+			return
+		}
 		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
 		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
 		return
 	}
 
-	candidates, err := staleGateCandidates(r.Context(), osc, binding.Key.Profile, binding.Key.Vault)
+	q := pgstore.New(view.Pool())
+	candidates, err := staleGateCandidates(r.Context(), q, binding.Key.Profile, binding.Key.Vault)
 	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
 			"reflect scan failed: "+err.Error(), nil)
@@ -61,14 +68,14 @@ func (d *Daemon) handleReflect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleForget(w http.ResponseWriter, r *http.Request) {
-	if d.osClient == nil {
-		WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
-			"opensearch not configured; forget disabled", nil)
-		return
-	}
 	binding, _ := BindingFromContext(r.Context())
-	osc, err := d.resolveOS(binding)
+	view, err := d.resolvePG(binding)
 	if err != nil {
+		if errors.Is(err, ErrPostgresDisabled) {
+			WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
+				"postgres not configured; forget disabled", nil)
+			return
+		}
 		d.Logger.Error("phantom-brain: binding configuration error", slog.String("err", err.Error()))
 		WriteErrorEnvelope(w, http.StatusInternalServerError, ErrCodeStorageBackendErr, "binding configuration error", nil)
 		return
@@ -84,16 +91,52 @@ func (d *Daemon) handleForget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// DeleteSummary is idempotent — a missing doc returns nil. We treat
-	// the forget as succeeded regardless so a double-forget is benign.
-	if err := osc.DeleteSummary(r.Context(), binding.Key.Profile, binding.Key.Vault, req.SHA); err != nil {
+	// Delete from the Postgres SoR and enqueue a projection DELETE in the
+	// SAME tx (the outbox) so the record leaves both the SoR and the
+	// pb_records read path atomically. Mirrors writeSynthResult's
+	// begin / defer-rollback / commit pattern.
+	ctx := r.Context()
+	tx, err := view.Pool().Begin(ctx)
+	if err != nil {
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
-			"opensearch delete failed: "+err.Error(), nil)
+			"forget begin failed: "+err.Error(), nil)
 		return
 	}
-	// Phase D2b: the forget takes effect on the next online recall —
-	// the pb_records projection is the canonical read path now, so there
-	// is no snapshot to rebuild.
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	q := pgstore.New(tx)
+	if _, err := q.DeleteRecordBySHA(ctx, pgdb.DeleteRecordBySHAParams{
+		Profile: binding.Key.Profile,
+		Vault:   binding.Key.Vault,
+		Sha:     req.SHA,
+	}); err != nil {
+		if errIsNoRows(err) {
+			// Honest negative: no record for this SHA, nothing to forget.
+			writeJSON(w, http.StatusOK, ForgetResponse{SHA: req.SHA, Forgotten: false})
+			return
+		}
+		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
+			"record delete failed: "+err.Error(), nil)
+		return
+	}
+
+	if err := projection.EnqueueDeleteTx(ctx, view.River(), tx, binding.Key.Profile, binding.Key.Vault, req.SHA); err != nil {
+		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
+			"forget enqueue failed: "+err.Error(), nil)
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
+			"forget commit failed: "+err.Error(), nil)
+		return
+	}
+	committed = true
 
 	writeJSON(w, http.StatusOK, ForgetResponse{SHA: req.SHA, Forgotten: true})
 }

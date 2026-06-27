@@ -65,17 +65,6 @@ func (v *osBindingView) GetAttachment(ctx context.Context, profile, vault, sha s
 	return v.client.GetAttachment(ctx, profile, vault, sha)
 }
 
-// v3.3 brain_reflect / brain_forget (issue #72 Phase 1). v.client is
-// already prefix-bound (newOSBindingView wraps base.WithPrefix), so
-// the plain (non-WithPrefix) method variants resolve to the binding's
-// index set — matching how UpsertSummary etc. forward above.
-func (v *osBindingView) DeleteSummary(ctx context.Context, profile, vault, sha string) error {
-	return v.client.DeleteSummary(ctx, profile, vault, sha)
-}
-func (v *osBindingView) ScrollSummaries(ctx context.Context, profile, vault string, batchSize int, fn func(osearch.SummaryDoc) error) error {
-	return v.client.ScrollSummaries(ctx, profile, vault, batchSize, fn)
-}
-
 // --- AttachmentStore (per-binding bucket) ------------------------------
 
 // minioBindingView wraps a shared *MinIOBackend with a per-binding

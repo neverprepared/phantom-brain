@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	pgvector "github.com/pgvector/pgvector-go"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"github.com/riverqueue/river/rivertype"
@@ -160,6 +161,17 @@ func provisionAndOpen(t *testing.T, baseDSN, profile string) *pgxpool.Pool {
 		t.Fatalf("MigrateRiver: %v", err)
 	}
 	return pool
+}
+
+// newEmbed768 builds a deterministic non-zero 768-dim vector (pgvector
+// rejects all-zero vectors under cosine; non-zero also proves real values
+// round-trip through the binary codec).
+func newEmbed768(seed float32) pgvector.Vector {
+	v := make([]float32, 768)
+	for i := range v {
+		v[i] = seed + float32(i%7)*0.001
+	}
+	return pgvector.NewVector(v)
 }
 
 func sampleParams(sha string) pgdb.UpsertRecordParams {
@@ -346,6 +358,80 @@ func TestProjectionIntegration(t *testing.T) {
 		}
 		if c := fake.projectedCount(); c != 2 {
 			t.Fatalf("expected fake to handle both projections, got %d", c)
+		}
+	})
+
+	t.Run("EmbeddingPersistAndBackfill", func(t *testing.T) {
+		pool := provisionAndOpen(t, baseDSN, "embed")
+		fake := &fakeProjector{}
+		q := pgstore.New(pool)
+
+		client, err := NewClient(pool, NewWorkers(q, fake))
+		if err != nil {
+			t.Fatalf("NewClient: %v", err)
+		}
+		if err := client.Start(ctx); err != nil {
+			t.Fatalf("client.Start: %v", err)
+		}
+		defer stopClient(t, client)
+
+		emb := newEmbed768(0.25)
+
+		// (1) A fresh write carrying an embedding persists it on the raw
+		// record (no synth needed) — this is what restores kNN recall.
+		withEmb := sampleParams("sha-embed-1")
+		withEmb.Embedding = &emb
+		if _, err := WriteRecordAndEnqueue(ctx, pool, client, withEmb); err != nil {
+			t.Fatalf("WriteRecordAndEnqueue (with embedding): %v", err)
+		}
+		got, err := q.GetRecordBySHA(ctx, pgdb.GetRecordBySHAParams{
+			Profile: withEmb.Profile, Vault: withEmb.Vault, Sha: withEmb.Sha,
+		})
+		if err != nil {
+			t.Fatalf("GetRecordBySHA: %v", err)
+		}
+		if got.Embedding == nil {
+			t.Fatal("raw write with an embedding must persist records.embedding non-null")
+		}
+		if len(got.Embedding.Slice()) != 768 {
+			t.Errorf("embedding dim = %d, want 768", len(got.Embedding.Slice()))
+		}
+
+		// (2) A fresh write with NO embedding leaves it NULL; a later
+		// re-ingest carrying an embedding BACKFILLS it (DO UPDATE +
+		// COALESCE), and the re-write returns the existing row.
+		noEmb := sampleParams("sha-embed-2")
+		first, err := WriteRecordAndEnqueue(ctx, pool, client, noEmb)
+		if err != nil {
+			t.Fatalf("WriteRecordAndEnqueue (no embedding): %v", err)
+		}
+		nullRec, err := q.GetRecordBySHA(ctx, pgdb.GetRecordBySHAParams{
+			Profile: noEmb.Profile, Vault: noEmb.Vault, Sha: noEmb.Sha,
+		})
+		if err != nil {
+			t.Fatalf("GetRecordBySHA (null): %v", err)
+		}
+		if nullRec.Embedding != nil {
+			t.Fatal("write without an embedding should leave records.embedding NULL")
+		}
+
+		reEmb := sampleParams("sha-embed-2")
+		reEmb.Embedding = &emb
+		reWritten, err := WriteRecordAndEnqueue(ctx, pool, client, reEmb)
+		if err != nil {
+			t.Fatalf("WriteRecordAndEnqueue (re-ingest backfill): %v", err)
+		}
+		if reWritten.ID != first.ID {
+			t.Errorf("re-ingest returned id %d, want existing %d", reWritten.ID, first.ID)
+		}
+		backfilled, err := q.GetRecordBySHA(ctx, pgdb.GetRecordBySHAParams{
+			Profile: reEmb.Profile, Vault: reEmb.Vault, Sha: reEmb.Sha,
+		})
+		if err != nil {
+			t.Fatalf("GetRecordBySHA (backfilled): %v", err)
+		}
+		if backfilled.Embedding == nil {
+			t.Fatal("re-ingest with an embedding must backfill the previously-NULL embedding")
 		}
 	})
 
