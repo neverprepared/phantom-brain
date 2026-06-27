@@ -121,12 +121,45 @@ func TestDataAccessIntegration(t *testing.T) {
 		t.Errorf("expected NULL embedding on fresh record, got %v", rec.Embedding)
 	}
 
-	// Dedup: a conflicting sha returns no row (DO NOTHING).
-	_, err = q.UpsertRecord(ctx, pgdb.UpsertRecordParams{
+	// Re-ingest: ON CONFLICT DO UPDATE now RETURNS the existing row (not
+	// pgx.ErrNoRows) and backfills a previously-NULL embedding from the
+	// new write — without clobbering identity fields.
+	dup, err := q.UpsertRecord(ctx, pgdb.UpsertRecordParams{
+		Profile: profile, Vault: vault, Sha: "sha-record-1", Kind: "note", Title: "dup",
+		Embedding: &emb,
+	})
+	if err != nil {
+		t.Fatalf("expected a row on conflicting UpsertRecord (DO UPDATE returns the row), got err: %v", err)
+	}
+	if dup.ID != rec.ID {
+		t.Errorf("conflict row id = %d, want existing %d", dup.ID, rec.ID)
+	}
+	if dup.Title != "the alpha note" {
+		t.Errorf("conflict must not clobber title: got %q", dup.Title)
+	}
+	if dup.Embedding == nil {
+		t.Fatal("expected the NULL embedding to be backfilled on re-ingest")
+	}
+	if got := dup.Embedding.Slice()[0]; got != emb.Slice()[0] {
+		t.Errorf("backfilled embedding value[0] = %v, want %v", got, emb.Slice()[0])
+	}
+
+	// Re-ingest again WITHOUT an embedding must NOT wipe the one just
+	// backfilled (COALESCE keeps the stored value).
+	dup2, err := q.UpsertRecord(ctx, pgdb.UpsertRecordParams{
 		Profile: profile, Vault: vault, Sha: "sha-record-1", Kind: "note", Title: "dup",
 	})
-	if err == nil {
-		t.Fatal("expected pgx.ErrNoRows on conflicting UpsertRecord (DO NOTHING returns no row)")
+	if err != nil {
+		t.Fatalf("second re-ingest: %v", err)
+	}
+	if dup2.Embedding == nil {
+		t.Error("re-ingest without an embedding must not clobber the stored one")
+	}
+
+	// Reset the embedding to NULL so the downstream NULL-embedding +
+	// MarkRecordSynthesised assertions below still exercise that path.
+	if _, err := pool.Exec(ctx, "UPDATE records SET embedding = NULL WHERE id = $1", rec.ID); err != nil {
+		t.Fatalf("reset embedding to NULL: %v", err)
 	}
 
 	// GetRecordBySHA returns the existing row.

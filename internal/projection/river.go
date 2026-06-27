@@ -101,17 +101,20 @@ func EnqueueDeleteTx(ctx context.Context, client *river.Client[pgx.Tx], tx pgx.T
 }
 
 // WriteRecordAndEnqueue is the canonical "write + outbox" path the synth/ingest
-// layer calls. In a single transaction it upserts the record and — on a fresh
-// insert — enqueues its projection job, then commits. Any error rolls the whole
-// thing back (so neither the record nor the job lands).
+// layer calls. In a single transaction it upserts the record, enqueues its
+// projection job, then commits. Any error rolls the whole thing back (so
+// neither the record nor the job lands).
 //
-// Dedup handling: UpsertRecord uses ON CONFLICT (profile, vault, sha) DO
-// NOTHING, which returns pgx.ErrNoRows when the content already exists. In that
-// case the existing record is fetched and returned, and NO projection job is
-// enqueued. Re-projecting is harmless (projection is idempotent), but skipping
-// avoids needless churn — the existing record was already projected when first
-// written. Callers that want to force a re-projection of an existing record
-// should call EnqueueProjectTx directly.
+// Enqueue semantics: UpsertRecord uses ON CONFLICT (profile, vault, sha) DO
+// UPDATE (it backfills a missing embedding without clobbering existing fields),
+// so it RETURNS the row on BOTH a fresh insert AND a re-ingest. We enqueue a
+// projection whenever UpsertRecord returns a row. This is intentional: a
+// re-ingest may have backfilled the embedding, so re-projecting keeps the
+// pb_records projection consistent with the SoR. Re-projection is idempotent —
+// the worker upserts keyed on (profile, vault, sha) / _id, so an extra job
+// converges to the same state. The pgx.ErrNoRows branch is now effectively
+// unreachable (DO UPDATE always returns a row); it is retained as a defensive
+// fallback in case the query ever reverts to DO NOTHING.
 func WriteRecordAndEnqueue(
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -132,31 +135,33 @@ func WriteRecordAndEnqueue(
 
 	q := pgdb.New(tx)
 
-	rec, err = q.UpsertRecord(ctx, params)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// Dedup: the (profile, vault, sha) already exists. Fetch it and
-			// skip enqueueing — already projected on first write.
-			existing, getErr := q.GetRecordBySHA(ctx, pgdb.GetRecordBySHAParams{
-				Profile: params.Profile,
-				Vault:   params.Vault,
-				Sha:     params.Sha,
-			})
-			if getErr != nil {
-				err = fmt.Errorf("projection: fetch existing record after dedup: %w", getErr)
-				return pgdb.Record{}, err
-			}
-			if err = tx.Commit(ctx); err != nil {
-				err = fmt.Errorf("projection: commit (dedup path): %w", err)
-				return pgdb.Record{}, err
-			}
-			return existing, nil
+	rec, upErr := q.UpsertRecord(ctx, params)
+	if upErr != nil {
+		if !errors.Is(upErr, pgx.ErrNoRows) {
+			err = fmt.Errorf("projection: upsert record: %w", upErr)
+			return pgdb.Record{}, err
 		}
-		err = fmt.Errorf("projection: upsert record: %w", err)
-		return pgdb.Record{}, err
+		// Defensive fallback (unreachable with ON CONFLICT DO UPDATE, which
+		// returns the row on conflict): fetch the existing record so the
+		// caller still gets it back, then enqueue its projection like any
+		// other write (idempotent).
+		existing, getErr := q.GetRecordBySHA(ctx, pgdb.GetRecordBySHAParams{
+			Profile: params.Profile,
+			Vault:   params.Vault,
+			Sha:     params.Sha,
+		})
+		if getErr != nil {
+			err = fmt.Errorf("projection: fetch existing record after dedup: %w", getErr)
+			return pgdb.Record{}, err
+		}
+		rec = existing
 	}
 
-	// Fresh insert: enqueue the projection job in the same tx (the outbox).
+	// Enqueue the projection in the same tx (the outbox). With ON CONFLICT DO
+	// UPDATE, UpsertRecord returns the row on a fresh insert AND a re-ingest,
+	// so this fires on both. Re-projection is idempotent (the worker upserts
+	// the projection keyed on (profile, vault, sha) / _id), and re-ingest may
+	// have backfilled the embedding, so re-projecting keeps pb_records in sync.
 	if err = EnqueueProjectTx(ctx, client, tx, rec.ID); err != nil {
 		return pgdb.Record{}, err
 	}
