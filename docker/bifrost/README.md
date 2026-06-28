@@ -6,24 +6,46 @@ Bedrock, …) behind one API with load balancing, fallbacks, and guardrails.
 Same per-unit deploy pattern as `docker/ollama/`; not wired into the main
 phantom-brain stack.
 
-## Quick start
+**Ollama-first.** The shipped `config.example.json` registers a local
+Ollama provider only — launch with zero cloud keys and route to models
+already running on your machine. Add cloud providers later in the UI or
+`config.json`.
+
+## Quick start (Ollama)
+
+Prereq: Ollama reachable on the host. On macOS/Windows run it **natively**
+(`brew install ollama && ollama serve`) — Docker can't reach Metal — or use
+the `docker/ollama/` stack. Pull a model: `ollama pull llama3.2`.
 
 ```sh
 cd docker/bifrost
 mkdir -p data
-cp config.example.json data/config.json   # optional — or configure via the UI
-cp .env.example .env                       # set provider API keys
+cp config.example.json data/config.json    # Ollama-first, no keys required
 docker compose up -d
 docker compose logs -f bifrost
 open http://localhost:8080                  # web UI + config + request logs
 ```
 
-Smoke test the OpenAI-compatible endpoint:
+The container reaches the host's Ollama via `host.docker.internal:11434`
+(set in `config.json` → `network_config.base_url`, with the matching
+`extra_hosts` entry in the compose file). If Ollama listens elsewhere,
+edit that `base_url`.
+
+Smoke test the OpenAI-compatible endpoint (use a model you've pulled):
 
 ```sh
 curl http://localhost:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"ping"}]}'
+  -d '{"model":"ollama/llama3.2","messages":[{"role":"user","content":"ping"}]}'
+```
+
+## Adding cloud providers later
+
+```sh
+cp .env.example .env        # set OPENAI_API_KEY / ANTHROPIC_API_KEY
+# add the matching provider block to data/config.json (or use the UI),
+# referencing the key as "env.OPENAI_API_KEY"
+docker compose up -d        # re-reads env
 ```
 
 ## How config works

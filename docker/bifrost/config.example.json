@@ -1,25 +1,18 @@
 {
   "$schema": "https://www.getbifrost.ai/schema",
   "providers": {
-    "openai": {
+    "ollama": {
       "keys": [
         {
-          "name": "openai-key-1",
-          "value": "env.OPENAI_API_KEY",
-          "models": ["gpt-4o-mini", "gpt-4o"],
+          "name": "ollama-key",
+          "value": "dummy",
+          "models": ["*"],
           "weight": 1.0
         }
-      ]
-    },
-    "anthropic": {
-      "keys": [
-        {
-          "name": "anthropic-key-1",
-          "value": "env.ANTHROPIC_API_KEY",
-          "models": ["claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
-          "weight": 1.0
-        }
-      ]
+      ],
+      "network_config": {
+        "base_url": "http://host.docker.internal:11434"
+      }
     }
   },
   "config_store": {

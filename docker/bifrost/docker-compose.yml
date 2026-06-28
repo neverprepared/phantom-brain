@@ -5,13 +5,21 @@
 # OpenAI client (or phantom-brain's synth backend, via an OpenAI-shaped
 # base_url) at it instead of talking to each provider directly.
 #
+# OLLAMA-FIRST: the shipped config.example.json registers a local Ollama
+# provider only — no cloud keys needed to launch. The container reaches
+# Ollama on the host (native `ollama serve`, or the docker/ollama stack
+# published on the host) via host.docker.internal:11434 (see extra_hosts
+# + config.json network_config.base_url). Add cloud providers later in
+# the UI or config.json.
+#
 # Quick start:
 #   cd docker/bifrost
-#   cp config.example.json data/config.json   # then add provider keys (or use the UI)
-#   cp .env.example .env                       # set provider API keys
+#   mkdir -p data
+#   cp config.example.json data/config.json    # Ollama-first, no keys required
 #   docker compose up -d
 #   docker compose logs -f bifrost
-#   open http://localhost:8080                 # web UI + config
+#   open http://localhost:8080                  # web UI + config
+#   # add cloud providers later: cp .env.example .env  (set OPENAI_API_KEY etc.)
 #
 # Tear down:
 #   docker compose down                        # stops, keeps data/
@@ -38,12 +46,18 @@ services:
       APP_PORT: 8080
       LOG_LEVEL: ${LOG_LEVEL:-info}      # debug | info | warn | error
       LOG_STYLE: ${LOG_STYLE:-json}      # pretty | json
-      # Provider keys referenced from config.json as `env.OPENAI_API_KEY`
-      # etc. Empty default keeps `docker compose up` working with zero
-      # config (you can add keys later in the UI); set them in .env to
-      # have file-backed config resolve them at boot.
+      # Optional cloud-provider keys, referenced from config.json as
+      # `env.OPENAI_API_KEY` etc. Not needed for the Ollama-first launch;
+      # empty defaults keep `docker compose up` working with zero config.
+      # Set them in .env once you add the matching provider blocks.
       OPENAI_API_KEY:    ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    extra_hosts:
+      # Lets the Bifrost container reach an Ollama running on the docker
+      # host — native `ollama serve` on macOS/Windows (Docker can't reach
+      # Metal, so Ollama runs natively there) or the docker/ollama stack
+      # published on the host. config.json points base_url here.
+      - "host.docker.internal:host-gateway"
     volumes:
       # This bind-mount is Bifrost's app-dir (/app/data): config.json,
       # config.db, logs.db all live here so they survive recreation.
