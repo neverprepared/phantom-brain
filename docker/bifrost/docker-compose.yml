@@ -1,0 +1,59 @@
+# Bifrost — OpenAI-compatible AI gateway (https://docs.getbifrost.ai).
+#
+# Standalone satellite stack, same pattern as docker/ollama/. Bifrost
+# fronts 1000+ models behind one OpenAI-compatible API; point any
+# OpenAI client (or phantom-brain's synth backend, via an OpenAI-shaped
+# base_url) at it instead of talking to each provider directly.
+#
+# Quick start:
+#   cd docker/bifrost
+#   cp config.example.json data/config.json   # then add provider keys (or use the UI)
+#   cp .env.example .env                       # set provider API keys
+#   docker compose up -d
+#   docker compose logs -f bifrost
+#   open http://localhost:8080                 # web UI + config
+#
+# Tear down:
+#   docker compose down                        # stops, keeps data/
+#   docker compose down && rm -rf data         # full reset
+#
+# The mounted ./data dir IS Bifrost's app-dir — it holds config.json
+# (optional, file-backed config), config.db (UI/API edits), and
+# logs.db (request logs). Config precedence: a file-backed entity in
+# config.json overwrites the DB copy on a content-hash change; entities
+# only present in the DB (added via the UI) are preserved.
+
+services:
+  bifrost:
+    image: maximhq/bifrost:${BIFROST_VERSION:-latest}
+    container_name: bifrost
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    environment:
+      # APP_HOST defaults to localhost, which inside a container binds
+      # only the loopback inside that container — unreachable from the
+      # host. 0.0.0.0 is REQUIRED for the published port to work.
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8080
+      LOG_LEVEL: ${LOG_LEVEL:-info}      # debug | info | warn | error
+      LOG_STYLE: ${LOG_STYLE:-json}      # pretty | json
+      # Provider keys referenced from config.json as `env.OPENAI_API_KEY`
+      # etc. Empty default keeps `docker compose up` working with zero
+      # config (you can add keys later in the UI); set them in .env to
+      # have file-backed config resolve them at boot.
+      OPENAI_API_KEY:    ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      # This bind-mount is Bifrost's app-dir (/app/data): config.json,
+      # config.db, logs.db all live here so they survive recreation.
+      - ./data:/app/data
+    healthcheck:
+      # /metrics is Bifrost's built-in Prometheus endpoint — a cheap
+      # liveness probe. If your image tag lacks wget, swap to curl or
+      # comment this block out.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/metrics >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
