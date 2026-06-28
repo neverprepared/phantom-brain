@@ -1,5 +1,19 @@
 # Changelog
 
+## [3.10.0](https://github.com/neverprepared/phantom-brain/compare/v3.9.2...v3.10.0) (2026-06-28)
+
+
+### Features
+
+* **synth:** configurable per-call LLM timeout, default 120s for Ollama ([#125](https://github.com/neverprepared/phantom-brain/issues/125)) ([041584a](https://github.com/neverprepared/phantom-brain/commit/041584a4aa2b12a00195cf6436726266bda54423))
+* **synth:** pluggable LLM backend, default to local Ollama ([#121](https://github.com/neverprepared/phantom-brain/issues/121)) ([b9c8eb2](https://github.com/neverprepared/phantom-brain/commit/b9c8eb2540ec4e40dfe949db79de8d694a1d6ce0))
+
+
+### Bug Fixes
+
+* **recall:** cap highlight max_analyzed_offset so one huge doc can't break all recall ([#123](https://github.com/neverprepared/phantom-brain/issues/123)) ([95a8720](https://github.com/neverprepared/phantom-brain/commit/95a8720898c42f116b92c43d2d1ccc11c1d8ac3a))
+* **recall:** use max_analyzer_offset (OS 2.x query-level highlight field) ([#124](https://github.com/neverprepared/phantom-brain/issues/124)) ([7db25d8](https://github.com/neverprepared/phantom-brain/commit/7db25d82b617ca8b75889b99c53b94d52c21e040))
+
 ## [3.9.2](https://github.com/neverprepared/phantom-brain/compare/v3.9.1...v3.9.2) (2026-06-27)
 
 
