@@ -288,6 +288,7 @@ Embeddings computed locally via Ollama. Idempotent — daemon dedups by SHA. `--
 | `PB_SYNTH_BACKEND` | `ollama` | Daemon: synth LLM backend — `ollama` (default) or `claude`. Overrides `[synth] backend` in server.toml |
 | `PB_SYNTH_OLLAMA_MODEL` | `qwen2.5:7b` | Daemon: Ollama generation model for synth (gate/distill/entities). Must be `ollama pull`'d on the Ollama host. Overrides `[synth] ollama_model` |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama endpoint — shared by the agent embedding client AND the daemon synth backend. Overrides `[synth] ollama_base_url` |
+| `PB_SYNTH_TIMEOUT_SECS` | `120` | Daemon: per-call ceiling (seconds) for each synth LLM call (gate verdict + distill), applied as a ceiling to both. Generous by default because local Ollama is slower than the Claude CLI and the first job after a restart pays model cold-load. Overrides `[synth] timeout_secs` |
 | `PB_POSTGRES_DSN` | — | Daemon: base/maintenance Postgres DSN; `pgstore.DSNForProfile` derives the per-profile `pb_<profile>` DSN from it (overrides the `server.toml` field) |
 | `BRAIN_VAULT_PATH` | — | Legacy: enables pre-v2 BRAIN_VAULT_PATH-only mode (no daemon contract) |
 

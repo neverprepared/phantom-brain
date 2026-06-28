@@ -113,6 +113,11 @@ type SynthWorker struct {
 	// can presign post-cutover captures.
 	capture CaptureConfig
 
+	// synthTimeout caps each synth LLM call (gate + distill). Resolved from
+	// SynthConfig.TimeoutSecs (default 120s). Zero ⇒ the in-code gate.go
+	// defaults (30s/45s) — left zero only by tests that wire no LLM.
+	synthTimeout time.Duration
+
 	// Resolve returns the per-binding synthStore + AttachmentStore for a
 	// job's (profile, vault). v3.2 per-binding storage overrides: each
 	// binding has its own OS projection prefix + MinIO bucket, and the
@@ -195,6 +200,10 @@ type SynthWorkerOpts struct {
 	// (from Resolve) is the blob target; this carries the enable flag +
 	// limits.
 	Capture CaptureConfig
+	// SynthTimeout caps each synth LLM call (gate + distill). Production
+	// wires time.Duration(cfg.Synth.TimeoutSecs)*time.Second. Zero leaves
+	// the gate.go in-code defaults in place (tests).
+	SynthTimeout time.Duration
 	// PDFExtractor overrides the default pdftotext-backed extractor.
 	// Tests inject a deterministic fake; production leaves it nil and
 	// NewSynthWorker picks PDFExtractWithPdftotext when the binary is
@@ -241,6 +250,7 @@ func NewSynthWorker(opts SynthWorkerOpts) *SynthWorker {
 		stopped:       make(chan struct{}),
 		llm:           backend,
 		capture:       opts.Capture,
+		synthTimeout:  opts.SynthTimeout,
 		pdfExtractor:  extractor,
 		pdfAvailable:  extractor != nil,
 		ocrAvailable:  OCRAvailable(),
@@ -641,6 +651,7 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 			Content:    content,
 			Format:     "markdown",
 			SourceType: gateSourceType(&doc),
+			Timeout:    w.synthTimeout,
 		})
 	}
 
@@ -648,7 +659,7 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 	// raw content so the record still becomes searchable as a summary.
 	summary := ""
 	if w.llmReady() {
-		s, sErr := SummarizeContent(ctx, w.llm, doc.Title, content, "", 0)
+		s, sErr := SummarizeContent(ctx, w.llm, doc.Title, content, "", w.synthTimeout)
 		if sErr != nil {
 			w.logger.Warn("phantom-brain: summarize failed; using raw content",
 				slog.String("sha", job.SHA), slog.String("err", sErr.Error()))

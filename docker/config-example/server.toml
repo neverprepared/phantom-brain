@@ -75,11 +75,16 @@ timeout_secs   = 30
 # MUST be pulled on the Ollama host first: `ollama pull qwen2.5:7b`.
 # Set backend = "claude" to use the bundled `claude` CLI instead (needs
 # CLAUDE_CODE_OAUTH_TOKEN; higher quality, costs tokens). Env overrides:
-# PB_SYNTH_BACKEND, PB_SYNTH_OLLAMA_MODEL, OLLAMA_BASE_URL.
+# PB_SYNTH_BACKEND, PB_SYNTH_OLLAMA_MODEL, OLLAMA_BASE_URL, PB_SYNTH_TIMEOUT_SECS.
 [synth]
 backend         = "ollama"
 ollama_base_url = "http://ollama:11434"   # compose service; host shell uses localhost:11434
 ollama_model    = "qwen2.5:7b"
+# Per-call ceiling (seconds) for each synth LLM call (gate verdict + distill).
+# Default 120. Local Ollama is slower than the Claude CLI and the FIRST job
+# after a restart pays model cold-load, so keep this generous. Env override:
+# PB_SYNTH_TIMEOUT_SECS.
+timeout_secs    = 120
 
 [defaults]
 retention_gens = 30

@@ -328,6 +328,10 @@ func Start(opts StartOpts) (*Daemon, error) {
 			// "claude". Health is probed lazily per job, so a daemon that
 			// starts before Ollama self-heals on the next sweep.
 			LLM: NewLLMBackend(cfg.Synth),
+			// Per-call synth LLM ceiling (gate + distill). cfg.Synth.TimeoutSecs
+			// resolves to defaultSynthTimeoutSecs (120s) when unset — generous
+			// for a local Ollama cold-load + distill.
+			SynthTimeout: time.Duration(cfg.Synth.TimeoutSecs) * time.Second,
 		})
 		w.Resolve = func(profile, vaultName string) (synthStore, AttachmentStore, bool) {
 			deps, ok := d.bindings.Get(VaultKey{Profile: profile, Vault: vaultName})

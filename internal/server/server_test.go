@@ -82,6 +82,58 @@ port = 0
 	}
 }
 
+func TestSynthTimeout_DefaultAndOverrides(t *testing.T) {
+	t.Run("unset resolves to default", func(t *testing.T) {
+		dir := t.TempDir()
+		writeServerConfig(t, dir, "[server]\nport = 0\n")
+		cfg, err := LoadServerConfig(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Synth.TimeoutSecs != defaultSynthTimeoutSecs {
+			t.Errorf("timeout default = %d, want %d", cfg.Synth.TimeoutSecs, defaultSynthTimeoutSecs)
+		}
+	})
+
+	t.Run("toml value honored", func(t *testing.T) {
+		dir := t.TempDir()
+		writeServerConfig(t, dir, "[server]\nport = 0\n\n[synth]\ntimeout_secs = 200\n")
+		cfg, err := LoadServerConfig(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Synth.TimeoutSecs != 200 {
+			t.Errorf("timeout = %d, want 200", cfg.Synth.TimeoutSecs)
+		}
+	})
+
+	t.Run("env overrides toml", func(t *testing.T) {
+		t.Setenv("PB_SYNTH_TIMEOUT_SECS", "75")
+		dir := t.TempDir()
+		writeServerConfig(t, dir, "[server]\nport = 0\n\n[synth]\ntimeout_secs = 200\n")
+		cfg, err := LoadServerConfig(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Synth.TimeoutSecs != 75 {
+			t.Errorf("env should win: timeout = %d, want 75", cfg.Synth.TimeoutSecs)
+		}
+	})
+
+	t.Run("bogus/zero env falls back to default", func(t *testing.T) {
+		t.Setenv("PB_SYNTH_TIMEOUT_SECS", "not-a-number")
+		dir := t.TempDir()
+		writeServerConfig(t, dir, "[server]\nport = 0\n")
+		cfg, err := LoadServerConfig(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Synth.TimeoutSecs != defaultSynthTimeoutSecs {
+			t.Errorf("bogus env should fall back: timeout = %d, want %d", cfg.Synth.TimeoutSecs, defaultSynthTimeoutSecs)
+		}
+	})
+}
+
 func TestLoadServerConfig_HonorsExplicitValues(t *testing.T) {
 	dir := t.TempDir()
 	writeServerConfig(t, dir, `[server]

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -95,7 +96,20 @@ type SynthConfig struct {
 	Backend       string `toml:"backend"`
 	OllamaBaseURL string `toml:"ollama_base_url"`
 	OllamaModel   string `toml:"ollama_model"`
+	// TimeoutSecs caps each synth LLM call (gate verdict + distill). Applied
+	// as a ceiling to both — the gate just finishes faster under it. Zero ⇒
+	// defaultSynthTimeoutSecs. The default is generous because the Ollama
+	// backend (now the default) is slower than the Claude CLI the original
+	// in-code 30s/45s defaults were tuned for, and the FIRST job after a
+	// restart pays model cold-load on top of generation. Env override:
+	// PB_SYNTH_TIMEOUT_SECS.
+	TimeoutSecs int `toml:"timeout_secs"`
 }
+
+// defaultSynthTimeoutSecs is the per-call synth LLM ceiling when unset.
+// 120s covers an Ollama cold-load (~10–30s for a 7–8B model) plus a
+// multi-paragraph distill on modest local hardware.
+const defaultSynthTimeoutSecs = 120
 
 // PostgresConfig mirrors the [postgres] block in server.toml. DSN is the
 // BASE / maintenance DSN (e.g. postgres://user:pass@host:5432/phantom_brain);
@@ -191,6 +205,14 @@ func applyServerDefaults(cfg *ServerConfig) {
 	}
 	if v := strings.TrimSpace(os.Getenv("PB_SYNTH_OLLAMA_MODEL")); v != "" {
 		s.OllamaModel = v
+	}
+	if v := strings.TrimSpace(os.Getenv("PB_SYNTH_TIMEOUT_SECS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			s.TimeoutSecs = n
+		}
+	}
+	if s.TimeoutSecs <= 0 {
+		s.TimeoutSecs = defaultSynthTimeoutSecs
 	}
 
 	d := &cfg.Defaults
