@@ -115,10 +115,20 @@ func TestResolveLegacyIndexDir(t *testing.T) {
 }
 
 func TestResolveDBDSN(t *testing.T) {
+	// dbDSNCmd builds a cobra command with a config-dir flag pointed at an
+	// empty temp dir, so the server.toml fallback finds nothing unless a
+	// subtest writes one. Keeps the env/flag subtests hermetic — no stray
+	// server.toml on the box can leak in.
+	dbDSNCmd := func(t *testing.T, configDir string) *cobra.Command {
+		c := &cobra.Command{}
+		c.Flags().String("config-dir", configDir, "")
+		return c
+	}
+
 	t.Run("explicit flag wins", func(t *testing.T) {
 		t.Setenv("PB_POSTGRES_DSN", "postgres://env")
 		t.Setenv("DATABASE_URL", "postgres://url")
-		got, err := resolveDBDSN("postgres://flag")
+		got, err := resolveDBDSN(dbDSNCmd(t, t.TempDir()), "postgres://flag")
 		if err != nil || got != "postgres://flag" {
 			t.Fatalf("got %q err %v", got, err)
 		}
@@ -126,7 +136,7 @@ func TestResolveDBDSN(t *testing.T) {
 	t.Run("PB_POSTGRES_DSN beats DATABASE_URL", func(t *testing.T) {
 		t.Setenv("PB_POSTGRES_DSN", "postgres://env")
 		t.Setenv("DATABASE_URL", "postgres://url")
-		got, err := resolveDBDSN("")
+		got, err := resolveDBDSN(dbDSNCmd(t, t.TempDir()), "")
 		if err != nil || got != "postgres://env" {
 			t.Fatalf("got %q err %v", got, err)
 		}
@@ -134,15 +144,28 @@ func TestResolveDBDSN(t *testing.T) {
 	t.Run("DATABASE_URL fallback", func(t *testing.T) {
 		t.Setenv("PB_POSTGRES_DSN", "")
 		t.Setenv("DATABASE_URL", "postgres://url")
-		got, err := resolveDBDSN("")
+		got, err := resolveDBDSN(dbDSNCmd(t, t.TempDir()), "")
 		if err != nil || got != "postgres://url" {
+			t.Fatalf("got %q err %v", got, err)
+		}
+	})
+	t.Run("server.toml [postgres] dsn fallback", func(t *testing.T) {
+		t.Setenv("PB_POSTGRES_DSN", "")
+		t.Setenv("DATABASE_URL", "")
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "server.toml"),
+			[]byte("[postgres]\ndsn = \"postgres://toml/base\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := resolveDBDSN(dbDSNCmd(t, dir), "")
+		if err != nil || got != "postgres://toml/base" {
 			t.Fatalf("got %q err %v", got, err)
 		}
 	})
 	t.Run("nothing set is an actionable error", func(t *testing.T) {
 		t.Setenv("PB_POSTGRES_DSN", "")
 		t.Setenv("DATABASE_URL", "")
-		_, err := resolveDBDSN("")
+		_, err := resolveDBDSN(dbDSNCmd(t, t.TempDir()), "")
 		if err == nil {
 			t.Fatal("expected error when no DSN resolves")
 		}

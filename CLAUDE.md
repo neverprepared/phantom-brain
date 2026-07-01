@@ -49,8 +49,11 @@ pbrainctl server backfill-attachment-stubs
 pbrainctl server backfill-to-pg <profile>     # one-shot legacy-OS → Postgres SoR backfill (#92)
 pbrainctl server bucket create|list           # MinIO bucket admin
 pbrainctl server binding create|list|delete   # single-command binding workflow
+pbrainctl server profile create <profile> <vault>  # all-in-one: db + bucket + binding config + validate + reload (idempotent)
 pbrainctl server version
 ```
+
+**`profile create` is the "just make a new memory store" front door.** It takes only a profile and a vault name and orchestrates the four steps that `binding create` / `db provision` / `bucket create` each do individually: provisions `pb_<profile>` Postgres, creates the `<profile>-archives` MinIO bucket, writes the binding config (`auth.toml` + `config.toml` with `[storage_overrides]` — derived `index_prefix = <profile>_`, bucket overridable via flags), validates the registry load, then best-effort SIGHUPs the daemon. Every step is idempotent and independently attempted: a re-run heals a half-provisioned binding rather than erroring, an existing binding keeps its bearer token (never clobbered), and the command aggregates per-step results into one summary, exiting non-zero if anything failed. The base Postgres DSN resolves from `--dsn` → `$PB_POSTGRES_DSN` → `$DATABASE_URL` → `server.toml [postgres] dsn` (the same fallback now shared by `db provision`); a Postgres connect failure prints the host-vs-container DSN hint (use `localhost:5433`, not the in-container address, when running the CLI on the host). See `cmd/pbrainctl/profile.go`.
 
 ## Architecture
 

@@ -52,7 +52,7 @@ The --dsn flag is the BASE/maintenance DSN; the per-profile database
 		RunE: func(cmd *cobra.Command, args []string) error {
 			profile := args[0]
 
-			base, err := resolveDBDSN(dsn)
+			base, err := resolveDBDSN(cmd, dsn)
 			if err != nil {
 				return err
 			}

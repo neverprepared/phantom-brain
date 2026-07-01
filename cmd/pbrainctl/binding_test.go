@@ -282,6 +282,87 @@ minio_bucket = "pb-default"
 	}
 }
 
+// writeOverrideBinding creates a binding WITH [storage_overrides] so the
+// structural purge-safety checks pass and the flow reaches the typed-name
+// confirmation gate. Returns the config dir.
+func writeOverrideBinding(t *testing.T, profile, vault string) string {
+	t.Helper()
+	cfgDir := writeMinimalServerToml(t, `
+[storage]
+backend = "local"
+minio_bucket = "pb-default"
+`)
+	bindingDir := filepath.Join(cfgDir, "profiles", profile, "vaults", vault)
+	must(t, os.MkdirAll(bindingDir, 0o700))
+	must(t, os.WriteFile(filepath.Join(bindingDir, "auth.toml"),
+		[]byte(`bearer_token = "tok"`+"\n"), 0o600))
+	must(t, os.WriteFile(filepath.Join(bindingDir, "config.toml"),
+		[]byte("[storage_overrides]\nindex_prefix = \""+profile+"_\"\nbucket = \""+profile+"-archives\"\n"), 0o644))
+	return cfgDir
+}
+
+func runBindingDelete(t *testing.T, cfgDir string, args []string, flags map[string]string) (string, error) {
+	t.Helper()
+	cmd := bindingDeleteCmd()
+	buf := &bytes.Buffer{}
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	_ = cmd.Flags().Set("config-dir", cfgDir)
+	_ = cmd.Flags().Set("data-dir", t.TempDir())
+	for k, v := range flags {
+		_ = cmd.Flags().Set(k, v)
+	}
+	cmd.SetArgs(args)
+	err := cmd.Execute()
+	return buf.String(), err
+}
+
+// TestBindingDelete_PurgeRequiresTypedName covers the typed-name gate on
+// the irreversible purge: a missing target is refused with the actionable
+// hint, a MISMATCHED target aborts (guarding against deleting the wrong
+// binding), and only the EXACT target proceeds.
+func TestBindingDelete_PurgeRequiresTypedName(t *testing.T) {
+	t.Run("missing target refused", func(t *testing.T) {
+		cfgDir := writeOverrideBinding(t, "p", "v")
+		out, err := runBindingDelete(t, cfgDir, []string{"p/v"}, map[string]string{"purge-data": "true"})
+		if err == nil || !strings.Contains(err.Error(), "--confirm-target=p/v") {
+			t.Fatalf("want irreversible/confirm-target hint; got %v\n%s", err, out)
+		}
+		if _, statErr := os.Stat(filepath.Join(cfgDir, "profiles", "p", "vaults", "v")); statErr != nil {
+			t.Fatalf("binding dir must survive a refused purge: %v", statErr)
+		}
+	})
+
+	t.Run("mismatched target aborts", func(t *testing.T) {
+		cfgDir := writeOverrideBinding(t, "p", "v")
+		out, err := runBindingDelete(t, cfgDir, []string{"p/v"},
+			map[string]string{"purge-data": "true", "confirm-target": "p/WRONG"})
+		if err == nil || !strings.Contains(err.Error(), "does not match") {
+			t.Fatalf("want mismatch refusal; got %v\n%s", err, out)
+		}
+		if _, statErr := os.Stat(filepath.Join(cfgDir, "profiles", "p", "vaults", "v")); statErr != nil {
+			t.Fatalf("binding dir must survive a mismatched target: %v", statErr)
+		}
+	})
+
+	t.Run("exact target proceeds", func(t *testing.T) {
+		cfgDir := writeOverrideBinding(t, "p", "v")
+		out, err := runBindingDelete(t, cfgDir, []string{"p/v"},
+			map[string]string{"purge-data": "true", "confirm-target": "p/v"})
+		if err != nil {
+			t.Fatalf("exact target should proceed: %v\n%s", err, out)
+		}
+		if _, statErr := os.Stat(filepath.Join(cfgDir, "profiles", "p", "vaults", "v")); !os.IsNotExist(statErr) {
+			t.Fatalf("binding dir should be removed after confirmed purge: stat err=%v", statErr)
+		}
+		// Postgres purge is skipped (no DSN in a local-only test config),
+		// which should be reported, not silently dropped.
+		if !strings.Contains(out, "skipped Postgres purge") {
+			t.Errorf("expected the no-DSN Postgres-skip notice, got:\n%s", out)
+		}
+	})
+}
+
 func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {

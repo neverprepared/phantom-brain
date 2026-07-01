@@ -3,8 +3,11 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
+
+	pbserver "github.com/neverprepared/phantom-brain/internal/server"
 
 	"github.com/neverprepared/phantom-brain/internal/pgstore"
 )
@@ -30,15 +33,21 @@ should point at an existing maintenance database (e.g. phantom_brain or
 postgres); the per-profile database name is derived as pb_<profile>.`,
 	}
 	c.PersistentFlags().StringVar(&dsn, "dsn", "",
-		"base/maintenance Postgres DSN (default: $PB_POSTGRES_DSN, then $DATABASE_URL)")
+		"base/maintenance Postgres DSN (default: $PB_POSTGRES_DSN, then $DATABASE_URL, then server.toml [postgres] dsn)")
+	c.PersistentFlags().String("config-dir", "", "override PHANTOM_BRAIN_CONFIG_DIR (read [postgres] dsn from server.toml when --dsn/env are unset)")
 	c.AddCommand(dbProvisionCmd(&dsn))
 	c.AddCommand(dbMigrateCmd(&dsn))
 	return c
 }
 
-// resolveDBDSN returns the explicit --dsn, else PB_POSTGRES_DSN, else
-// DATABASE_URL, else an actionable error.
-func resolveDBDSN(flag string) (string, error) {
+// resolveDBDSN returns the base/maintenance DSN, preferring the explicit
+// --dsn, then $PB_POSTGRES_DSN, then $DATABASE_URL, and finally the
+// [postgres] dsn from the daemon's server.toml (resolved via --config-dir
+// or the default config dir). The config fallback means `db provision`
+// works with zero extra flags on the daemon host — the same server.toml
+// the daemon reads is authoritative. Returns an actionable error when no
+// source yields a DSN.
+func resolveDBDSN(cmd *cobra.Command, flag string) (string, error) {
 	if flag != "" {
 		return flag, nil
 	}
@@ -48,7 +57,16 @@ func resolveDBDSN(flag string) (string, error) {
 	if v := os.Getenv("DATABASE_URL"); v != "" {
 		return v, nil
 	}
-	return "", fmt.Errorf("no DSN: set --dsn or PB_POSTGRES_DSN / DATABASE_URL; " +
+	// Last resort: read the same server.toml the daemon uses. A missing or
+	// unparseable config is not fatal here — fall through to the actionable
+	// error so the operator sees the DSN guidance, not a config-read stack.
+	if cfg, err := pbserver.LoadServerConfig(resolveConfigDir(cmd)); err == nil {
+		if v := strings.TrimSpace(cfg.Postgres.DSN); v != "" {
+			return v, nil
+		}
+	}
+	return "", fmt.Errorf("no DSN: set --dsn, PB_POSTGRES_DSN / DATABASE_URL, " +
+		"or [postgres] dsn in server.toml (via --config-dir); " +
 		"it should point at the maintenance database, e.g. " +
 		"postgres://pbrain:***@localhost:5433/phantom_brain")
 }
@@ -62,7 +80,7 @@ pg_trgm extensions in it, and apply all SoR migrations. Idempotent —
 re-running on an existing, migrated profile is a no-op.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			base, err := resolveDBDSN(*dsn)
+			base, err := resolveDBDSN(cmd, *dsn)
 			if err != nil {
 				return err
 			}
@@ -91,7 +109,7 @@ DSN is rewritten to target pb_<profile>. Idempotent — an up-to-date
 database is a no-op. Does NOT create the database (use provision first).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			base, err := resolveDBDSN(*dsn)
+			base, err := resolveDBDSN(cmd, *dsn)
 			if err != nil {
 				return err
 			}
