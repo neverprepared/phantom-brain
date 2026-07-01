@@ -103,6 +103,7 @@ func serverCmd() *cobra.Command {
 	c.AddCommand(bucketCmd())
 	c.AddCommand(bindingCmd())
 	c.AddCommand(dbCmd())
+	c.AddCommand(profileCmd())
 	c.AddCommand(versionCmd())
 	return c
 }

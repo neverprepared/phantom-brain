@@ -15,6 +15,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/neverprepared/phantom-brain/internal/osearch"
+	"github.com/neverprepared/phantom-brain/internal/osproject"
+	"github.com/neverprepared/phantom-brain/internal/pgstore"
 	pbserver "github.com/neverprepared/phantom-brain/internal/server"
 )
 
@@ -221,13 +223,15 @@ func bindingListCmd() *cobra.Command {
 
 func bindingDeleteCmd() *cobra.Command {
 	var (
-		purgeData   bool
-		confirm     bool
-		allowShared bool
+		purgeData     bool
+		confirm       bool
+		confirmTarget string
+		allowShared   bool
+		dsn           string
 	)
 	c := &cobra.Command{
 		Use:   "delete [profile/vault]",
-		Short: "Delete a binding's config (and, with --purge-data, its OS indices + MinIO bucket)",
+		Short: "Delete a binding's config (and, with --purge-data, its OS projection index, MinIO bucket, and Postgres rows)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key, err := vaultArgFromArgs(args)
@@ -258,17 +262,25 @@ func bindingDeleteCmd() *cobra.Command {
 			usesSharedBucket := binding.Storage.Bucket == cfg.Storage.MinIOBucket
 			usesSharedIndices := binding.Storage.IndexPrefix == cfg.OpenSearch.IndexPrefix
 
+			// The irreversible purge is gated on a typed-name match, not a
+			// bare boolean: --confirm-target must equal the exact binding
+			// key. This guards against confirming a delete of the WRONG
+			// binding (a bool can't). The recoverable config-only delete
+			// keeps the lighter --confirm bool.
+			purgeConfirmed := purgeData && confirmTarget == key.String()
+			doDelete := confirm || purgeConfirmed
+
 			out := cmd.OutOrStdout()
 			action := "DRY-RUN"
-			if confirm {
+			if doDelete {
 				action = "DELETE"
 			}
 			fmt.Fprintf(out, "%s binding %s\n", action, key)
 			fmt.Fprintf(out, "  config dir: %s\n", bindingDir)
 			if purgeData {
-				if !confirm {
-					return errors.New("--purge-data requires --confirm")
-				}
+				// Structural safety first — these configs are never safe to
+				// purge regardless of confirmation, so reject before asking
+				// the operator to type the name.
 				if !hasOverride {
 					return fmt.Errorf("--purge-data refused: binding %s has no [storage_overrides] (deleting shared resources is never safe)", key)
 				}
@@ -278,20 +290,28 @@ func bindingDeleteCmd() *cobra.Command {
 				if usesSharedBucket && !allowShared {
 					return errors.New("--purge-data refused: binding writes to the shared default MinIO bucket; re-run with --allow-shared (will skip bucket purge regardless)")
 				}
+				// Typed-name confirmation for the irreversible purge.
+				if !purgeConfirmed {
+					if confirmTarget == "" {
+						return fmt.Errorf("--purge-data is irreversible (drops the OS index, MinIO bucket, and Postgres rows).\n"+
+							"Re-run with --confirm-target=%s to confirm you mean this exact binding.", key)
+					}
+					return fmt.Errorf("--confirm-target %q does not match the binding %s — aborting to avoid deleting the wrong binding", confirmTarget, key)
+				}
 				ctx, cancel := signalCancel(cmd.Context())
 				defer cancel()
-				if err := purgeBindingData(ctx, cmd, cfg, binding, out); err != nil {
+				if err := purgeBindingData(ctx, cmd, cfg, binding, dsn, out); err != nil {
 					return err
 				}
 			} else if confirm {
-				fmt.Fprintln(out, "  (config only — data left in place; add --purge-data to drop indices + bucket)")
+				fmt.Fprintln(out, "  (config only — data left in place; add --purge-data to drop index + bucket + Postgres rows)")
 			} else {
 				// dry-run: show what would happen
 				if hasOverride {
-					fmt.Fprintf(out, "  would-purge-with-flag: prefix=%s bucket=%s\n",
-						binding.Storage.IndexPrefix, binding.Storage.Bucket)
+					fmt.Fprintf(out, "  would-purge-with-flag: index=%spb_records bucket=%s + Postgres rows for %s\n",
+						binding.Storage.IndexPrefix, binding.Storage.Bucket, key)
 				}
-				fmt.Fprintln(out, "  add --confirm to remove the config dir; add --purge-data to also drop OS + MinIO state")
+				fmt.Fprintf(out, "  add --confirm to remove the config dir; add --purge-data --confirm-target=%s to also drop OS + MinIO + Postgres state\n", key)
 				return nil
 			}
 
@@ -304,17 +324,23 @@ func bindingDeleteCmd() *cobra.Command {
 		},
 	}
 	opsCommonFlags(c)
-	c.Flags().BoolVar(&purgeData, "purge-data", false, "also drop OS indices + (non-default) MinIO bucket")
-	c.Flags().BoolVar(&confirm, "confirm", false, "actually delete (without this flag the command is a dry-run)")
+	c.Flags().BoolVar(&purgeData, "purge-data", false, "also drop the OS projection index, (non-default) MinIO bucket, and the binding's Postgres rows")
+	c.Flags().BoolVar(&confirm, "confirm", false, "actually delete the config (without this flag the command is a dry-run); not sufficient for --purge-data")
+	c.Flags().StringVar(&confirmTarget, "confirm-target", "", "typed-name confirmation for the irreversible --purge-data: must equal <profile/vault>")
 	c.Flags().BoolVar(&allowShared, "allow-shared", false, "permit --purge-data on a binding sharing default indices/bucket")
+	c.Flags().StringVar(&dsn, "dsn", "", "base/maintenance Postgres DSN for the row purge (default: $PB_POSTGRES_DSN, then $DATABASE_URL, then server.toml [postgres] dsn)")
 	return c
 }
 
-// purgeBindingData drops the binding's prefixed OS indices and (when
-// the binding has its own non-default bucket) empties + removes that
-// bucket. Shared resources are NEVER touched here — callers route to
-// this only after the safety predicates pass.
-func purgeBindingData(ctx context.Context, cmd *cobra.Command, cfg *pbserver.ServerConfig, binding pbserver.VaultBinding, out writer) error {
+// purgeBindingData drops the binding's data across all three stores: the
+// prefixed OS projection index (post-#92 that is the single pb_records
+// index, NOT the retired pb_summaries/pb_entities/pb_attachments trio),
+// its own non-default MinIO bucket, and its rows in the per-profile
+// Postgres SoR. Shared resources are NEVER dropped wholesale — callers
+// route here only after the safety predicates pass, and the Postgres
+// purge is a scoped (profile, vault) row delete rather than a database
+// drop (pb_<profile> is shared across the profile's vaults).
+func purgeBindingData(ctx context.Context, cmd *cobra.Command, cfg *pbserver.ServerConfig, binding pbserver.VaultBinding, dsnFlag string, out writer) error {
 	if cfg.OpenSearch.Enabled() && binding.Storage.IndexPrefix != cfg.OpenSearch.IndexPrefix {
 		oc, err := osearch.Open(ctx, osearch.Config{
 			Addresses:          cfg.OpenSearch.Addresses,
@@ -327,13 +353,11 @@ func purgeBindingData(ctx context.Context, cmd *cobra.Command, cfg *pbserver.Ser
 		if err != nil {
 			return fmt.Errorf("opensearch open: %w", err)
 		}
-		for _, logical := range []string{osearch.IndexSummaries, osearch.IndexEntities, osearch.IndexAttachments} {
-			full := osearch.IndexNameWithPrefix(binding.Storage.IndexPrefix, logical)
-			if err := oc.DeleteIndex(ctx, logical); err != nil {
-				return fmt.Errorf("delete index %s: %w", full, err)
-			}
-			fmt.Fprintf(out, "  dropped OS index %s\n", full)
+		full := osearch.IndexNameWithPrefix(binding.Storage.IndexPrefix, osproject.LogicalRecords)
+		if err := oc.DeleteIndex(ctx, osproject.LogicalRecords); err != nil {
+			return fmt.Errorf("delete index %s: %w", full, err)
 		}
+		fmt.Fprintf(out, "  dropped OS index %s\n", full)
 	}
 
 	if binding.Storage.Bucket != "" && binding.Storage.Bucket != cfg.Storage.MinIOBucket && cfg.Storage.Backend == "minio" {
@@ -345,6 +369,20 @@ func purgeBindingData(ctx context.Context, cmd *cobra.Command, cfg *pbserver.Ser
 			return err
 		}
 		fmt.Fprintf(out, "  dropped MinIO bucket %s\n", binding.Storage.Bucket)
+	}
+
+	// Postgres SoR: delete only this binding's rows. Skipped (not failed)
+	// when no DSN is resolvable — the operator may run a legacy OS-only
+	// daemon, and a missing DSN shouldn't block the config/OS/bucket purge.
+	if base, err := resolveDBDSN(cmd, dsnFlag); err == nil {
+		counts, err := pgstore.PurgeBinding(ctx, base, binding.Key.Profile, binding.Key.Vault)
+		if err != nil {
+			return annotatePGConnectErr(err)
+		}
+		fmt.Fprintf(out, "  purged Postgres rows for %s: %d records, %d entities, %d fact-history\n",
+			binding.Key, counts.Records, counts.Entities, counts.FactHistory)
+	} else {
+		fmt.Fprintln(out, "  skipped Postgres purge: no DSN (set --dsn / PB_POSTGRES_DSN, or add [postgres] dsn to server.toml)")
 	}
 	return nil
 }
