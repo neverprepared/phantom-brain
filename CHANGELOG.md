@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.11.1](https://github.com/neverprepared/phantom-brain/compare/v3.11.0...v3.11.1) (2026-07-07)
+
+
+### Bug Fixes
+
+* **status:** feed connectivity from every daemon call, surface live heartbeat in Snapshot ([#130](https://github.com/neverprepared/phantom-brain/issues/130)) ([#131](https://github.com/neverprepared/phantom-brain/issues/131)) ([248508d](https://github.com/neverprepared/phantom-brain/commit/248508d2294fa9512a2bd2f0add8120cbb54bf8c))
+
 ## [3.11.0](https://github.com/neverprepared/phantom-brain/compare/v3.10.0...v3.11.0) (2026-07-01)
 
 
