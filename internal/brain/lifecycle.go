@@ -35,6 +35,12 @@ type Lifecycle struct {
 	brainDir  string
 	manifest  *Manifest
 	heartbeat *Heartbeat
+	// hbLast holds the RFC3339 timestamp of the most recent heartbeat
+	// touch (stored by the heartbeat goroutine's OnTouch hook, read by
+	// Snapshot). An atomic rather than l.mu because Shutdown holds l.mu
+	// while waiting for the heartbeat goroutine to exit — a mutex here
+	// would deadlock a tick in flight. Issue #130.
+	hbLast atomic.Value // string
 	writes    atomic.Int64  // bumped by RecordWrite; consumed by the checkpoint ticker + reset on every successful checkpoint
 	ckptStop  context.CancelFunc
 	ckptDone  chan struct{}
@@ -124,7 +130,15 @@ func Start(opts StartOpts) (*Lifecycle, error) {
 	// daemon API + bearer; construct the shared HTTP client once
 	// here so MCP handlers don't have to rebuild it per call.
 	if opts.Agent.API != "" && opts.Agent.Token != "" {
-		c, cerr := NewClient(ClientOpts{BaseURL: opts.Agent.API, Token: opts.Agent.Token})
+		// Connectivity is created first and handed to the client so
+		// EVERY daemon round-trip (reads included) feeds brain_status —
+		// not just the wqueue/drainer write path (issue #130).
+		lc.conn = NewConnectivity()
+		c, cerr := NewClient(ClientOpts{
+			BaseURL:      opts.Agent.API,
+			Token:        opts.Agent.Token,
+			Connectivity: lc.conn,
+		})
 		if cerr != nil {
 			return nil, fmt.Errorf("brain: start: build daemon client: %w", cerr)
 		}
@@ -134,7 +148,6 @@ func Start(opts StartOpts) (*Lifecycle, error) {
 			return nil, fmt.Errorf("brain: start: open write-ahead queue: %w", qerr)
 		}
 		lc.queue = q
-		lc.conn = NewConnectivity()
 		if !opts.SkipDrainer {
 			drainParent := opts.HeartbeatCtx
 			if drainParent == nil {
@@ -155,6 +168,10 @@ func Start(opts StartOpts) (*Lifecycle, error) {
 			BrainDir: dir,
 			Interval: time.Duration(opts.Agent.HeartbeatIntervalSecs) * time.Second,
 			Logger:   opts.Logger,
+			// Mirror each touch into hbLast so Snapshot() (and thus
+			// brain_status) reports a live heartbeat instead of the
+			// born_at value frozen into the in-memory manifest.
+			OnTouch: func(now string) { lc.hbLast.Store(now) },
 		})
 		if hberr != nil {
 			return nil, fmt.Errorf("brain: start heartbeat: %w", hberr)
@@ -281,10 +298,17 @@ func (l *Lifecycle) Agent() *config.Agent { return l.agent }
 
 // Snapshot returns a defensive copy of the current manifest. Used by
 // brain_status (Day 4) and any tool that wants to report identity.
+// LastHeartbeat is overlaid from the heartbeat goroutine's latest
+// touch — the in-memory manifest itself is only reloaded on
+// checkpoint, so without the overlay it reports the born_at value.
 func (l *Lifecycle) Snapshot() Manifest {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return *l.manifest
+	m := *l.manifest
+	if hb, ok := l.hbLast.Load().(string); ok && hb != "" {
+		m.LastHeartbeat = hb
+	}
+	return m
 }
 
 // Checkpoint runs the checkpoint flow and updates the in-memory
