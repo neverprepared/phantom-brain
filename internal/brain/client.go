@@ -21,6 +21,13 @@ type Client struct {
 	baseURL string
 	token   string
 	http    *http.Client
+
+	// conn, when non-nil, is fed on every do() round-trip so
+	// brain_status reflects daemon reachability regardless of which
+	// tool (read or write) last talked to the daemon. Issue #130:
+	// previously only the wqueue/drainer write path noted contact, so
+	// read-only sessions reported offline/-1 forever.
+	conn *Connectivity
 }
 
 // ClientOpts narrows what NewClient needs. HTTPClient and Timeout
@@ -37,6 +44,11 @@ type ClientOpts struct {
 	Token      string
 	HTTPClient *http.Client
 	Timeout    time.Duration
+
+	// Connectivity, if non-nil, receives NoteSuccess/NoteFailure on
+	// every daemon API round-trip (not on presigned-URL uploads, which
+	// target object storage rather than the daemon).
+	Connectivity *Connectivity
 }
 
 // NewClient validates the inputs and returns a ready Client. Returns
@@ -61,6 +73,7 @@ func NewClient(opts ClientOpts) (*Client, error) {
 		baseURL: strings.TrimRight(opts.BaseURL, "/"),
 		token:   opts.Token,
 		http:    hc,
+		conn:    opts.Connectivity,
 	}, nil
 }
 
@@ -463,11 +476,22 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("brain: %s %s: %w: %w", method, path, ErrDaemonUnreachable, err)
+		werr := fmt.Errorf("brain: %s %s: %w: %w", method, path, ErrDaemonUnreachable, err)
+		if c.conn != nil {
+			c.conn.NoteFailure(time.Now(), werr)
+		}
+		return werr
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return decodeErrorEnvelope(resp)
+		eerr := decodeErrorEnvelope(resp)
+		if c.conn != nil {
+			c.conn.NoteFailure(time.Now(), eerr)
+		}
+		return eerr
+	}
+	if c.conn != nil {
+		c.conn.NoteSuccess(time.Now())
 	}
 	if out == nil {
 		_, _ = io.Copy(io.Discard, resp.Body)

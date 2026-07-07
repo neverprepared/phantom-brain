@@ -39,6 +39,7 @@ type Heartbeat struct {
 	brainDir string
 	interval time.Duration
 	logger   *slog.Logger
+	onTouch  func(string)
 
 	mu     sync.Mutex
 	lock   *flock.Flock
@@ -54,6 +55,16 @@ type HeartbeatOpts struct {
 	BrainDir string
 	Interval time.Duration
 	Logger   *slog.Logger
+
+	// OnTouch, if non-nil, is invoked after every successful marker
+	// touch with the RFC3339 timestamp just written. Issue #130: touch
+	// refreshes the DISK manifest only, so without this hook the
+	// Lifecycle's in-memory manifest (served by brain_status via
+	// Snapshot) reports a heartbeat frozen at born_at. Runs on the
+	// heartbeat goroutine — implementations must not block on locks
+	// held across Heartbeat.Stop (Shutdown holds the Lifecycle mutex
+	// while stopping the heartbeat).
+	OnTouch func(nowRFC3339 string)
 }
 
 // StartHeartbeat takes the alive marker's flock and launches the
@@ -99,6 +110,7 @@ func StartHeartbeat(ctx context.Context, opts HeartbeatOpts) (*Heartbeat, error)
 		brainDir: opts.BrainDir,
 		interval: opts.Interval,
 		logger:   logger,
+		onTouch:  opts.OnTouch,
 		lock:     lock,
 		cancel:   cancel,
 		done:     make(chan struct{}),
@@ -149,6 +161,9 @@ func (h *Heartbeat) touch() error {
 	payload := fmt.Sprintf("pid=%d\nat=%s\n", os.Getpid(), now)
 	if err := os.WriteFile(AliveMarkerPath(h.brainDir), []byte(payload), 0o644); err != nil {
 		return err
+	}
+	if h.onTouch != nil {
+		h.onTouch(now)
 	}
 	// Refresh manifest's LastHeartbeat. Best-effort — the marker write
 	// above is what the recovery sweep actually checks; the manifest
