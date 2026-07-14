@@ -9,6 +9,48 @@ import (
 	"github.com/neverprepared/phantom-brain/internal/brain"
 )
 
+func TestBuild_PrunesOrphansForRollingMart(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "_mart")
+	if err := os.MkdirAll(filepath.Join(dest, attachmentsDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-seed as an owned, NON-ephemeral mart with stale content from a prior
+	// run, plus a human-added file that must be left alone.
+	writeF := func(rel, body string) {
+		if err := os.WriteFile(filepath.Join(dest, rel), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeF(MarkerFile, "phantom-brain mart: m\n")
+	writeF("index.md", "stale index")
+	writeF("old-note-000000000000.md", "a record since deleted upstream")
+	writeF(filepath.Join(attachmentsDir, "old-000000000000.gif"), "stale blob")
+	writeF("notes.txt", "a human note the mart must NOT touch")
+
+	spec := Spec{Name: "m", Profile: "p", Vault: "v", Dest: dest, Ephemeral: false, SkipAttachments: true}
+	if _, err := Build(context.Background(), spec, &fakeSource{recs: recs(1)}); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	// The orphaned note + attachment are pruned.
+	if _, err := os.Stat(filepath.Join(dest, "old-note-000000000000.md")); !os.IsNotExist(err) {
+		t.Error("stale note should be pruned by the full build")
+	}
+	if _, err := os.Stat(filepath.Join(dest, attachmentsDir, "old-000000000000.gif")); !os.IsNotExist(err) {
+		t.Error("stale attachment should be pruned")
+	}
+	// The current record's note, the marker, and index survive; the human file
+	// is untouched.
+	if mds, _ := filepath.Glob(filepath.Join(dest, "*.md")); len(mds) != 2 {
+		t.Errorf("got %d .md files, want 2 (current note + index)", len(mds))
+	}
+	for _, keep := range []string{MarkerFile, "index.md", "notes.txt"} {
+		if _, err := os.Stat(filepath.Join(dest, keep)); err != nil {
+			t.Errorf("%s should survive the sweep: %v", keep, err)
+		}
+	}
+}
+
 // fakeSource serves records from an in-memory slice, paginated by index, so
 // Build can be tested without a daemon.
 type fakeSource struct {
