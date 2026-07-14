@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.13.0](https://github.com/neverprepared/phantom-brain/compare/v3.12.1...v3.13.0) (2026-07-14)
+
+
+### Features
+
+* **mart:** incremental change-feed sync + launchd auto-refresh ([#138](https://github.com/neverprepared/phantom-brain/issues/138), [#139](https://github.com/neverprepared/phantom-brain/issues/139)) ([#146](https://github.com/neverprepared/phantom-brain/issues/146)) ([0a3a5c8](https://github.com/neverprepared/phantom-brain/commit/0a3a5c8b314e44c07bac387feade2b4cf14b5dfc))
+
 ## [3.12.1](https://github.com/neverprepared/phantom-brain/compare/v3.12.0...v3.12.1) (2026-07-14)
 
 
