@@ -54,6 +54,31 @@ type Spec struct {
 	Filters         Filters `toml:"filters"`
 }
 
+// Summary renders a compact one-line description of the filters, e.g.
+// "tag=tax,irs topic=memory" or "(all)".
+func (f Filters) Summary() string {
+	var parts []string
+	if len(f.Kinds) > 0 {
+		parts = append(parts, "kind="+strings.Join(f.Kinds, ","))
+	}
+	if len(f.Tags) > 0 {
+		parts = append(parts, "tag="+strings.Join(f.Tags, ","))
+	}
+	if len(f.Sources) > 0 {
+		parts = append(parts, "source="+strings.Join(f.Sources, ","))
+	}
+	if f.Topic != "" {
+		parts = append(parts, "topic="+f.Topic)
+	}
+	if len(f.Reliability) > 0 {
+		parts = append(parts, "reliability="+strings.Join(f.Reliability, ","))
+	}
+	if len(parts) == 0 {
+		return "(all)"
+	}
+	return strings.Join(parts, " ")
+}
+
 // Validate enforces the invariants the builder and registry rely on.
 func (s Spec) Validate() error {
 	if !nameRe.MatchString(s.Name) {

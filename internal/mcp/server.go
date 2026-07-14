@@ -17,6 +17,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/neverprepared/phantom-brain/internal/brain"
+	"github.com/neverprepared/phantom-brain/internal/mart"
 	"github.com/neverprepared/phantom-brain/internal/working"
 )
 
@@ -97,6 +98,16 @@ type ServerDeps struct {
 	// configured" error. In production it is the same *brain.Client as
 	// Client; tests inject a fake.
 	FetchClient fetchClient
+
+	// ConfigDir is the client config root (where marts/ lives). The mart_*
+	// tools open the mart registry + credential store under it. Defaults to
+	// pbserver.DefaultConfigDir() at construction.
+	ConfigDir string
+
+	// AgentEnv is this session's binding, used as a fallback credential source
+	// for a mart whose (profile, vault) matches. A mart targeting a DIFFERENT
+	// profile resolves from the credentials store instead (mart cred add).
+	AgentEnv mart.AgentEnv
 }
 
 // Server is the MCP tool registry. Construct once per process, hand
@@ -136,4 +147,11 @@ func (s *Server) Register(srv *server.MCPServer) {
 	srv.AddTool(forgetTool(), s.handleForget)
 	// v3.4 re-synthesis backfill (issue #82).
 	srv.AddTool(resynthTool(), s.handleResynth)
+
+	// #141: agent-triggered mart materialization (read-only projections of
+	// the SoR into Obsidian dirs). Named-spec-only — the agent picks a
+	// pre-configured mart by name; it never passes a dest or filters.
+	srv.AddTool(martListTool(), s.handleMartList)
+	srv.AddTool(martBuildTool(), s.handleMartBuild)
+	srv.AddTool(martSyncTool(), s.handleMartSync)
 }
