@@ -73,7 +73,9 @@ func (r *Registry) List() ([]Spec, error) {
 	}
 	var out []Spec
 	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".toml" {
+		// credentials.toml shares the marts dir but is NOT a spec — skip it so
+		// it isn't loaded as a bogus empty mart.
+		if e.IsDir() || filepath.Ext(e.Name()) != ".toml" || e.Name() == "credentials.toml" {
 			continue
 		}
 		name := e.Name()[:len(e.Name())-len(".toml")]
