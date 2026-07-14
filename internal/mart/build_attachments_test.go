@@ -34,7 +34,7 @@ func (f fakeFetchSource) FetchAttachment(_ context.Context, rec brain.RecordDTO)
 func attachmentRec(sha, title, filename, mime string) brain.RecordDTO {
 	return brain.RecordDTO{
 		SHA:              sha,
-		Kind:             attachmentStub,
+		Kind:             attachmentKind,
 		Title:            title,
 		Body:             "stub summary for " + title,
 		OriginalFilename: filename,
@@ -123,7 +123,7 @@ func TestBuild_AttachmentFetchFailureIsBestEffort(t *testing.T) {
 func TestBuild_NonAttachmentRecordIgnoredByFetcher(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "_mart")
 	// A plain note whose SHA happens to have a blob entry — must be ignored
-	// because Kind != attachment_stub.
+	// because Kind != attachment.
 	note := brain.RecordDTO{SHA: "dd44000000000000", Kind: "note", Title: "plain", Body: "b"}
 	src := fakeFetchSource{
 		fakeSource: &fakeSource{recs: []brain.RecordDTO{note}},
