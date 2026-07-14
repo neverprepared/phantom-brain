@@ -58,3 +58,38 @@ func TestCredentials_RoundtripLookupUpsertRemove(t *testing.T) {
 		t.Error("Remove of missing binding should report false")
 	}
 }
+
+func TestResolveCredential(t *testing.T) {
+	dir := t.TempDir()
+	store := Credentials{}
+	store.Set(Credential{Profile: "personal", Vault: "memory", API: "https://store", Token: "stok"})
+	if err := SaveCredentials(dir, store); err != nil {
+		t.Fatal(err)
+	}
+	spec := Spec{Profile: "personal", Vault: "memory"}
+
+	// Store hit (env ignored).
+	if api, tok, err := ResolveCredential(dir, spec, AgentEnv{}); err != nil || api != "https://store" || tok != "stok" {
+		t.Fatalf("store hit: (%q,%q,%v)", api, tok, err)
+	}
+	// Store wins over a matching env.
+	envMatch := AgentEnv{API: "https://env", Token: "etok", Profile: "personal", Vault: "memory"}
+	if api, _, _ := ResolveCredential(dir, spec, envMatch); api != "https://store" {
+		t.Errorf("store should win over env, got %q", api)
+	}
+
+	// No store → env fallback ONLY when it matches the binding.
+	empty := t.TempDir()
+	if api, tok, err := ResolveCredential(empty, spec, envMatch); err != nil || api != "https://env" || tok != "etok" {
+		t.Fatalf("env fallback: (%q,%q,%v)", api, tok, err)
+	}
+	// Mismatched env is ignored → error.
+	envOther := AgentEnv{API: "https://env", Token: "etok", Profile: "gsa", Vault: "memory"}
+	if _, _, err := ResolveCredential(empty, spec, envOther); err == nil {
+		t.Error("mismatched env must not resolve creds")
+	}
+	// No store, no env → error.
+	if _, _, err := ResolveCredential(empty, spec, AgentEnv{}); err == nil {
+		t.Error("no store + no env must error")
+	}
+}

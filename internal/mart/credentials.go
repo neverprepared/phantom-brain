@@ -94,3 +94,33 @@ func (c *Credentials) Remove(profile, vault string) bool {
 	}
 	return false
 }
+
+// AgentEnv is the ambient agent-contract binding (CL_BRAIN_*), used as a
+// fallback credential source when it matches the mart's (profile, vault). Kept
+// as a plain struct so this package stays free of internal/config — the caller
+// fills it (the CLI from config.LoadAgent, the MCP server from ServerDeps).
+type AgentEnv struct {
+	API, Token, Profile, Vault string
+}
+
+// ResolveCredential returns the daemon (api, token) for a spec's binding so a
+// mart can reach the right tenant WITHOUT relying on ambient env. Order:
+//  1. the workstation credentials store, keyed by (profile, vault);
+//  2. env — but ONLY when it is bound to the same (profile, vault) and has a
+//     token (a mismatched env would project the wrong tenant, so it is ignored,
+//     not trusted);
+//  3. a clear error. The store wins over env.
+func ResolveCredential(configDir string, spec Spec, env AgentEnv) (api, token string, err error) {
+	store, lerr := LoadCredentials(configDir)
+	if lerr != nil {
+		return "", "", lerr
+	}
+	if cred, ok := store.Lookup(spec.Profile, spec.Vault); ok {
+		return cred.API, cred.Token, nil
+	}
+	if env.Profile == spec.Profile && env.Vault == spec.Vault && env.API != "" && env.Token != "" {
+		return env.API, env.Token, nil
+	}
+	return "", "", fmt.Errorf("no credentials for %s/%s: run `pbrainctl client mart cred add` with that profile's CL_BRAIN_* exported, or export CL_BRAIN_* matching it",
+		spec.Profile, spec.Vault)
+}

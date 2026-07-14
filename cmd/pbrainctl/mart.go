@@ -158,19 +158,11 @@ func redactToken(t string) string {
 // (3) a clear error. The daemon still enforces the tenant via the token; this
 // just picks the right token.
 func resolveMartCreds(cmd *cobra.Command, spec mart.Spec) (api, token string, err error) {
-	configDir := resolveConfigDir(cmd)
-	store, lerr := mart.LoadCredentials(configDir)
-	if lerr != nil {
-		return "", "", lerr
+	var env mart.AgentEnv
+	if agent, aerr := config.LoadAgent(); aerr == nil {
+		env = mart.AgentEnv{API: agent.API, Token: agent.Token, Profile: agent.Profile, Vault: agent.Vault}
 	}
-	if cred, ok := store.Lookup(spec.Profile, spec.Vault); ok {
-		return cred.API, cred.Token, nil
-	}
-	if agent, aerr := config.LoadAgent(); aerr == nil && agent.Profile == spec.Profile && agent.Vault == spec.Vault {
-		return agent.API, agent.Token, nil
-	}
-	return "", "", fmt.Errorf("no credentials for %s/%s: run `pbrainctl client mart cred add` with that profile's CL_BRAIN_* exported, or export CL_BRAIN_* matching it",
-		spec.Profile, spec.Vault)
+	return mart.ResolveCredential(resolveConfigDir(cmd), spec, env)
 }
 
 // resolveMartForRun loads a mart spec and builds a daemon client with the
@@ -337,7 +329,7 @@ func martListCmd() *cobra.Command {
 			fmt.Fprintln(tw, "NAME\tPROFILE/VAULT\tEPHEMERAL\tDEST\tFILTERS")
 			for _, s := range specs {
 				fmt.Fprintf(tw, "%s\t%s/%s\t%t\t%s\t%s\n",
-					s.Name, s.Profile, s.Vault, s.Ephemeral, s.Dest, describeFilters(s.Filters))
+					s.Name, s.Profile, s.Vault, s.Ephemeral, s.Dest, s.Filters.Summary())
 			}
 			_ = tw.Flush()
 			return nil
@@ -455,29 +447,4 @@ func forEachMart(cmd *cobra.Command, do func(mart.Spec, *mart.Registry, *brain.C
 		return fmt.Errorf("%d of %d mart(s) failed", failed, len(specs))
 	}
 	return nil
-}
-
-// describeFilters renders a compact one-line summary of a mart's filters for
-// `mart list`.
-func describeFilters(f mart.Filters) string {
-	var parts []string
-	if len(f.Kinds) > 0 {
-		parts = append(parts, "kind="+strings.Join(f.Kinds, ","))
-	}
-	if len(f.Tags) > 0 {
-		parts = append(parts, "tag="+strings.Join(f.Tags, ","))
-	}
-	if len(f.Sources) > 0 {
-		parts = append(parts, "source="+strings.Join(f.Sources, ","))
-	}
-	if f.Topic != "" {
-		parts = append(parts, "topic="+f.Topic)
-	}
-	if len(f.Reliability) > 0 {
-		parts = append(parts, "reliability="+strings.Join(f.Reliability, ","))
-	}
-	if len(parts) == 0 {
-		return "(all)"
-	}
-	return strings.Join(parts, " ")
 }

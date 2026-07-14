@@ -22,6 +22,7 @@ import (
 
 	"github.com/neverprepared/phantom-brain/internal/brain"
 	"github.com/neverprepared/phantom-brain/internal/config"
+	"github.com/neverprepared/phantom-brain/internal/mart"
 	pbmcp "github.com/neverprepared/phantom-brain/internal/mcp"
 	"github.com/neverprepared/phantom-brain/internal/ollama"
 	pbserver "github.com/neverprepared/phantom-brain/internal/server"
@@ -214,9 +215,10 @@ func runMCPLegacyMode() error {
 
 	srv := server.NewMCPServer("phantom-brain", version.Version, server.WithToolCapabilities(false))
 	pbmcp.NewServer(pbmcp.ServerDeps{
-		Working:  wm,
-		Embedder: oll,
-		VaultDir: vaultDir,
+		Working:   wm,
+		Embedder:  oll,
+		VaultDir:  vaultDir,
+		ConfigDir: pbserver.DefaultConfigDir(),
 	}).Register(srv)
 	return server.ServeStdio(srv)
 }
@@ -298,6 +300,11 @@ func runMCPAgentMode() error {
 		// Phase D2a: brain_fetch is ONLINE-ONLY too — it reads the daemon's
 		// Postgres SoR by SHA. Same HTTP client as Client/RecallClient.
 		FetchClient: daemonClient,
+		// #141: mart_* tools resolve marts under the client config dir; the
+		// session binding is a credential fallback (cross-profile marts use
+		// the credentials store).
+		ConfigDir: pbserver.DefaultConfigDir(),
+		AgentEnv:  mart.AgentEnv{API: agent.API, Token: agent.Token, Profile: agent.Profile, Vault: agent.Vault},
 	}).Register(srv)
 
 	// Serve in a goroutine so signals can interrupt cleanly.
@@ -311,7 +318,6 @@ func runMCPAgentMode() error {
 		return err
 	}
 }
-
 
 // resolveLegacyIndexDir mirrors src/config.ts:resolveIndexPath from the
 // TS MCP server: the per-profile per-vault index lives at
