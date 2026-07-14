@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.14.0](https://github.com/neverprepared/phantom-brain/compare/v3.13.0...v3.14.0) (2026-07-14)
+
+
+### Features
+
+* **mart:** multi-profile credential resolution (spec-resolved creds + --all) ([#148](https://github.com/neverprepared/phantom-brain/issues/148)) ([#149](https://github.com/neverprepared/phantom-brain/issues/149)) ([96b4e51](https://github.com/neverprepared/phantom-brain/commit/96b4e51c9e289b078e58f4e6c7c87a5f43ea9de1))
+
 ## [3.13.0](https://github.com/neverprepared/phantom-brain/compare/v3.12.1...v3.13.0) (2026-07-14)
 
 
