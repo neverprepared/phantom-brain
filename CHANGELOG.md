@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.12.1](https://github.com/neverprepared/phantom-brain/compare/v3.12.0...v3.12.1) (2026-07-14)
+
+
+### Bug Fixes
+
+* **mart:** materialize attachments — SoR kind is "attachment", not "attachment_stub" ([#136](https://github.com/neverprepared/phantom-brain/issues/136)) ([41bd843](https://github.com/neverprepared/phantom-brain/commit/41bd843f7d5a0e54ea2c79f7934b3364fe1d7702))
+
 ## [3.12.0](https://github.com/neverprepared/phantom-brain/compare/v3.11.1...v3.12.0) (2026-07-14)
 
 
