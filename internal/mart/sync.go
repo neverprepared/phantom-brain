@@ -1,0 +1,185 @@
+package mart
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/neverprepared/phantom-brain/internal/brain"
+)
+
+// Cursor is the resume point of an incremental Sync: the (updated_at, id) of
+// the last record applied. Persisted at <configDir>/marts/<name>.cursor.
+type Cursor struct {
+	Since   string `json:"since"` // RFC3339Nano updated_at; "" = from the beginning
+	AfterID int64  `json:"after_id"`
+}
+
+// Sync applies the change feed since `cur` into spec.Dest WITHOUT wiping: it
+// pages the daemon's change-feed mode (GET /api/brain/records?since=...),
+// upserts each changed record's note (and, for attachments, re-downloads +
+// re-embeds its blob) in place, then rebuilds index.md from the directory
+// contents. Returns the advanced Cursor to persist.
+//
+// A zero cursor (first run) reads from the beginning, so the first Sync
+// bootstraps a fresh mart just like Build — but incrementally and without the
+// ephemeral wipe. Deletes are NOT propagated (the change feed can't see a
+// forgotten row); a periodic full Build prunes them.
+func Sync(ctx context.Context, spec Spec, c *brain.Client, cur Cursor) (Result, Cursor, error) {
+	if err := spec.Validate(); err != nil {
+		return Result{}, cur, err
+	}
+	if err := ensureOwnedDir(spec); err != nil {
+		return Result{}, cur, err
+	}
+
+	var fetcher AttachmentFetcher
+	if !spec.SkipAttachments {
+		// ClientSource's FetchAttachment is all we use here (Page is Build's
+		// id-keyset path; Sync drives its own since-keyset paging below).
+		fetcher = ClientSource{Client: c, Filters: spec.Filters}
+	}
+
+	const pageSize = 100
+	res := Result{DestPath: spec.Dest}
+	persist := cur
+	since, afterID := cur.Since, cur.AfterID
+
+	for {
+		resp, err := c.ListRecords(ctx, brain.ListRecordsRequest{
+			Since:       sinceParam(since),
+			AfterID:     afterID,
+			Limit:       pageSize,
+			Kinds:       spec.Filters.Kinds,
+			Tags:        spec.Filters.Tags,
+			Sources:     spec.Filters.Sources,
+			Topic:       spec.Filters.Topic,
+			Reliability: spec.Filters.Reliability,
+			Synthesised: spec.Filters.Synthesised,
+		})
+		if err != nil {
+			return Result{}, cur, fmt.Errorf("list records since %q: %w", since, err)
+		}
+		for _, rec := range resp.Records {
+			data, rerr := Render(rec)
+			if rerr != nil {
+				return Result{}, cur, fmt.Errorf("render %s: %w", rec.SHA, rerr)
+			}
+			if fetcher != nil && rec.Kind == attachmentKind {
+				embed, ok, aerr := materializeAttachment(ctx, spec, fetcher, rec)
+				switch {
+				case aerr != nil:
+					res.AttachmentsSkipped++
+					data = append(data, []byte("\n> [!warning] attachment could not be materialized: "+aerr.Error()+"\n")...)
+				case ok:
+					res.AttachmentsWritten++
+					data = append(data, []byte("\n## File\n\n"+embed+"\n")...)
+				}
+			}
+			name := Filename(rec)
+			if werr := os.WriteFile(filepath.Join(spec.Dest, name), data, 0o644); werr != nil {
+				return Result{}, cur, fmt.Errorf("write %s: %w", name, werr)
+			}
+			res.RecordsWritten++
+		}
+		if len(resp.Records) > 0 {
+			// In change-feed mode the daemon echoes the last row's cursor on
+			// every page (even the final short one), so this is always the
+			// true resume point.
+			persist = Cursor{Since: resp.NextSince, AfterID: resp.NextAfterID}
+		}
+		if len(resp.Records) < pageSize {
+			break // final page
+		}
+		since, afterID = resp.NextSince, resp.NextAfterID
+	}
+
+	if err := rebuildIndex(spec); err != nil {
+		return Result{}, cur, err
+	}
+	return res, persist, nil
+}
+
+// sinceParam maps an empty cursor to the zero time so change-feed mode returns
+// everything "from the beginning".
+func sinceParam(since string) string {
+	if since == "" {
+		return time.Time{}.Format(time.RFC3339)
+	}
+	return since
+}
+
+// rebuildIndex regenerates index.md from the mart's current on-disk notes, so
+// the entry point stays correct after an incremental Sync (or a Build). It
+// reads each note's frontmatter for the table columns.
+func rebuildIndex(spec Spec) error {
+	entries, err := os.ReadDir(spec.Dest)
+	if err != nil {
+		return fmt.Errorf("read mart dir: %w", err)
+	}
+	type row struct{ base, title, kind, topic string }
+	var rows []row
+	attachments := 0
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() {
+			if n == attachmentsDir {
+				if ents, aerr := os.ReadDir(filepath.Join(spec.Dest, n)); aerr == nil {
+					attachments = len(ents)
+				}
+			}
+			continue
+		}
+		if n == indexFile || filepath.Ext(n) != ".md" {
+			continue
+		}
+		fm := readNoteFrontmatter(filepath.Join(spec.Dest, n))
+		rows = append(rows, row{base: strings.TrimSuffix(n, ".md"), title: fm.Title, kind: fm.Type, topic: fm.Topic})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].base < rows[j].base })
+
+	var idx strings.Builder
+	fmt.Fprintf(&idx, "# %s\n\n", spec.Name)
+	fmt.Fprintf(&idx, "Projected from phantom-brain (%s/%s). %d record(s), %d attachment(s). Generated by `pbrainctl mart`; do not edit — this directory is rebuilt.\n\n",
+		spec.Profile, spec.Vault, len(rows), attachments)
+	idx.WriteString("| Note | Kind | Topic |\n|------|------|-------|\n")
+	for _, r := range rows {
+		title := r.title
+		if strings.TrimSpace(title) == "" {
+			title = "(untitled)"
+		}
+		fmt.Fprintf(&idx, "| [[%s\\|%s]] | %s | %s |\n", r.base, title, r.kind, r.topic)
+	}
+	if err := os.WriteFile(filepath.Join(spec.Dest, indexFile), []byte(idx.String()), 0o644); err != nil {
+		return fmt.Errorf("write index.md: %w", err)
+	}
+	return nil
+}
+
+// readNoteFrontmatter best-effort parses the YAML frontmatter block of a mart
+// note. A missing/malformed block yields a zero frontmatter (the row still
+// renders, just with blank columns) — the index must never fail a Sync.
+func readNoteFrontmatter(path string) frontmatter {
+	var fm frontmatter
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return fm
+	}
+	s := string(b)
+	if !strings.HasPrefix(s, "---\n") {
+		return fm
+	}
+	rest := s[len("---\n"):]
+	end := strings.Index(rest, "\n---\n")
+	if end < 0 {
+		return fm
+	}
+	_ = yaml.Unmarshal([]byte(rest[:end]), &fm)
+	return fm
+}

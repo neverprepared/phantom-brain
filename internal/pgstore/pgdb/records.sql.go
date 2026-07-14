@@ -243,6 +243,105 @@ func (q *Queries) ListRecords(ctx context.Context, arg ListRecordsParams) ([]Rec
 	return items, nil
 }
 
+const listRecordsSince = `-- name: ListRecordsSince :many
+SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes FROM records
+WHERE profile = $1
+  AND vault   = $2
+  AND synthesised = $3
+  AND (coalesce(array_length($4::text[], 1), 0) = 0         OR kind = ANY($4::text[]))
+  AND (coalesce(array_length($5::text[], 1), 0) = 0        OR topic = ANY($5::text[]))
+  AND (coalesce(array_length($6::text[], 1), 0) = 0 OR reliability = ANY($6::text[]))
+  AND (coalesce(array_length($7::text[], 1), 0) = 0      OR tags && $7::text[])
+  AND (coalesce(array_length($8::text[], 1), 0) = 0    OR source && $8::text[])
+  AND (updated_at > $9 OR (updated_at = $9 AND id > $10))
+ORDER BY updated_at, id
+LIMIT $11
+`
+
+type ListRecordsSinceParams struct {
+	Profile       string
+	Vault         string
+	Synthesised   bool
+	Kinds         []string
+	Topics        []string
+	Reliabilities []string
+	TagsAny       []string
+	SourceAny     []string
+	Since         pgtype.Timestamptz
+	AfterID       int64
+	Lim           int32
+}
+
+// Change feed for incremental mart refresh (pbrainctl mart sync). Same facet
+// filters as ListRecords, but ordered by the records_set_updated_at-maintained
+// updated_at so a caller can ask "what changed since my cursor". The cursor is
+// COMPOUND — (updated_at, id) — because many rows can share an updated_at
+// (a batch synth pass); keyset `updated_at > @since OR (updated_at = @since AND
+// id > @after_id)` neither skips nor duplicates across page boundaries the way
+// a bare `updated_at > @since` would. Deletes are NOT visible here (a forgotten
+// row simply stops appearing) — pruning is a periodic full rebuild's job.
+func (q *Queries) ListRecordsSince(ctx context.Context, arg ListRecordsSinceParams) ([]Record, error) {
+	rows, err := q.db.Query(ctx, listRecordsSince,
+		arg.Profile,
+		arg.Vault,
+		arg.Synthesised,
+		arg.Kinds,
+		arg.Topics,
+		arg.Reliabilities,
+		arg.TagsAny,
+		arg.SourceAny,
+		arg.Since,
+		arg.AfterID,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Record{}
+	for rows.Next() {
+		var i Record
+		if err := rows.Scan(
+			&i.ID,
+			&i.Profile,
+			&i.Vault,
+			&i.Sha,
+			&i.Kind,
+			&i.MemoryType,
+			&i.Title,
+			&i.RawBody,
+			&i.Body,
+			&i.SourceUrl,
+			&i.Source,
+			&i.Tags,
+			&i.CapturedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Reliability,
+			&i.Topic,
+			&i.GateReason,
+			&i.Synthesised,
+			&i.MinioKey,
+			&i.MimeType,
+			&i.SizeBytes,
+			&i.OriginalFilename,
+			&i.ExtractedText,
+			&i.Embedding,
+			&i.EmbeddingModel,
+			&i.EmbeddingVersion,
+			&i.CaptureMinioKey,
+			&i.CaptureSizeBytes,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUnsynthesised = `-- name: ListUnsynthesised :many
 SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes FROM records
 WHERE profile = $1 AND vault = $2 AND NOT synthesised

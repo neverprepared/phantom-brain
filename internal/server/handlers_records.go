@@ -45,10 +45,13 @@ type RecordDTO struct {
 
 // ListRecordsResponse is the 200 body of GET /api/brain/records. NextAfterID
 // is the keyset cursor for the next page; it is 0 when the page was not full
-// (end of stream), which is how the client loop terminates.
+// (end of stream), which is how the client loop terminates. NextSince is the
+// updated_at half of the compound cursor, set only in change-feed mode
+// (?since=...) — the caller persists (NextSince, NextAfterID) as its cursor.
 type ListRecordsResponse struct {
 	Records     []RecordDTO `json:"records"`
 	NextAfterID int64       `json:"next_after_id"`
+	NextSince   string      `json:"next_since,omitempty"`
 }
 
 // handleListRecords serves the generic, keyset-paginated enumeration of a
@@ -113,23 +116,59 @@ func (d *Daemon) handleListRecords(w http.ResponseWriter, r *http.Request) {
 		topics = []string{t}
 	}
 
+	// Optional change-feed mode: ?since=<RFC3339> switches from the id-keyset
+	// full enumeration (ListRecords) to the (updated_at, id) compound-keyset
+	// change feed (ListRecordsSince). after_id is the id half of the cursor in
+	// both modes.
+	var (
+		since     time.Time
+		sinceMode bool
+	)
+	if s := strings.TrimSpace(q.Get("since")); s != "" {
+		t, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, "since must be an RFC3339 timestamp", nil)
+			return
+		}
+		since, sinceMode = t, true
+	}
+
 	view, ok := d.resolvePGOrError(w, binding, "records enumeration")
 	if !ok {
 		return
 	}
 
-	recs, err := pgstore.New(view.Pool()).ListRecords(r.Context(), pgdb.ListRecordsParams{
-		Profile:       binding.Key.Profile,
-		Vault:         binding.Key.Vault,
-		Synthesised:   synthesised,
-		Kinds:         q["kind"],
-		Topics:        topics,
-		Reliabilities: q["reliability"],
-		TagsAny:       q["tag"],
-		SourceAny:     q["source"],
-		AfterID:       afterID,
-		Lim:           int32(limit),
-	})
+	store := pgstore.New(view.Pool())
+	var recs []pgdb.Record
+	var err error
+	if sinceMode {
+		recs, err = store.ListRecordsSince(r.Context(), pgdb.ListRecordsSinceParams{
+			Profile:       binding.Key.Profile,
+			Vault:         binding.Key.Vault,
+			Synthesised:   synthesised,
+			Kinds:         q["kind"],
+			Topics:        topics,
+			Reliabilities: q["reliability"],
+			TagsAny:       q["tag"],
+			SourceAny:     q["source"],
+			Since:         pgstore.OptTimestamptz(&since),
+			AfterID:       afterID,
+			Lim:           int32(limit),
+		})
+	} else {
+		recs, err = store.ListRecords(r.Context(), pgdb.ListRecordsParams{
+			Profile:       binding.Key.Profile,
+			Vault:         binding.Key.Vault,
+			Synthesised:   synthesised,
+			Kinds:         q["kind"],
+			Topics:        topics,
+			Reliabilities: q["reliability"],
+			TagsAny:       q["tag"],
+			SourceAny:     q["source"],
+			AfterID:       afterID,
+			Lim:           int32(limit),
+		})
+	}
 	if err != nil {
 		d.Logger.Error("phantom-brain: list records query failed", slog.String("err", err.Error()))
 		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr,
@@ -169,9 +208,22 @@ func (d *Daemon) handleListRecords(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.Records = append(resp.Records, dto)
 	}
-	// A full page implies there may be more; a short page is end-of-stream.
-	if len(recs) == limit && len(recs) > 0 {
-		resp.NextAfterID = recs[len(recs)-1].ID
+	if len(recs) > 0 {
+		last := recs[len(recs)-1]
+		if sinceMode {
+			// Change feed: always echo the last row's (updated_at, id) so the
+			// caller can persist it as its resume cursor even on the final
+			// short page. The caller detects end-of-stream by len < limit, not
+			// by a zero cursor.
+			resp.NextAfterID = last.ID
+			if last.UpdatedAt.Valid {
+				resp.NextSince = last.UpdatedAt.Time.Format(time.RFC3339Nano)
+			}
+		} else if len(recs) == limit {
+			// id-keyset mode: a full page implies more; a short page ends the
+			// stream (NextAfterID stays 0). Build's loop depends on this.
+			resp.NextAfterID = last.ID
+		}
 	}
 
 	writeJSON(w, http.StatusOK, resp)

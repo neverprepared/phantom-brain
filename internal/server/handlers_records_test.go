@@ -36,6 +36,7 @@ func TestHandleListRecords_BadParams400(t *testing.T) {
 		"bad limit":        "/api/brain/records?limit=0",
 		"non-numeric limit": "/api/brain/records?limit=x",
 		"bad synthesised":   "/api/brain/records?synthesised=maybe",
+		"bad since":         "/api/brain/records?since=not-a-timestamp",
 	}
 	d := &Daemon{}
 	for name, target := range cases {

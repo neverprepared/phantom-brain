@@ -271,14 +271,15 @@ func extFromMIME(mime string) string {
 	return ".bin"
 }
 
-// prepareDest enforces the ownership guard and readies spec.Dest for writing.
-func prepareDest(spec Spec) error {
-	markerPath := filepath.Join(spec.Dest, MarkerFile)
-
+// ensureOwnedDir makes spec.Dest exist and proves the mart owns it (drops the
+// .pbrain-mart marker), WITHOUT ever wiping. Fresh or empty dir → create +
+// claim. Already-marked dir → ok. Unmarked non-empty dir → refuse (never touch
+// a directory that might hold hand-authored notes). Shared by Build (full) and
+// Sync (incremental).
+func ensureOwnedDir(spec Spec) error {
 	info, err := os.Stat(spec.Dest)
 	switch {
 	case os.IsNotExist(err):
-		// Fresh directory — create + claim.
 		if err := os.MkdirAll(spec.Dest, 0o755); err != nil {
 			return fmt.Errorf("create mart dir: %w", err)
 		}
@@ -288,24 +289,30 @@ func prepareDest(spec Spec) error {
 	case !info.IsDir():
 		return fmt.Errorf("mart dest %q exists and is not a directory", spec.Dest)
 	}
-
-	// Directory exists — do we own it?
-	owned := fileExists(markerPath)
-	if !owned {
-		empty, derr := dirEmpty(spec.Dest)
-		if derr != nil {
-			return derr
-		}
-		if !empty {
-			return fmt.Errorf("refusing to use non-mart directory %q: it is non-empty and lacks the %s marker (point --dest at a dedicated subdirectory the mart can own)",
-				spec.Dest, MarkerFile)
-		}
-		// Empty dir — safe to adopt.
-		return writeMarker(spec)
+	if fileExists(filepath.Join(spec.Dest, MarkerFile)) {
+		return nil // already own it
 	}
+	empty, derr := dirEmpty(spec.Dest)
+	if derr != nil {
+		return derr
+	}
+	if !empty {
+		return fmt.Errorf("refusing to use non-mart directory %q: it is non-empty and lacks the %s marker (point --dest at a dedicated subdirectory the mart can own)",
+			spec.Dest, MarkerFile)
+	}
+	return writeMarker(spec) // empty dir — safe to adopt
+}
 
+// prepareDest readies spec.Dest for a full Build. For an ephemeral mart it
+// clean-rebuilds: prove ownership (or refuse), then wipe + recreate + reclaim.
+// Non-ephemeral overwrites in place.
+func prepareDest(spec Spec) error {
+	if err := ensureOwnedDir(spec); err != nil {
+		return err
+	}
 	if spec.Ephemeral {
-		// Clean-rebuild: wipe and recreate. Safe — we own it (marker present).
+		// Safe — ensureOwnedDir proved we own it (marker present) or just
+		// created/adopted an empty dir.
 		if err := os.RemoveAll(spec.Dest); err != nil {
 			return fmt.Errorf("clean mart dir: %w", err)
 		}
@@ -314,8 +321,7 @@ func prepareDest(spec Spec) error {
 		}
 		return writeMarker(spec)
 	}
-	// Non-ephemeral: keep existing files, overwrite by deterministic name.
-	return writeMarker(spec)
+	return nil
 }
 
 func writeMarker(spec Spec) error {

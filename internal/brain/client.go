@@ -373,13 +373,19 @@ type ListRecordsRequest struct {
 	Topic       string
 	Reliability []string
 	Synthesised *bool
+	// Since (RFC3339) switches to change-feed mode: only records with
+	// updated_at at/after the (Since, AfterID) compound cursor. Empty = the
+	// default id-keyset full enumeration.
+	Since string
 }
 
 // ListRecordsResponse mirrors server.ListRecordsResponse. NextAfterID is the
-// keyset cursor for the next page; 0 means end of stream.
+// keyset cursor for the next page; 0 means end of stream. NextSince is the
+// updated_at half of the compound cursor, present only in change-feed mode.
 type ListRecordsResponse struct {
 	Records     []RecordDTO `json:"records"`
 	NextAfterID int64       `json:"next_after_id"`
+	NextSince   string      `json:"next_since,omitempty"`
 }
 
 // ListRecords GETs one keyset page of the binding's records, filtered. It is
@@ -411,6 +417,9 @@ func (c *Client) ListRecords(ctx context.Context, req ListRecordsRequest) (*List
 	}
 	if req.Synthesised != nil {
 		q.Set("synthesised", strconv.FormatBool(*req.Synthesised))
+	}
+	if req.Since != "" {
+		q.Set("since", req.Since)
 	}
 	path := "/api/brain/records"
 	if enc := q.Encode(); enc != "" {

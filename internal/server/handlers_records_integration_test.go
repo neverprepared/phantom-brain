@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	neturl "net/url"
 	"testing"
 
 	"github.com/neverprepared/phantom-brain/internal/pgstore"
@@ -121,6 +122,36 @@ func TestListRecordsEndpoint_Integration(t *testing.T) {
 		code, _ := getRecords(t, url, "", "?synthesised=false")
 		if code != http.StatusUnauthorized {
 			t.Errorf("status = %d, want 401", code)
+		}
+	})
+
+	t.Run("change feed: since echoes a cursor, resume returns nothing new", func(t *testing.T) {
+		// From the beginning: all three unsynthesised records, with a cursor.
+		code, all := getRecords(t, url, token, "?synthesised=false&since=1970-01-01T00:00:00Z")
+		if code != http.StatusOK {
+			t.Fatalf("status %d", code)
+		}
+		if len(all.Records) != 3 {
+			t.Fatalf("since-epoch returned %d, want 3", len(all.Records))
+		}
+		if all.NextSince == "" || all.NextAfterID == 0 {
+			t.Fatalf("change-feed mode must echo (NextSince, NextAfterID); got (%q, %d)", all.NextSince, all.NextAfterID)
+		}
+		// Resume exactly after the last row → nothing changed since.
+		q := fmt.Sprintf("?synthesised=false&since=%s&after_id=%d", neturl.QueryEscape(all.NextSince), all.NextAfterID)
+		code, none := getRecords(t, url, token, q)
+		if code != http.StatusOK {
+			t.Fatalf("resume status %d", code)
+		}
+		if len(none.Records) != 0 {
+			t.Errorf("resume from the tail cursor returned %d, want 0", len(none.Records))
+		}
+	})
+
+	t.Run("malformed since is 400", func(t *testing.T) {
+		code, _ := getRecords(t, url, token, "?since=not-a-timestamp")
+		if code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400", code)
 		}
 	})
 }
