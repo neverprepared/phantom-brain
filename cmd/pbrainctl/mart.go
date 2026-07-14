@@ -33,15 +33,16 @@ func martCmd() *cobra.Command {
 
 func martAddCmd() *cobra.Command {
 	var (
-		profile     string
-		vault       string
-		dest        string
-		tags        []string
-		kinds       []string
-		sources     []string
-		topic       string
-		reliability []string
-		ephemeral   bool
+		profile         string
+		vault           string
+		dest            string
+		tags            []string
+		kinds           []string
+		sources         []string
+		topic           string
+		reliability     []string
+		ephemeral       bool
+		skipAttachments bool
 	)
 	c := &cobra.Command{
 		Use:   "add <name>",
@@ -65,11 +66,12 @@ build refuses to wipe a non-empty directory it did not create.`,
 				return fmt.Errorf("--vault is required (or set $CL_BRAIN_VAULT)")
 			}
 			spec := mart.Spec{
-				Name:      args[0],
-				Profile:   profile,
-				Vault:     vault,
-				Dest:      expandHome(dest),
-				Ephemeral: ephemeral,
+				Name:            args[0],
+				Profile:         profile,
+				Vault:           vault,
+				Dest:            expandHome(dest),
+				Ephemeral:       ephemeral,
+				SkipAttachments: skipAttachments,
 				Filters: mart.Filters{
 					Kinds:       kinds,
 					Tags:        tags,
@@ -96,6 +98,7 @@ build refuses to wipe a non-empty directory it did not create.`,
 	c.Flags().StringVar(&topic, "topic", "", "only records with this topic")
 	c.Flags().StringSliceVar(&reliability, "reliability", nil, "only records with these reliability values (repeatable)")
 	c.Flags().BoolVar(&ephemeral, "ephemeral", false, "clean-rebuild the dest each build (wipe + re-render)")
+	c.Flags().BoolVar(&skipAttachments, "skip-attachments", false, "project attachment metadata/stub text only; do NOT download MinIO blobs into the mart")
 	_ = c.MarkFlagRequired("dest")
 	return c
 }
@@ -184,8 +187,12 @@ func martBuildCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "built mart %q: %d record(s) → %s\n",
-				spec.Name, res.RecordsWritten, res.DestPath)
+			fmt.Fprintf(cmd.OutOrStdout(), "built mart %q: %d record(s), %d attachment(s) → %s\n",
+				spec.Name, res.RecordsWritten, res.AttachmentsWritten, res.DestPath)
+			if res.AttachmentsSkipped > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "warning: %d attachment(s) could not be materialized (see [!warning] callouts in the notes)\n",
+					res.AttachmentsSkipped)
+			}
 			return nil
 		},
 	}

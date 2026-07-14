@@ -2,7 +2,10 @@ package mart
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +18,12 @@ import (
 // guard that stops a mart from clobbering hand-authored notes.
 const MarkerFile = ".pbrain-mart"
 
-const indexFile = "index.md"
+const (
+	indexFile      = "index.md"
+	attachmentsDir = "attachments"
+	attachmentStub = "attachment_stub"
+	maxAttachmentB = 100 << 20 // 100 MiB — matches the daemon attach ceiling
+)
 
 // RecordSource yields one keyset page of records at a time. Build is written
 // against this interface so the future mart-daemon (an updated_at change-feed
@@ -24,8 +32,18 @@ type RecordSource interface {
 	Page(ctx context.Context, afterID int64) (recs []brain.RecordDTO, next int64, err error)
 }
 
+// AttachmentFetcher is an OPTIONAL capability a RecordSource may also
+// implement: it returns the raw blob bytes for an attachment record so Build
+// can materialize a self-contained mart (embed the PDF/image in Obsidian).
+// ok=false means "this record has no blob" (not an attachment / already gone);
+// only a genuine transport failure returns a non-nil error.
+type AttachmentFetcher interface {
+	FetchAttachment(ctx context.Context, rec brain.RecordDTO) (data []byte, filename string, ok bool, err error)
+}
+
 // ClientSource is the MVP RecordSource: it pages the daemon's
-// GET /api/brain/records over the public HTTP client.
+// GET /api/brain/records over the public HTTP client. It ALSO implements
+// AttachmentFetcher, pulling blobs via the presigned-URL attach endpoint.
 type ClientSource struct {
 	Client   *brain.Client
 	Filters  Filters
@@ -54,10 +72,49 @@ func (s ClientSource) Page(ctx context.Context, afterID int64) ([]brain.RecordDT
 	return resp.Records, resp.NextAfterID, nil
 }
 
+// FetchAttachment implements AttachmentFetcher: resolve the record's presigned
+// MinIO URL (GET /api/brain/attach/{sha}) and download the blob. A 404 means
+// the record carries no attachment (ok=false, no error).
+func (s ClientSource) FetchAttachment(ctx context.Context, rec brain.RecordDTO) ([]byte, string, bool, error) {
+	if rec.Kind != attachmentStub {
+		return nil, "", false, nil
+	}
+	ag, err := s.Client.AttachGet(ctx, rec.SHA)
+	if err != nil {
+		var apiErr *brain.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return nil, "", false, nil
+		}
+		return nil, "", false, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ag.URL, nil)
+	if err != nil {
+		return nil, "", false, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, "", false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", false, fmt.Errorf("presigned GET returned %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAttachmentB+1))
+	if err != nil {
+		return nil, "", false, err
+	}
+	if len(data) > maxAttachmentB {
+		return nil, "", false, fmt.Errorf("attachment exceeds %d-byte cap", maxAttachmentB)
+	}
+	return data, ag.Original, true, nil
+}
+
 // Result summarises a build.
 type Result struct {
-	RecordsWritten int
-	DestPath       string
+	RecordsWritten     int
+	AttachmentsWritten int
+	AttachmentsSkipped int // attachments a consumer wanted but could not fetch
+	DestPath           string
 }
 
 // Build renders the mart described by spec into spec.Dest, paging through src.
@@ -67,20 +124,31 @@ type Result struct {
 // it created. An ephemeral mart clean-rebuilds (wipe → recreate → marker); a
 // non-ephemeral mart overwrites in place by the record's deterministic
 // filename. index.md is written last as the Obsidian entry point.
+//
+// Attachments: unless spec.SkipAttachments is set and src implements
+// AttachmentFetcher, each attachment record's blob is downloaded into
+// <dest>/attachments/ and embedded in its note (![[...]]), making the mart
+// self-contained. Blob fetch is best-effort — a failure is counted, not fatal.
 func Build(ctx context.Context, spec Spec, src RecordSource) (Result, error) {
 	if err := spec.Validate(); err != nil {
 		return Result{}, err
 	}
-
 	if err := prepareDest(spec); err != nil {
 		return Result{}, err
+	}
+
+	var fetcher AttachmentFetcher
+	if !spec.SkipAttachments {
+		if af, ok := src.(AttachmentFetcher); ok {
+			fetcher = af
+		}
 	}
 
 	type indexRow struct {
 		base, title, kind, topic string
 	}
 	var rows []indexRow
-	written := 0
+	res := Result{DestPath: spec.Dest}
 
 	afterID := int64(0)
 	for {
@@ -93,6 +161,20 @@ func Build(ctx context.Context, spec Spec, src RecordSource) (Result, error) {
 			if err != nil {
 				return Result{}, fmt.Errorf("render %s: %w", rec.SHA, err)
 			}
+
+			// Best-effort: materialize the blob and embed it in the note.
+			if fetcher != nil && rec.Kind == attachmentStub {
+				embed, ok, aerr := materializeAttachment(ctx, spec, fetcher, rec)
+				switch {
+				case aerr != nil:
+					res.AttachmentsSkipped++
+					data = append(data, []byte("\n> [!warning] attachment could not be materialized: "+aerr.Error()+"\n")...)
+				case ok:
+					res.AttachmentsWritten++
+					data = append(data, []byte("\n## File\n\n"+embed+"\n")...)
+				}
+			}
+
 			name := Filename(rec)
 			if err := os.WriteFile(filepath.Join(spec.Dest, name), data, 0o644); err != nil {
 				return Result{}, fmt.Errorf("write %s: %w", name, err)
@@ -103,7 +185,7 @@ func Build(ctx context.Context, spec Spec, src RecordSource) (Result, error) {
 				kind:  rec.Kind,
 				topic: rec.Topic,
 			})
-			written++
+			res.RecordsWritten++
 		}
 		if next == 0 || next <= afterID || len(recs) == 0 {
 			break
@@ -114,8 +196,8 @@ func Build(ctx context.Context, spec Spec, src RecordSource) (Result, error) {
 	// index.md — a table of wikilinks so Obsidian has an entry point.
 	var idx strings.Builder
 	fmt.Fprintf(&idx, "# %s\n\n", spec.Name)
-	fmt.Fprintf(&idx, "Projected from phantom-brain (%s/%s). %d record(s). Generated by `pbrainctl mart build`; do not edit — this directory is rebuilt.\n\n",
-		spec.Profile, spec.Vault, written)
+	fmt.Fprintf(&idx, "Projected from phantom-brain (%s/%s). %d record(s), %d attachment(s). Generated by `pbrainctl mart build`; do not edit — this directory is rebuilt.\n\n",
+		spec.Profile, spec.Vault, res.RecordsWritten, res.AttachmentsWritten)
 	idx.WriteString("| Note | Kind | Topic |\n|------|------|-------|\n")
 	for _, r := range rows {
 		title := r.title
@@ -128,7 +210,59 @@ func Build(ctx context.Context, spec Spec, src RecordSource) (Result, error) {
 		return Result{}, fmt.Errorf("write index.md: %w", err)
 	}
 
-	return Result{RecordsWritten: written, DestPath: spec.Dest}, nil
+	return res, nil
+}
+
+// materializeAttachment downloads rec's blob and writes it under
+// <dest>/attachments/, returning the Obsidian embed string. ok=false means the
+// record had no blob (skip silently).
+func materializeAttachment(ctx context.Context, spec Spec, fetcher AttachmentFetcher, rec brain.RecordDTO) (embed string, ok bool, err error) {
+	data, filename, ok, err := fetcher.FetchAttachment(ctx, rec)
+	if err != nil || !ok {
+		return "", false, err
+	}
+	ext := filepath.Ext(filename)
+	if ext == "" {
+		ext = extFromMIME(rec.MimeType)
+	}
+	base := strings.TrimSuffix(Filename(rec), ".md") // shares the note's slug+sha
+	attName := base + ext
+	dir := filepath.Join(spec.Dest, attachmentsDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", false, fmt.Errorf("create attachments dir: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, attName), data, 0o644); err != nil {
+		return "", false, fmt.Errorf("write attachment: %w", err)
+	}
+	return fmt.Sprintf("![[%s/%s]]", attachmentsDir, attName), true, nil
+}
+
+// extFromMIME maps a MIME type to a file extension when the original filename
+// lacked one. Falls back to ".bin".
+func extFromMIME(mime string) string {
+	switch strings.ToLower(strings.TrimSpace(mime)) {
+	case "application/pdf":
+		return ".pdf"
+	case "image/png":
+		return ".png"
+	case "image/jpeg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "text/plain":
+		return ".txt"
+	case "text/markdown":
+		return ".md"
+	case "text/html":
+		return ".html"
+	case "text/csv":
+		return ".csv"
+	case "application/json":
+		return ".json"
+	}
+	return ".bin"
 }
 
 // prepareDest enforces the ownership guard and readies spec.Dest for writing.
