@@ -168,10 +168,10 @@ func (c *Client) GetMergeStatus(ctx context.Context, brainID string) (*MergeStat
 // daemon validates Kind against the closed enum and rejects unknowns.
 // MemoryType is optional (empty = "undecided / not applicable").
 type MemoryFields struct {
-	Kind       string    `json:"kind,omitempty"`        // closed enum — see osearch.Kind
-	MemoryType string    `json:"memory_type,omitempty"` // semantic | episodic | procedural | ""
-	Source     []string  `json:"source,omitempty"`      // provenance: URLs, task IDs, agent IDs, file paths
-	References []string  `json:"references,omitempty"`  // SHAs of related summaries (graph hook)
+	Kind       string     `json:"kind,omitempty"`        // closed enum — see osearch.Kind
+	MemoryType string     `json:"memory_type,omitempty"` // semantic | episodic | procedural | ""
+	Source     []string   `json:"source,omitempty"`      // provenance: URLs, task IDs, agent IDs, file paths
+	References []string   `json:"references,omitempty"`  // SHAs of related summaries (graph hook)
 	CapturedAt *time.Time `json:"captured_at,omitempty"` // when the content was authored, not when OS got it; nil = unset
 }
 
@@ -353,6 +353,11 @@ type RecordDTO struct {
 	Reliability string     `json:"reliability,omitempty"`
 	CapturedAt  *time.Time `json:"captured_at,omitempty"`
 	UpdatedAt   time.Time  `json:"updated_at"`
+	// Attachment metadata — populated for kind=attachment_stub records. The
+	// blob bytes are fetched separately via AttachGet(sha) → presigned URL.
+	OriginalFilename string `json:"original_filename,omitempty"`
+	MimeType         string `json:"mime_type,omitempty"`
+	SizeBytes        int64  `json:"size_bytes,omitempty"`
 }
 
 // ListRecordsRequest is the query for GET /api/brain/records. The

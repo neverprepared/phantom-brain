@@ -45,8 +45,13 @@ type Spec struct {
 	Dest string `toml:"dest"`
 	// Ephemeral marts are clean-rebuilt each run (wipe + re-render); non-
 	// ephemeral marts overwrite in place by deterministic filename.
-	Ephemeral bool    `toml:"ephemeral"`
-	Filters   Filters `toml:"filters"`
+	Ephemeral bool `toml:"ephemeral"`
+	// SkipAttachments disables materializing attachment (kind=attachment_stub)
+	// blobs from MinIO into the mart. Default (false) downloads each blob into
+	// <dest>/attachments/ and embeds it in the note, so the mart is self-
+	// contained; set true to project attachment metadata/stub text only.
+	SkipAttachments bool    `toml:"skip_attachments,omitempty"`
+	Filters         Filters `toml:"filters"`
 }
 
 // Validate enforces the invariants the builder and registry rely on.

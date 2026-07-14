@@ -35,6 +35,12 @@ type RecordDTO struct {
 	Reliability string     `json:"reliability,omitempty"`
 	CapturedAt  *time.Time `json:"captured_at,omitempty"`
 	UpdatedAt   time.Time  `json:"updated_at"`
+	// Attachment metadata — populated for kind=attachment_stub records so a
+	// consumer (pbrainctl mart) can materialize the MinIO blob. The bytes
+	// themselves are fetched separately via GET /api/brain/attach/{sha}.
+	OriginalFilename string `json:"original_filename,omitempty"`
+	MimeType         string `json:"mime_type,omitempty"`
+	SizeBytes        int64  `json:"size_bytes,omitempty"`
 }
 
 // ListRecordsResponse is the 200 body of GET /api/brain/records. NextAfterID
@@ -155,6 +161,11 @@ func (d *Daemon) handleListRecords(w http.ResponseWriter, r *http.Request) {
 		}
 		if rec.UpdatedAt.Valid {
 			dto.UpdatedAt = rec.UpdatedAt.Time
+		}
+		dto.OriginalFilename = rec.OriginalFilename.String
+		dto.MimeType = rec.MimeType.String
+		if rec.SizeBytes.Valid {
+			dto.SizeBytes = rec.SizeBytes.Int64
 		}
 		resp.Records = append(resp.Records, dto)
 	}
