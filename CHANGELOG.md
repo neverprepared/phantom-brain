@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.15.0](https://github.com/neverprepared/phantom-brain/compare/v3.14.0...v3.15.0) (2026-07-14)
+
+
+### Features
+
+* **mart:** expose marts over MCP — mart_list/build/sync tools ([#141](https://github.com/neverprepared/phantom-brain/issues/141)) ([#151](https://github.com/neverprepared/phantom-brain/issues/151)) ([5318292](https://github.com/neverprepared/phantom-brain/commit/5318292a2195b6fdd794abff065fd21f76110b06))
+
 ## [3.14.0](https://github.com/neverprepared/phantom-brain/compare/v3.13.0...v3.14.0) (2026-07-14)
 
 
