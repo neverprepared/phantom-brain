@@ -21,7 +21,13 @@ const MarkerFile = ".pbrain-mart"
 const (
 	indexFile      = "index.md"
 	attachmentsDir = "attachments"
-	attachmentStub = "attachment_stub"
+	// attachmentKind is the kind string the Postgres SoR stores for
+	// attachment records — and thus what GET /api/brain/records returns.
+	// It is "attachment", NOT the legacy osearch enum "attachment_stub":
+	// osearch.SoRKind() collapses KindAttachmentStub to "attachment" on the
+	// write path (see internal/osearch/docs.go). Matching "attachment_stub"
+	// here (as the first cut did) silently disables blob materialization.
+	attachmentKind = "attachment"
 	maxAttachmentB = 100 << 20 // 100 MiB — matches the daemon attach ceiling
 )
 
@@ -76,7 +82,7 @@ func (s ClientSource) Page(ctx context.Context, afterID int64) ([]brain.RecordDT
 // MinIO URL (GET /api/brain/attach/{sha}) and download the blob. A 404 means
 // the record carries no attachment (ok=false, no error).
 func (s ClientSource) FetchAttachment(ctx context.Context, rec brain.RecordDTO) ([]byte, string, bool, error) {
-	if rec.Kind != attachmentStub {
+	if rec.Kind != attachmentKind {
 		return nil, "", false, nil
 	}
 	ag, err := s.Client.AttachGet(ctx, rec.SHA)
@@ -163,7 +169,7 @@ func Build(ctx context.Context, spec Spec, src RecordSource) (Result, error) {
 			}
 
 			// Best-effort: materialize the blob and embed it in the note.
-			if fetcher != nil && rec.Kind == attachmentStub {
+			if fetcher != nil && rec.Kind == attachmentKind {
 				embed, ok, aerr := materializeAttachment(ctx, spec, fetcher, rec)
 				switch {
 				case aerr != nil:
