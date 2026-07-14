@@ -155,6 +155,10 @@ func Build(ctx context.Context, spec Spec, src RecordSource) (Result, error) {
 	}
 	var rows []indexRow
 	res := Result{DestPath: spec.Dest}
+	// Track everything written this run so the post-pass can prune files for
+	// records deleted upstream (rolling/non-ephemeral marts — #140).
+	wroteNotes := map[string]bool{}
+	wroteAttach := map[string]bool{}
 
 	afterID := int64(0)
 	for {
@@ -170,13 +174,14 @@ func Build(ctx context.Context, spec Spec, src RecordSource) (Result, error) {
 
 			// Best-effort: materialize the blob and embed it in the note.
 			if fetcher != nil && rec.Kind == attachmentKind {
-				embed, ok, aerr := materializeAttachment(ctx, spec, fetcher, rec)
+				embed, attName, ok, aerr := materializeAttachment(ctx, spec, fetcher, rec)
 				switch {
 				case aerr != nil:
 					res.AttachmentsSkipped++
 					data = append(data, []byte("\n> [!warning] attachment could not be materialized: "+aerr.Error()+"\n")...)
 				case ok:
 					res.AttachmentsWritten++
+					wroteAttach[attName] = true
 					data = append(data, []byte("\n## File\n\n"+embed+"\n")...)
 				}
 			}
@@ -185,6 +190,7 @@ func Build(ctx context.Context, spec Spec, src RecordSource) (Result, error) {
 			if err := os.WriteFile(filepath.Join(spec.Dest, name), data, 0o644); err != nil {
 				return Result{}, fmt.Errorf("write %s: %w", name, err)
 			}
+			wroteNotes[name] = true
 			rows = append(rows, indexRow{
 				base:  strings.TrimSuffix(name, ".md"),
 				title: rec.Title,
@@ -216,31 +222,92 @@ func Build(ctx context.Context, spec Spec, src RecordSource) (Result, error) {
 		return Result{}, fmt.Errorf("write index.md: %w", err)
 	}
 
+	// Prune files for records deleted upstream. A full Build sees the COMPLETE
+	// current set, so anything left over is an orphan. No-op for ephemeral marts
+	// (dest was just wiped); this is the delete-handling for rolling ones (#140).
+	if err := sweepOrphans(spec, wroteNotes, wroteAttach); err != nil {
+		return Result{}, err
+	}
+
 	return res, nil
 }
 
+// sweepOrphans removes the mart's own generated files that were NOT written
+// this run: *.md notes not in `notes`, and files under attachments/ not in
+// `attach`. It keeps the marker, index.md, and any non-.md file a human may
+// have added. Only safe on a full Build (which enumerates every record) — Sync
+// (a partial view) must never call it. The dir is already proven mart-owned by
+// ensureOwnedDir, so this can only ever touch a directory the mart created.
+func sweepOrphans(spec Spec, notes, attach map[string]bool) error {
+	entries, err := os.ReadDir(spec.Dest)
+	if err != nil {
+		return fmt.Errorf("sweep mart dir: %w", err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() {
+			if name == attachmentsDir {
+				if err := sweepDir(filepath.Join(spec.Dest, attachmentsDir), attach); err != nil {
+					return err
+				}
+			}
+			continue // leave unknown subdirs alone
+		}
+		if name == MarkerFile || name == indexFile || filepath.Ext(name) != ".md" {
+			continue // keep marker, index, and any human-added non-.md file
+		}
+		if !notes[name] {
+			if err := os.Remove(filepath.Join(spec.Dest, name)); err != nil {
+				return fmt.Errorf("prune %s: %w", name, err)
+			}
+		}
+	}
+	return nil
+}
+
+// sweepDir removes files in dir whose names aren't in keep.
+func sweepDir(dir string, keep map[string]bool) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("sweep %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || keep[e.Name()] {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+			return fmt.Errorf("prune %s: %w", e.Name(), err)
+		}
+	}
+	return nil
+}
+
 // materializeAttachment downloads rec's blob and writes it under
-// <dest>/attachments/, returning the Obsidian embed string. ok=false means the
+// <dest>/attachments/, returning the Obsidian embed string + the written
+// filename (so Build can track it for orphan sweeping). ok=false means the
 // record had no blob (skip silently).
-func materializeAttachment(ctx context.Context, spec Spec, fetcher AttachmentFetcher, rec brain.RecordDTO) (embed string, ok bool, err error) {
+func materializeAttachment(ctx context.Context, spec Spec, fetcher AttachmentFetcher, rec brain.RecordDTO) (embed, attName string, ok bool, err error) {
 	data, filename, ok, err := fetcher.FetchAttachment(ctx, rec)
 	if err != nil || !ok {
-		return "", false, err
+		return "", "", false, err
 	}
 	ext := filepath.Ext(filename)
 	if ext == "" {
 		ext = extFromMIME(rec.MimeType)
 	}
 	base := strings.TrimSuffix(Filename(rec), ".md") // shares the note's slug+sha
-	attName := base + ext
+	attName = base + ext
 	dir := filepath.Join(spec.Dest, attachmentsDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", false, fmt.Errorf("create attachments dir: %w", err)
+		return "", "", false, fmt.Errorf("create attachments dir: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, attName), data, 0o644); err != nil {
-		return "", false, fmt.Errorf("write attachment: %w", err)
+		return "", "", false, fmt.Errorf("write attachment: %w", err)
 	}
-	return fmt.Sprintf("![[%s/%s]]", attachmentsDir, attName), true, nil
+	return fmt.Sprintf("![[%s/%s]]", attachmentsDir, attName), attName, true, nil
 }
 
 // extFromMIME maps a MIME type to a file extension when the original filename

@@ -72,7 +72,7 @@ func Sync(ctx context.Context, spec Spec, c *brain.Client, cur Cursor) (Result, 
 				return Result{}, cur, fmt.Errorf("render %s: %w", rec.SHA, rerr)
 			}
 			if fetcher != nil && rec.Kind == attachmentKind {
-				embed, ok, aerr := materializeAttachment(ctx, spec, fetcher, rec)
+				embed, _, ok, aerr := materializeAttachment(ctx, spec, fetcher, rec)
 				switch {
 				case aerr != nil:
 					res.AttachmentsSkipped++
