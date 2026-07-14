@@ -1,5 +1,13 @@
 # Changelog
 
+## [3.12.0](https://github.com/neverprepared/phantom-brain/compare/v3.11.1...v3.12.0) (2026-07-14)
+
+
+### Features
+
+* **mart:** materialize MinIO attachment blobs into marts (Option B) ([#134](https://github.com/neverprepared/phantom-brain/issues/134)) ([6d7593e](https://github.com/neverprepared/phantom-brain/commit/6d7593e734fcba16e03c6b30939d38b74975aa14))
+* **mart:** pbrainctl mart — read-only Obsidian projections of the SoR ([#133](https://github.com/neverprepared/phantom-brain/issues/133)) ([06c5779](https://github.com/neverprepared/phantom-brain/commit/06c577915df7c57ba7b455bb17385f43e70fde04))
+
 ## [3.11.1](https://github.com/neverprepared/phantom-brain/compare/v3.11.0...v3.11.1) (2026-07-07)
 
 
