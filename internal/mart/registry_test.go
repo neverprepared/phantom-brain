@@ -82,6 +82,26 @@ func TestRegistry_LoadMissing(t *testing.T) {
 	}
 }
 
+func TestRegistry_ListSkipsCredentialsFile(t *testing.T) {
+	dir := t.TempDir()
+	reg := OpenRegistry(dir)
+	if err := reg.Save(testSpec()); err != nil {
+		t.Fatal(err)
+	}
+	// credentials.toml lives in the same marts dir — it must NOT be loaded as a
+	// bogus empty spec.
+	if err := SaveCredentials(dir, Credentials{Bindings: []Credential{{Profile: "p", Vault: "v", API: "https://x", Token: "t"}}}); err != nil {
+		t.Fatal(err)
+	}
+	specs, err := reg.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(specs) != 1 || specs[0].Name != "taxes" {
+		t.Fatalf("List = %+v, want only the taxes spec (credentials.toml excluded)", specs)
+	}
+}
+
 func TestRegistry_CursorRoundtrip(t *testing.T) {
 	reg := OpenRegistry(t.TempDir())
 

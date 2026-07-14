@@ -10,14 +10,13 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/neverprepared/phantom-brain/internal/config"
 	"github.com/neverprepared/phantom-brain/internal/mart"
 )
 
-// martDaemonCmd manages a macOS LaunchAgent that runs `mart sync <name>` on a
-// schedule — the "daemon" is launchd + a one-shot sync (no long-running
-// process). The plist embeds the agent-env creds (launchd does NOT inherit the
-// shell env) and is written 0600 because it carries the bearer token.
+// martDaemonCmd manages a macOS LaunchAgent that runs `mart sync` on a schedule
+// — the "daemon" is launchd + a one-shot sync (no long-running process). The
+// plist carries NO secret: the scheduled job resolves its token from the
+// credentials store (`mart cred add`), so token rotation needs no reinstall.
 func martDaemonCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "daemon",
@@ -29,6 +28,18 @@ func martDaemonCmd() *cobra.Command {
 
 func martLabel(name string) string          { return "com.phantom-brain.mart." + name }
 func martReconcileLabel(name string) string { return martLabel(name) + ".reconcile" }
+
+// martAllLabel is the single job that syncs every configured mart (--all).
+const martAllLabel = "com.phantom-brain.marts"
+
+// daemonLabels returns the (primary, reconcile) launchd labels for a
+// name-scoped or --all daemon.
+func daemonLabels(all bool, name string) (primary, reconcile string) {
+	if all {
+		return martAllLabel, martAllLabel + ".reconcile"
+	}
+	return martLabel(name), martReconcileLabel(name)
+}
 
 func launchAgentPath(label string) (string, error) {
 	home, err := os.UserHomeDir()
@@ -45,37 +56,25 @@ func martDaemonInstallCmd() *cobra.Command {
 	var (
 		interval    int
 		reconcileAt string
+		all         bool
 	)
 	c := &cobra.Command{
-		Use:   "install <name>",
-		Short: "Install/replace a LaunchAgent that syncs the mart on an interval",
-		Long: `Writes ~/Library/LaunchAgents/com.phantom-brain.mart.<name>.plist (0600 —
-it embeds CL_BRAIN_API_TOKEN, since launchd does not inherit your shell env),
-then bootstraps it. --reconcile-at HH:MM adds a second daily job that runs a
-full 'mart build' to prune records deleted upstream (the change feed can't see
-deletes).`,
-		Args: cobra.ExactArgs(1),
+		Use:   "install [<name>]",
+		Short: "Install/replace a LaunchAgent that syncs a mart (or all marts) on an interval",
+		Long: `Writes a LaunchAgent under ~/Library/LaunchAgents that runs 'mart sync' on
+an interval. The token is NOT baked into the plist — the job reads it from the
+credentials store ('mart cred add'), so rotating a token needs no reinstall.
+--all installs one job that syncs every configured mart across profiles.
+--reconcile-at HH:MM adds a daily full 'mart build' to prune upstream deletes.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name := args[0]
+			if err := checkAllArg(all, args); err != nil {
+				return err
+			}
 			if interval < 30 {
 				return fmt.Errorf("--interval must be >= 30 seconds")
 			}
 			configDir := resolveConfigDir(cmd)
-			reg := mart.OpenRegistry(configDir)
-			spec, err := reg.Load(name)
-			if err != nil {
-				return err
-			}
-			// Bake the CURRENT env creds into the plist; refuse if they don't
-			// match the mart's tenant (else the scheduled sync projects the
-			// wrong tenant).
-			agent, err := config.LoadAgent()
-			if err != nil {
-				return fmt.Errorf("requires the agent contract env vars (CL_BRAIN_API, CL_BRAIN_API_TOKEN, CL_WORKSPACE_PROFILE, CL_BRAIN_VAULT): %w", err)
-			}
-			if agent.Profile != spec.Profile || agent.Vault != spec.Vault {
-				return fmt.Errorf("mart %q targets %s/%s but the agent env is bound to %s/%s", name, spec.Profile, spec.Vault, agent.Profile, agent.Vault)
-			}
 			exe, err := os.Executable()
 			if err != nil {
 				return fmt.Errorf("resolve pbrainctl path: %w", err)
@@ -84,60 +83,94 @@ deletes).`,
 			if err := os.MkdirAll(logDir, 0o700); err != nil {
 				return fmt.Errorf("create log dir: %w", err)
 			}
-
-			env := map[string]string{
-				"PATH":                 "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-				"CL_BRAIN_API":         agent.API,
-				"CL_BRAIN_API_TOKEN":   agent.Token,
-				"CL_WORKSPACE_PROFILE": agent.Profile,
-				"CL_BRAIN_VAULT":       agent.Vault,
-			}
+			// The scheduled job resolves creds from the store — NO secret in the
+			// plist. launchd doesn't inherit the shell env, so set PATH/HOME.
+			env := map[string]string{"PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"}
 			if home, herr := os.UserHomeDir(); herr == nil {
 				env["HOME"] = home
 			}
 
-			// Primary: interval sync.
-			syncArgs := []string{exe, "client", "mart", "--config-dir", configDir, "sync", name}
-			plist := renderPlist(martLabel(name), syncArgs, env,
-				filepath.Join(logDir, name+".out"), filepath.Join(logDir, name+".err"),
-				&interval, "")
-			if err := installPlist(cmd, martLabel(name), plist); err != nil {
+			var label, logBase, target string
+			if all {
+				store, _ := mart.LoadCredentials(configDir)
+				if len(store.Bindings) == 0 {
+					return fmt.Errorf("no stored credentials — run `pbrainctl client mart cred add` for each profile before `daemon install --all`")
+				}
+				label, logBase, target = martAllLabel, "_all", "--all"
+			} else {
+				name := args[0]
+				spec, err := mart.OpenRegistry(configDir).Load(name)
+				if err != nil {
+					return err
+				}
+				// Persist the spec's creds to the store (resolve from store or a
+				// matching env) so the storeless job can read them.
+				api, token, err := resolveMartCreds(cmd, spec)
+				if err != nil {
+					return err
+				}
+				store, err := mart.LoadCredentials(configDir)
+				if err != nil {
+					return err
+				}
+				store.Set(mart.Credential{Profile: spec.Profile, Vault: spec.Vault, API: api, Token: token})
+				if err := mart.SaveCredentials(configDir, store); err != nil {
+					return err
+				}
+				label, logBase, target = martLabel(name), name, name
+			}
+
+			syncArgs := []string{exe, "client", "mart", "--config-dir", configDir, "sync", target}
+			plist := renderPlist(label, syncArgs, env,
+				filepath.Join(logDir, logBase+".out"), filepath.Join(logDir, logBase+".err"), &interval, "")
+			if err := installPlist(cmd, label, plist); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "installed %s (sync every %ds) → logs in %s\n", martLabel(name), interval, logDir)
+			fmt.Fprintf(cmd.OutOrStdout(), "installed %s (sync every %ds) → logs in %s\n", label, interval, logDir)
 
-			// Optional: daily full-rebuild reconcile (prunes deletes).
 			if reconcileAt != "" {
 				hh, mm, perr := parseHHMM(reconcileAt)
 				if perr != nil {
 					return perr
 				}
-				buildArgs := []string{exe, "client", "mart", "--config-dir", configDir, "build", name}
-				rplist := renderPlist(martReconcileLabel(name), buildArgs, env,
-					filepath.Join(logDir, name+".reconcile.out"), filepath.Join(logDir, name+".reconcile.err"),
+				rlabel := label + ".reconcile"
+				buildArgs := []string{exe, "client", "mart", "--config-dir", configDir, "build", target}
+				rplist := renderPlist(rlabel, buildArgs, env,
+					filepath.Join(logDir, logBase+".reconcile.out"), filepath.Join(logDir, logBase+".reconcile.err"),
 					nil, fmt.Sprintf("%02d:%02d", hh, mm))
-				if err := installPlist(cmd, martReconcileLabel(name), rplist); err != nil {
+				if err := installPlist(cmd, rlabel, rplist); err != nil {
 					return err
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "installed %s (full rebuild daily at %02d:%02d)\n", martReconcileLabel(name), hh, mm)
+				fmt.Fprintf(cmd.OutOrStdout(), "installed %s (full rebuild daily at %02d:%02d)\n", rlabel, hh, mm)
 			}
 			return nil
 		},
 	}
 	c.Flags().IntVar(&interval, "interval", 900, "seconds between incremental syncs")
 	c.Flags().StringVar(&reconcileAt, "reconcile-at", "", "also run a daily full rebuild at HH:MM (prunes upstream-deleted records)")
+	c.Flags().BoolVar(&all, "all", false, "one job that syncs every configured mart across profiles")
 	return c
 }
 
 func martDaemonUninstallCmd() *cobra.Command {
-	var purge bool
+	var (
+		purge bool
+		all   bool
+	)
 	c := &cobra.Command{
-		Use:   "uninstall <name>",
-		Short: "Remove a mart's LaunchAgent(s)",
-		Args:  cobra.ExactArgs(1),
+		Use:   "uninstall [<name>]",
+		Short: "Remove a mart's LaunchAgent(s) (or the --all job)",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name := args[0]
-			for _, label := range []string{martLabel(name), martReconcileLabel(name)} {
+			if err := checkAllArg(all, args); err != nil {
+				return err
+			}
+			name := ""
+			if !all {
+				name = args[0]
+			}
+			primary, reconcile := daemonLabels(all, name)
+			for _, label := range []string{primary, reconcile} {
 				_ = bootout(label) // ignore "not loaded"
 				if p, err := launchAgentPath(label); err == nil {
 					if rmErr := os.Remove(p); rmErr != nil && !os.IsNotExist(rmErr) {
@@ -145,34 +178,48 @@ func martDaemonUninstallCmd() *cobra.Command {
 					}
 				}
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "uninstalled LaunchAgent(s) for mart %q\n", name)
-			if purge {
+			fmt.Fprintf(cmd.OutOrStdout(), "uninstalled LaunchAgent(s): %s\n", primary)
+			if purge && !all {
 				if err := mart.OpenRegistry(resolveConfigDir(cmd)).RemoveCursor(name); err != nil {
 					return err
 				}
 				fmt.Fprintln(cmd.OutOrStdout(), "removed the sync cursor (next sync re-reads from the beginning)")
+			} else if purge && all {
+				fmt.Fprintln(cmd.OutOrStdout(), "note: --purge is per-mart; use `mart daemon uninstall <name> --purge` to drop a specific cursor")
 			}
 			return nil
 		},
 	}
-	c.Flags().BoolVar(&purge, "purge", false, "also delete the sync cursor")
+	c.Flags().BoolVar(&purge, "purge", false, "also delete the sync cursor (single mart only)")
+	c.Flags().BoolVar(&all, "all", false, "remove the --all job instead of a named mart")
 	return c
 }
 
 func martDaemonStatusCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "status <name>",
+	var all bool
+	c := &cobra.Command{
+		Use:   "status [<name>]",
 		Short: "Show a mart LaunchAgent's load state + last exit + cursor age",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name := args[0]
+			if err := checkAllArg(all, args); err != nil {
+				return err
+			}
 			out := cmd.OutOrStdout()
-			label := martLabel(name)
+			name := ""
+			if !all {
+				name = args[0]
+			}
+			label, _ := daemonLabels(all, name)
 			res, _ := exec.Command("launchctl", "list", label).CombinedOutput()
 			if s := strings.TrimSpace(string(res)); s != "" {
 				fmt.Fprintf(out, "%s:\n%s\n", label, s)
 			} else {
 				fmt.Fprintf(out, "%s: not loaded\n", label)
+			}
+			if all {
+				fmt.Fprintln(out, "cursor: per-mart (see `pbrainctl client mart list`)")
+				return nil
 			}
 			cur := mart.OpenRegistry(resolveConfigDir(cmd)).CursorPath(name)
 			if fi, err := os.Stat(cur); err == nil {
@@ -183,6 +230,8 @@ func martDaemonStatusCmd() *cobra.Command {
 			return nil
 		},
 	}
+	c.Flags().BoolVar(&all, "all", false, "status of the --all job")
+	return c
 }
 
 // renderPlist builds a LaunchAgent plist. Exactly one of interval / calendar is
