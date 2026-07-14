@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/neverprepared/phantom-brain/internal/brain"
 	"github.com/neverprepared/phantom-brain/internal/config"
 	"github.com/neverprepared/phantom-brain/internal/mart"
 )
@@ -27,8 +28,68 @@ func martCmd() *cobra.Command {
 		Short: "Manage read-only markdown projections (marts) of the brain",
 	}
 	c.PersistentFlags().String("config-dir", "", "override PHANTOM_BRAIN_CONFIG_DIR (mart specs live under <config-dir>/marts)")
-	c.AddCommand(martAddCmd(), martListCmd(), martRemoveCmd(), martBuildCmd())
+	c.AddCommand(martAddCmd(), martListCmd(), martRemoveCmd(), martBuildCmd(), martSyncCmd(), martDaemonCmd())
 	return c
+}
+
+// resolveMartForRun loads a mart spec, asserts it matches the agent-env binding
+// (the daemon resolves the tenant from the bearer token, so a spec/env mismatch
+// would silently project the WRONG tenant), and returns the spec + registry +
+// a daemon client. Shared by `mart build` and `mart sync`.
+func resolveMartForRun(cmd *cobra.Command, name string) (mart.Spec, *mart.Registry, *brain.Client, error) {
+	reg := mart.OpenRegistry(resolveConfigDir(cmd))
+	spec, err := reg.Load(name)
+	if err != nil {
+		return mart.Spec{}, nil, nil, err
+	}
+	agent, err := config.LoadAgent()
+	if err != nil {
+		return mart.Spec{}, nil, nil, fmt.Errorf("requires the agent contract env vars (CL_BRAIN_API, CL_BRAIN_API_TOKEN, CL_WORKSPACE_PROFILE, CL_BRAIN_VAULT): %w", err)
+	}
+	if agent.Profile != spec.Profile || agent.Vault != spec.Vault {
+		return mart.Spec{}, nil, nil, fmt.Errorf("mart %q targets %s/%s but the agent env is bound to %s/%s — set CL_WORKSPACE_PROFILE/CL_BRAIN_VAULT to match, or rebuild the mart spec",
+			spec.Name, spec.Profile, spec.Vault, agent.Profile, agent.Vault)
+	}
+	client, err := newBrainClientFromEnv()
+	if err != nil {
+		return mart.Spec{}, nil, nil, err
+	}
+	return spec, reg, client, nil
+}
+
+func martSyncCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "sync <name>",
+		Short: "Incrementally refresh a mart from the change feed (only what changed)",
+		Long: `Applies records changed since the mart's saved cursor into its dest —
+upserting notes and re-downloading changed attachments, without a full wipe.
+The one-shot command the launchd daemon runs on a schedule; also runnable by
+hand. A first run (no cursor) reads from the beginning.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			spec, reg, client, err := resolveMartForRun(cmd, args[0])
+			if err != nil {
+				return err
+			}
+			cur, err := reg.LoadCursor(spec.Name)
+			if err != nil {
+				return err
+			}
+			res, next, err := mart.Sync(cmd.Context(), spec, client, cur)
+			if err != nil {
+				return err
+			}
+			if err := reg.SaveCursor(spec.Name, next); err != nil {
+				return fmt.Errorf("synced but failed to persist cursor: %w", err)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "synced mart %q: %d changed record(s), %d attachment(s) → %s\n",
+				spec.Name, res.RecordsWritten, res.AttachmentsWritten, res.DestPath)
+			if res.AttachmentsSkipped > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "warning: %d attachment(s) could not be materialized (see [!warning] callouts)\n", res.AttachmentsSkipped)
+			}
+			return nil
+		},
+	}
 }
 
 func martAddCmd() *cobra.Command {
@@ -159,23 +220,7 @@ func martBuildCmd() *cobra.Command {
 		Short: "Materialize a mart into its dest directory",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			reg := mart.OpenRegistry(resolveConfigDir(cmd))
-			spec, err := reg.Load(args[0])
-			if err != nil {
-				return err
-			}
-			// The daemon derives (profile, vault) from the bearer token, so a
-			// mismatch between the spec and the agent env would silently
-			// project the WRONG tenant. Refuse.
-			agent, err := config.LoadAgent()
-			if err != nil {
-				return fmt.Errorf("requires the agent contract env vars (CL_BRAIN_API, CL_BRAIN_API_TOKEN, CL_WORKSPACE_PROFILE, CL_BRAIN_VAULT): %w", err)
-			}
-			if agent.Profile != spec.Profile || agent.Vault != spec.Vault {
-				return fmt.Errorf("mart %q targets %s/%s but the agent env is bound to %s/%s — set CL_WORKSPACE_PROFILE/CL_BRAIN_VAULT to match, or rebuild the mart spec",
-					spec.Name, spec.Profile, spec.Vault, agent.Profile, agent.Vault)
-			}
-			client, err := newBrainClientFromEnv()
+			spec, _, client, err := resolveMartForRun(cmd, args[0])
 			if err != nil {
 				return err
 			}

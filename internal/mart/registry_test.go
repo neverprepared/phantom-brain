@@ -81,3 +81,33 @@ func TestRegistry_LoadMissing(t *testing.T) {
 		t.Fatal("Load of a missing mart should error")
 	}
 }
+
+func TestRegistry_CursorRoundtrip(t *testing.T) {
+	reg := OpenRegistry(t.TempDir())
+
+	// Missing cursor → zero, no error.
+	got, err := reg.LoadCursor("taxes")
+	if err != nil || got != (Cursor{}) {
+		t.Fatalf("missing cursor: got %+v err %v, want zero", got, err)
+	}
+
+	want := Cursor{Since: "2026-06-01T12:00:00Z", AfterID: 42}
+	if err := reg.SaveCursor("taxes", want); err != nil {
+		t.Fatalf("SaveCursor: %v", err)
+	}
+	got, err = reg.LoadCursor("taxes")
+	if err != nil || got != want {
+		t.Fatalf("roundtrip: got %+v err %v, want %+v", got, err, want)
+	}
+
+	if err := reg.RemoveCursor("taxes"); err != nil {
+		t.Fatalf("RemoveCursor: %v", err)
+	}
+	if got, _ := reg.LoadCursor("taxes"); got != (Cursor{}) {
+		t.Fatalf("after remove: got %+v, want zero", got)
+	}
+	// RemoveCursor is idempotent.
+	if err := reg.RemoveCursor("taxes"); err != nil {
+		t.Fatalf("RemoveCursor on missing: %v", err)
+	}
+}

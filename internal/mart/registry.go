@@ -1,6 +1,7 @@
 package mart
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -94,6 +95,52 @@ func (r *Registry) Remove(name string) error {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("no mart named %q", name)
 		}
+		return err
+	}
+	return nil
+}
+
+// CursorPath is where an incremental Sync's resume cursor lives.
+func (r *Registry) CursorPath(name string) string {
+	return filepath.Join(r.Dir, name+".cursor")
+}
+
+// LoadCursor reads a mart's Sync cursor. A missing cursor is not an error —
+// it returns the zero Cursor (Sync then reads from the beginning).
+func (r *Registry) LoadCursor(name string) (Cursor, error) {
+	var c Cursor
+	b, err := os.ReadFile(r.CursorPath(name))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Cursor{}, nil
+		}
+		return Cursor{}, fmt.Errorf("read mart cursor: %w", err)
+	}
+	if err := json.Unmarshal(b, &c); err != nil {
+		return Cursor{}, fmt.Errorf("decode mart cursor %s: %w", r.CursorPath(name), err)
+	}
+	return c, nil
+}
+
+// SaveCursor persists a mart's Sync cursor (0644 — it holds no secret).
+func (r *Registry) SaveCursor(name string, c Cursor) error {
+	if err := os.MkdirAll(r.Dir, 0o700); err != nil {
+		return fmt.Errorf("create marts dir: %w", err)
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("encode mart cursor: %w", err)
+	}
+	if err := os.WriteFile(r.CursorPath(name), b, 0o644); err != nil {
+		return fmt.Errorf("write mart cursor: %w", err)
+	}
+	return nil
+}
+
+// RemoveCursor deletes a mart's Sync cursor (idempotent). Used to force the
+// next Sync to re-read from the beginning.
+func (r *Registry) RemoveCursor(name string) error {
+	if err := os.Remove(r.CursorPath(name)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil

@@ -96,3 +96,25 @@ WHERE profile = @profile
   AND id > @after_id
 ORDER BY id
 LIMIT @lim;
+
+-- name: ListRecordsSince :many
+-- Change feed for incremental mart refresh (pbrainctl mart sync). Same facet
+-- filters as ListRecords, but ordered by the records_set_updated_at-maintained
+-- updated_at so a caller can ask "what changed since my cursor". The cursor is
+-- COMPOUND — (updated_at, id) — because many rows can share an updated_at
+-- (a batch synth pass); keyset `updated_at > @since OR (updated_at = @since AND
+-- id > @after_id)` neither skips nor duplicates across page boundaries the way
+-- a bare `updated_at > @since` would. Deletes are NOT visible here (a forgotten
+-- row simply stops appearing) — pruning is a periodic full rebuild's job.
+SELECT * FROM records
+WHERE profile = @profile
+  AND vault   = @vault
+  AND synthesised = @synthesised
+  AND (coalesce(array_length(@kinds::text[], 1), 0) = 0         OR kind = ANY(@kinds::text[]))
+  AND (coalesce(array_length(@topics::text[], 1), 0) = 0        OR topic = ANY(@topics::text[]))
+  AND (coalesce(array_length(@reliabilities::text[], 1), 0) = 0 OR reliability = ANY(@reliabilities::text[]))
+  AND (coalesce(array_length(@tags_any::text[], 1), 0) = 0      OR tags && @tags_any::text[])
+  AND (coalesce(array_length(@source_any::text[], 1), 0) = 0    OR source && @source_any::text[])
+  AND (updated_at > @since OR (updated_at = @since AND id > @after_id))
+ORDER BY updated_at, id
+LIMIT @lim;

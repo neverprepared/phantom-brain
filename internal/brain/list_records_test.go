@@ -76,6 +76,35 @@ func TestClient_ListRecords_EncodesFiltersAndDecodes(t *testing.T) {
 	}
 }
 
+func TestClient_ListRecords_ChangeFeedMode(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if q.Get("since") != "2026-06-01T12:00:00Z" {
+			t.Errorf("since = %q", q.Get("since"))
+		}
+		if q.Get("after_id") != "7" {
+			t.Errorf("after_id = %q", q.Get("after_id"))
+		}
+		_ = json.NewEncoder(w).Encode(ListRecordsResponse{
+			Records:     []RecordDTO{{SHA: "x", Kind: "note"}},
+			NextAfterID: 9,
+			NextSince:   "2026-06-01T12:05:00Z",
+		})
+	}))
+	defer ts.Close()
+	c, _ := NewClient(ClientOpts{BaseURL: ts.URL, Token: "tok"})
+	got, err := c.ListRecords(context.Background(), ListRecordsRequest{
+		Since:   "2026-06-01T12:00:00Z",
+		AfterID: 7,
+	})
+	if err != nil {
+		t.Fatalf("ListRecords: %v", err)
+	}
+	if got.NextSince != "2026-06-01T12:05:00Z" || got.NextAfterID != 9 {
+		t.Errorf("cursor = (%q,%d), want (2026-06-01T12:05:00Z,9)", got.NextSince, got.NextAfterID)
+	}
+}
+
 func TestClient_ListRecords_DaemonUnreachable(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	ts.Close() // closed → connection refused

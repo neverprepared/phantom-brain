@@ -43,6 +43,15 @@ type Querier interface {
 	// records_tags_gin / records_source_gin; kind/topic/reliability use = ANY.
 	// The id > @after_id keyset walks the PK deterministically; @lim bounds it.
 	ListRecords(ctx context.Context, arg ListRecordsParams) ([]Record, error)
+	// Change feed for incremental mart refresh (pbrainctl mart sync). Same facet
+	// filters as ListRecords, but ordered by the records_set_updated_at-maintained
+	// updated_at so a caller can ask "what changed since my cursor". The cursor is
+	// COMPOUND — (updated_at, id) — because many rows can share an updated_at
+	// (a batch synth pass); keyset `updated_at > @since OR (updated_at = @since AND
+	// id > @after_id)` neither skips nor duplicates across page boundaries the way
+	// a bare `updated_at > @since` would. Deletes are NOT visible here (a forgotten
+	// row simply stops appearing) — pruning is a periodic full rebuild's job.
+	ListRecordsSince(ctx context.Context, arg ListRecordsSinceParams) ([]Record, error)
 	// The resynth scan: records still awaiting the gate + distill + embed pass.
 	// Rows may carry a NULL embedding, exercising the nullable vector override.
 	ListUnsynthesised(ctx context.Context, arg ListUnsynthesisedParams) ([]Record, error)
