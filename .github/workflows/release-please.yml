@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: write # dispatch release.yaml when a release is created
 
 # Language-agnostic — uses release-type "simple" (no package.json
 # required). After the TS retirement to legacy-ts/ the previous
@@ -20,6 +21,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: googleapis/release-please-action@v4
+        id: release
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # release.yaml is `on: push: tags`, but release-please pushes the tag with
+      # the default GITHUB_TOKEN, which never triggers another workflow (the
+      # recursion guard). So the binary+tap build had to be dispatched by hand
+      # after every release. Dispatch it here instead: a workflow_dispatch via
+      # the API IS honored with GITHUB_TOKEN (unlike tag pushes), so releases
+      # publish binaries + the Homebrew formula with no manual step.
+      - name: Dispatch the binary + tap release build
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run release.yaml -f tag="${{ steps.release.outputs.tag_name }}"
