@@ -141,6 +141,108 @@ func (q *Queries) GetRecordBySHA(ctx context.Context, arg GetRecordBySHAParams) 
 	return i, err
 }
 
+const listRecords = `-- name: ListRecords :many
+SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes FROM records
+WHERE profile = $1
+  AND vault   = $2
+  AND synthesised = $3
+  AND (coalesce(array_length($4::text[], 1), 0) = 0         OR kind = ANY($4::text[]))
+  AND (coalesce(array_length($5::text[], 1), 0) = 0        OR topic = ANY($5::text[]))
+  AND (coalesce(array_length($6::text[], 1), 0) = 0 OR reliability = ANY($6::text[]))
+  AND (coalesce(array_length($7::text[], 1), 0) = 0      OR tags && $7::text[])
+  AND (coalesce(array_length($8::text[], 1), 0) = 0    OR source && $8::text[])
+  AND id > $9
+ORDER BY id
+LIMIT $10
+`
+
+type ListRecordsParams struct {
+	Profile       string
+	Vault         string
+	Synthesised   bool
+	Kinds         []string
+	Topics        []string
+	Reliabilities []string
+	TagsAny       []string
+	SourceAny     []string
+	AfterID       int64
+	Lim           int32
+}
+
+// Mart projection scan (pbrainctl mart): keyset-paginated enumeration of a
+// tenant's records with optional facet filters. This is the generic "list
+// records" read the resynth-only ListUnsynthesised never provided; the core
+// stays ignorant of marts — a mart is just a consumer of this + the HTTP
+// endpoint over it.
+//
+// Array filters use the coalesce(array_length(...),0)=0 guard rather than a
+// bare IS NULL so a nil []string param cleanly means "no filter": pgx encodes
+// a nil slice as an empty array (not SQL NULL), so an IS NULL guard would
+// never fire and an empty filter would wrongly match nothing. tags/source use
+// the array-overlap operator && ("carries ANY of these"), GIN-accelerated by
+// records_tags_gin / records_source_gin; kind/topic/reliability use = ANY.
+// The id > @after_id keyset walks the PK deterministically; @lim bounds it.
+func (q *Queries) ListRecords(ctx context.Context, arg ListRecordsParams) ([]Record, error) {
+	rows, err := q.db.Query(ctx, listRecords,
+		arg.Profile,
+		arg.Vault,
+		arg.Synthesised,
+		arg.Kinds,
+		arg.Topics,
+		arg.Reliabilities,
+		arg.TagsAny,
+		arg.SourceAny,
+		arg.AfterID,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Record{}
+	for rows.Next() {
+		var i Record
+		if err := rows.Scan(
+			&i.ID,
+			&i.Profile,
+			&i.Vault,
+			&i.Sha,
+			&i.Kind,
+			&i.MemoryType,
+			&i.Title,
+			&i.RawBody,
+			&i.Body,
+			&i.SourceUrl,
+			&i.Source,
+			&i.Tags,
+			&i.CapturedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Reliability,
+			&i.Topic,
+			&i.GateReason,
+			&i.Synthesised,
+			&i.MinioKey,
+			&i.MimeType,
+			&i.SizeBytes,
+			&i.OriginalFilename,
+			&i.ExtractedText,
+			&i.Embedding,
+			&i.EmbeddingModel,
+			&i.EmbeddingVersion,
+			&i.CaptureMinioKey,
+			&i.CaptureSizeBytes,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUnsynthesised = `-- name: ListUnsynthesised :many
 SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes FROM records
 WHERE profile = $1 AND vault = $2 AND NOT synthesised

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -330,6 +332,87 @@ type FetchResponse struct {
 func (c *Client) Fetch(ctx context.Context, sha string) (*FetchResponse, error) {
 	var out FetchResponse
 	if err := c.do(ctx, http.MethodGet, "/api/brain/fetch/"+sha, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// RecordDTO mirrors server.RecordDTO field-for-field (identical JSON tags).
+// It is the full record — body included — returned by the mart-projection
+// endpoint so a bulk consumer never has to follow up with a per-SHA fetch.
+type RecordDTO struct {
+	SHA         string     `json:"sha"`
+	Kind        string     `json:"kind"`
+	MemoryType  string     `json:"memory_type,omitempty"`
+	Title       string     `json:"title"`
+	Body        string     `json:"body"`
+	SourceURL   string     `json:"source_url,omitempty"`
+	Source      []string   `json:"source,omitempty"`
+	Tags        []string   `json:"tags,omitempty"`
+	Topic       string     `json:"topic,omitempty"`
+	Reliability string     `json:"reliability,omitempty"`
+	CapturedAt  *time.Time `json:"captured_at,omitempty"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+// ListRecordsRequest is the query for GET /api/brain/records. The
+// (profile, vault) scope is derived daemon-side from the bearer token, so it
+// is NOT sent. AfterID drives keyset pagination (0 = from the start).
+// Synthesised is a pointer so nil means "let the daemon default (true)".
+type ListRecordsRequest struct {
+	AfterID     int64
+	Limit       int
+	Kinds       []string
+	Tags        []string
+	Sources     []string
+	Topic       string
+	Reliability []string
+	Synthesised *bool
+}
+
+// ListRecordsResponse mirrors server.ListRecordsResponse. NextAfterID is the
+// keyset cursor for the next page; 0 means end of stream.
+type ListRecordsResponse struct {
+	Records     []RecordDTO `json:"records"`
+	NextAfterID int64       `json:"next_after_id"`
+}
+
+// ListRecords GETs one keyset page of the binding's records, filtered. It is
+// the read behind `pbrainctl mart build`. Transport failures wrap
+// ErrDaemonUnreachable (via do); a non-2xx (e.g. 503 when Postgres isn't
+// enabled for the binding) returns the decoded *APIError.
+func (c *Client) ListRecords(ctx context.Context, req ListRecordsRequest) (*ListRecordsResponse, error) {
+	q := url.Values{}
+	if req.AfterID > 0 {
+		q.Set("after_id", strconv.FormatInt(req.AfterID, 10))
+	}
+	if req.Limit > 0 {
+		q.Set("limit", strconv.Itoa(req.Limit))
+	}
+	for _, k := range req.Kinds {
+		q.Add("kind", k)
+	}
+	for _, t := range req.Tags {
+		q.Add("tag", t)
+	}
+	for _, s := range req.Sources {
+		q.Add("source", s)
+	}
+	for _, rl := range req.Reliability {
+		q.Add("reliability", rl)
+	}
+	if req.Topic != "" {
+		q.Set("topic", req.Topic)
+	}
+	if req.Synthesised != nil {
+		q.Set("synthesised", strconv.FormatBool(*req.Synthesised))
+	}
+	path := "/api/brain/records"
+	if enc := q.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	var out ListRecordsResponse
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

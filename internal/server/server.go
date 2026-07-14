@@ -426,6 +426,10 @@ func (d *Daemon) buildRouter() chi.Router {
 			// Phase D2a: always-online fetch — full record body by SHA
 			// from the Postgres SoR. Companion to /recall.
 			r.Get("/fetch/{sha}", d.handleFetch)
+			// Generic keyset-paginated record enumeration (filtered).
+			// Read-only projection read consumed by `pbrainctl mart build`;
+			// the core knows nothing about marts.
+			r.Get("/records", d.handleListRecords)
 			r.Post("/attach", d.handleAttach)
 			r.Post("/trace", d.handleTrace)
 			r.Get("/attach/{sha}", d.handleAttachGet)
