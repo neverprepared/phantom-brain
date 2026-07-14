@@ -69,3 +69,30 @@ WHERE id = @id;
 -- name: SetRecordExtractedText :exec
 -- Attachment enrichment: store OCR / pdftotext / office-extract output.
 UPDATE records SET extracted_text = @extracted_text WHERE id = @id;
+
+-- name: ListRecords :many
+-- Mart projection scan (pbrainctl mart): keyset-paginated enumeration of a
+-- tenant's records with optional facet filters. This is the generic "list
+-- records" read the resynth-only ListUnsynthesised never provided; the core
+-- stays ignorant of marts — a mart is just a consumer of this + the HTTP
+-- endpoint over it.
+--
+-- Array filters use the coalesce(array_length(...),0)=0 guard rather than a
+-- bare IS NULL so a nil []string param cleanly means "no filter": pgx encodes
+-- a nil slice as an empty array (not SQL NULL), so an IS NULL guard would
+-- never fire and an empty filter would wrongly match nothing. tags/source use
+-- the array-overlap operator && ("carries ANY of these"), GIN-accelerated by
+-- records_tags_gin / records_source_gin; kind/topic/reliability use = ANY.
+-- The id > @after_id keyset walks the PK deterministically; @lim bounds it.
+SELECT * FROM records
+WHERE profile = @profile
+  AND vault   = @vault
+  AND synthesised = @synthesised
+  AND (coalesce(array_length(@kinds::text[], 1), 0) = 0         OR kind = ANY(@kinds::text[]))
+  AND (coalesce(array_length(@topics::text[], 1), 0) = 0        OR topic = ANY(@topics::text[]))
+  AND (coalesce(array_length(@reliabilities::text[], 1), 0) = 0 OR reliability = ANY(@reliabilities::text[]))
+  AND (coalesce(array_length(@tags_any::text[], 1), 0) = 0      OR tags && @tags_any::text[])
+  AND (coalesce(array_length(@source_any::text[], 1), 0) = 0    OR source && @source_any::text[])
+  AND id > @after_id
+ORDER BY id
+LIMIT @lim;

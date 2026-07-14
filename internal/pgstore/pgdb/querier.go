@@ -29,6 +29,20 @@ type Querier interface {
 	// Forward edge: this record mentions this entity.
 	LinkRecordEntity(ctx context.Context, arg LinkRecordEntityParams) error
 	ListFactsForEntity(ctx context.Context, entityID int64) ([]Fact, error)
+	// Mart projection scan (pbrainctl mart): keyset-paginated enumeration of a
+	// tenant's records with optional facet filters. This is the generic "list
+	// records" read the resynth-only ListUnsynthesised never provided; the core
+	// stays ignorant of marts — a mart is just a consumer of this + the HTTP
+	// endpoint over it.
+	//
+	// Array filters use the coalesce(array_length(...),0)=0 guard rather than a
+	// bare IS NULL so a nil []string param cleanly means "no filter": pgx encodes
+	// a nil slice as an empty array (not SQL NULL), so an IS NULL guard would
+	// never fire and an empty filter would wrongly match nothing. tags/source use
+	// the array-overlap operator && ("carries ANY of these"), GIN-accelerated by
+	// records_tags_gin / records_source_gin; kind/topic/reliability use = ANY.
+	// The id > @after_id keyset walks the PK deterministically; @lim bounds it.
+	ListRecords(ctx context.Context, arg ListRecordsParams) ([]Record, error)
 	// The resynth scan: records still awaiting the gate + distill + embed pass.
 	// Rows may carry a NULL embedding, exercising the nullable vector override.
 	ListUnsynthesised(ctx context.Context, arg ListUnsynthesisedParams) ([]Record, error)

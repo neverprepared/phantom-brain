@@ -78,6 +78,7 @@ func clientCmd() *cobra.Command {
 	c.AddCommand(clientReflectCmd())
 	c.AddCommand(clientForgetCmd())
 	c.AddCommand(clientResynthCmd())
+	c.AddCommand(martCmd())
 	c.AddCommand(versionCmd())
 	return c
 }
