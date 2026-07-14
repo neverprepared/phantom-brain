@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.16.0](https://github.com/neverprepared/phantom-brain/compare/v3.15.0...v3.16.0) (2026-07-14)
+
+
+### Features
+
+* **mart:** prune upstream-deleted records from rolling marts ([#140](https://github.com/neverprepared/phantom-brain/issues/140)) ([#154](https://github.com/neverprepared/phantom-brain/issues/154)) ([27f7391](https://github.com/neverprepared/phantom-brain/commit/27f7391617780f2f6caf69335a8cff9a53b8fd96))
+
 ## [3.15.0](https://github.com/neverprepared/phantom-brain/compare/v3.14.0...v3.15.0) (2026-07-14)
 
 
