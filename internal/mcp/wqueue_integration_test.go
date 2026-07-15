@@ -68,6 +68,38 @@ func always200(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"sha":"x","indexed_at":1,"synth_enqueued":true}`))
 }
 
+// --- task_complete surfaces the queued notice on daemon failure ---
+
+func TestTaskComplete_SurfacesQueuedNoticeOnDaemonFailure(t *testing.T) {
+	s, q, _, cleanup := setupWithQueue(t, 3, nil, http.HandlerFunc(always5xx))
+	defer cleanup()
+	// Catch-all embedder — the promoted note body varies with ids/timestamps.
+	s.deps.Embedder = &openEmbedder{dims: 3, fixed: []float32{1, 0, 0}}
+
+	id := startTask(t, s, "design the loader")
+	if _, isErr := callTool(t, s.handleTaskUpdate, map[string]any{
+		"task_id": id, "type": "finding", "content": "WAL mode is mandatory", "importance": "high",
+	}); isErr {
+		t.Fatal("update failed")
+	}
+
+	text, isErr := callTool(t, s.handleTaskComplete, map[string]any{"task_id": id})
+	if isErr {
+		t.Fatalf("expected success-with-notice, got error: %s", text)
+	}
+	if !strings.Contains(text, "Promoted") {
+		t.Errorf("missing promotion summary: %q", text)
+	}
+	// The fix: the promotion only reached the local wqueue (daemon 5xx), so the
+	// notice MUST be surfaced — otherwise the agent thinks its summary landed.
+	if !strings.Contains(text, "Queued (daemon") {
+		t.Errorf("task_complete must surface the queued notice on daemon failure; got: %q", text)
+	}
+	if depth, _ := q.Depth(t.Context()); depth != 1 {
+		t.Errorf("queue depth = %d, want 1", depth)
+	}
+}
+
 // --- queued perceive on daemon failure ---------------------------
 
 func TestPerceive_QueuesOnDaemonFailure(t *testing.T) {
