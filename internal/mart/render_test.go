@@ -100,3 +100,81 @@ func TestFilename_EmptyTitleFallsBack(t *testing.T) {
 		t.Errorf("Filename = %q, want untitled-0123456789ab.md", got)
 	}
 }
+
+func TestDisplayTitle(t *testing.T) {
+	sha := "abcdef0123456789abcdef"
+	// Attachment whose title IS the sha → use the original filename.
+	att := brain.RecordDTO{Kind: "attachment", SHA: sha, Title: sha, OriginalFilename: "Return 2025.pdf"}
+	if got := displayTitle(att); got != "Return 2025.pdf" {
+		t.Errorf("sha-title attachment: %q, want Return 2025.pdf", got)
+	}
+	// Empty title, no filename → untitled.
+	if got := displayTitle(brain.RecordDTO{SHA: sha, Title: "  "}); got != "untitled" {
+		t.Errorf("empty title: %q, want untitled", got)
+	}
+	// A real title is kept (never overridden).
+	note := brain.RecordDTO{Kind: "note", SHA: sha, Title: "Weekly Active Users", OriginalFilename: "x.pdf"}
+	if got := displayTitle(note); got != "Weekly Active Users" {
+		t.Errorf("real title should be kept: %q", got)
+	}
+}
+
+func TestDisplayBody_SuppressesAttachmentApology(t *testing.T) {
+	apology := "The document content provided is empty — there is no text to summarize. Please paste the document text."
+	att := brain.RecordDTO{Kind: "attachment", Body: apology}
+	if got := displayBody(att); got != "_(attachment — no extractable text)_" {
+		t.Errorf("attachment apology should be suppressed, got: %q", got)
+	}
+	// Empty attachment body → placeholder.
+	if got := displayBody(brain.RecordDTO{Kind: "attachment", Body: "  "}); got != "_(attachment — no extractable text)_" {
+		t.Errorf("empty attachment body should be placeholder, got: %q", got)
+	}
+	// Attachment WITH real extracted text → kept.
+	real := brain.RecordDTO{Kind: "attachment", Body: "Invoice #4021 for $1,240 due 2026-07-01."}
+	if got := displayBody(real); got != real.Body {
+		t.Errorf("real attachment body should be kept, got: %q", got)
+	}
+	// A NOTE that happens to contain apology-like text is NOT touched (only
+	// attachments are suppressed).
+	noteApology := brain.RecordDTO{Kind: "note", Body: "Reminder: please paste the document into the shared drive."}
+	if got := displayBody(noteApology); got != noteApology.Body {
+		t.Errorf("non-attachment body must never be suppressed, got: %q", got)
+	}
+}
+
+func TestLooksLikeApology(t *testing.T) {
+	if !looksLikeApology("There is no text to summarize.") {
+		t.Error("should flag the apology")
+	}
+	if looksLikeApology("Weekly active users are computed from the event stream.") {
+		t.Error("a normal summary must not be flagged")
+	}
+}
+
+func TestRender_AttachmentGetsFriendlyTitleAndCleanBody(t *testing.T) {
+	sha := "0132562e5f842266f205688342ebb012e8c5822bf441499b7c260c54f1cb18f4"
+	att := brain.RecordDTO{
+		Kind: "attachment", SHA: sha, Title: sha,
+		OriginalFilename: "Berrydale-survey.pdf",
+		Body:             "The document content provided is empty — nothing in the content field.",
+		UpdatedAt:        time.Now().UTC(),
+	}
+	out, err := Render(att)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "title: Berrydale-survey.pdf") {
+		t.Errorf("friendly title missing:\n%s", s)
+	}
+	if strings.Contains(s, "nothing in the content field") {
+		t.Errorf("apology body should be suppressed:\n%s", s)
+	}
+	if !strings.Contains(s, "no extractable text") {
+		t.Errorf("placeholder missing:\n%s", s)
+	}
+	// Filename uses the friendly slug, not the hash.
+	if fn := Filename(att); fn != "berrydale-survey-pdf-0132562e5f84.md" {
+		t.Errorf("Filename = %q, want berrydale-survey-pdf-<sha12>.md", fn)
+	}
+}

@@ -37,7 +37,7 @@ type frontmatter struct {
 func Render(rec brain.RecordDTO) ([]byte, error) {
 	fm := frontmatter{
 		Type:        rec.Kind, // kind is already a clean lowercase enum
-		Title:       rec.Title,
+		Title:       displayTitle(rec),
 		MemoryType:  rec.MemoryType,
 		Tags:        rec.Tags,
 		Topic:       rec.Topic,
@@ -60,9 +60,60 @@ func Render(rec brain.RecordDTO) ([]byte, error) {
 	out.WriteString("---\n")
 	out.Write(y.Bytes())
 	out.WriteString("---\n\n")
-	out.WriteString(strings.TrimRight(rec.Body, "\n"))
+	out.WriteString(strings.TrimRight(displayBody(rec), "\n"))
 	out.WriteString("\n")
 	return out.Bytes(), nil
+}
+
+// displayTitle picks a human-friendly title. Attachment records carry their
+// content SHA as the title; prefer the original filename (kept with its
+// extension — it signals the file type) when the title is empty or is just the
+// SHA. Normal notes keep their own title.
+func displayTitle(rec brain.RecordDTO) string {
+	t := strings.TrimSpace(rec.Title)
+	if (t == "" || t == rec.SHA) && strings.TrimSpace(rec.OriginalFilename) != "" {
+		return rec.OriginalFilename
+	}
+	if t == "" {
+		return "untitled"
+	}
+	return t
+}
+
+// apologyPhrases are signatures of the "there's nothing to summarize" boilerplate
+// synth emits for an attachment with no extracted text (root fix is #86 OCR).
+// Deliberately narrow so displayBody can't suppress a real document summary.
+var apologyPhrases = []string{
+	"no text to summarize",
+	"content provided is empty",
+	"nothing in the content",
+	"please paste the document",
+	"provide the document",
+	"document text and i will",
+}
+
+// looksLikeApology reports whether body is the empty-attachment apology.
+func looksLikeApology(body string) bool {
+	b := strings.ToLower(body)
+	for _, p := range apologyPhrases {
+		if strings.Contains(b, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// displayBody suppresses the empty/apology body for ATTACHMENT records only —
+// the embedded file is the real content, so a hash-title apology just adds
+// noise. Attachments that do have extracted text, and all non-attachment
+// records, are returned unchanged.
+func displayBody(rec brain.RecordDTO) string {
+	if rec.Kind == attachmentKind {
+		if b := strings.TrimSpace(rec.Body); b == "" || looksLikeApology(b) {
+			return "_(attachment — no extractable text)_"
+		}
+	}
+	return rec.Body
 }
 
 var (
@@ -71,11 +122,12 @@ var (
 )
 
 // Filename returns a stable, collision-free filename for a record:
-// slug(title)-<sha[:12]>.md. The sha suffix guarantees uniqueness even for
-// duplicate or empty titles, and makes re-render idempotent (same record →
-// same filename).
+// slug(displayTitle)-<sha[:12]>.md. Using the friendly title means attachments
+// get a readable name (return-2025-<sha>.md) instead of a hash-of-a-hash. The
+// sha suffix guarantees uniqueness even for duplicate/empty titles and makes
+// re-render idempotent (same record → same filename).
 func Filename(rec brain.RecordDTO) string {
-	slug := slugTrim.ReplaceAllString(slugNonAlnum.ReplaceAllString(strings.ToLower(rec.Title), "-"), "")
+	slug := slugTrim.ReplaceAllString(slugNonAlnum.ReplaceAllString(strings.ToLower(displayTitle(rec)), "-"), "")
 	if slug == "" {
 		slug = "untitled"
 	}
