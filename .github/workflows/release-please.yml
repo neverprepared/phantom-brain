@@ -36,4 +36,6 @@ jobs:
         if: ${{ steps.release.outputs.release_created }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run release.yaml -f tag="${{ steps.release.outputs.tag_name }}"
+        # -R is required: this job has no actions/checkout, so gh has no local
+        # git repo to infer --repo from ("fatal: not a git repository").
+        run: gh workflow run release.yaml -R "${{ github.repository }}" -f tag="${{ steps.release.outputs.tag_name }}"
