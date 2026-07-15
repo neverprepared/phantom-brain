@@ -10,21 +10,19 @@ import (
 )
 
 // brainDeathTool exposes Lifecycle.Shutdown via MCP. Calling it
-// transitions the brain to dead and packs the trimmed payload into
-// the local ship queue. After it returns, other brain_* / task_*
-// tools that touch live state will return errors — the MCP server
-// itself stays up so the operator can read the response, then SIGTERM
-// the process at their leisure.
+// transitions the brain to dead and marks the manifest + log. After it
+// returns, other brain_* / task_* tools that touch live state will
+// return errors — the MCP server itself stays up so the operator can
+// read the response, then SIGTERM the process at their leisure.
 //
-// In Phase 1 the payload sits locally forever; Phase 2 daemon picks
-// it up.
+// Post-cutover there is no death payload tarball: every write went to
+// the daemon as it happened, so shutdown is just a status flip.
 func brainDeathTool() mcp.Tool {
 	return mcp.NewTool("brain_death",
 		mcp.WithDescription(
-			`Transition this brain to dead and pack the trimmed death payload (manifest + `+
-				`vault/Raw/) into the local ship queue under XDG_DATA_HOME/phantom-brain/`+
-				`{profile}/{vault}/_pending/<brain_id>/death-<unix>.tar. In Phase 1 the payload `+
-				`stays local until the Phase 2 daemon ships.`,
+			`Mark this brain dead: flip its manifest status and log the shutdown. Writes `+
+				`already reached the daemon as they happened, so there is nothing to ship — `+
+				`this is a clean teardown, not a flush. Live brain_* / task_* tools error afterward.`,
 		),
 	)
 }
@@ -41,7 +39,7 @@ func (s *Server) handleBrainDeath(ctx context.Context, req mcp.CallToolRequest) 
 		return mcp.NewToolResultError(fmt.Sprintf("brain_death: %v", err)), nil
 	}
 	return mcp.NewToolResultText(fmt.Sprintf(
-		"brain_death: payload %d bytes at %s (brain_id=%s)",
-		res.PayloadSize, res.PayloadPath, res.BrainID,
+		"brain_death: brain %s marked dead (writes already persisted to daemon; nothing to ship)",
+		res.BrainID,
 	)), nil
 }

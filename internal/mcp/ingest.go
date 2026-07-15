@@ -44,8 +44,12 @@ type ingestParams struct {
 }
 
 // ingestResult mirrors what callers want to render back to the user.
+//
+// There is no "duplicate" status: post-cutover (Phase D2b) there is no
+// local read cache to dedup against, and the daemon SHA-dedups every
+// write idempotently, so a re-paste is a benign no-op upsert daemon-side
+// rather than a distinct outcome the agent needs to see.
 type ingestResult struct {
-	Status       string // "stored" or "duplicate"
 	RelativePath string
 	SHA          string
 	// Notice is empty when the daemon accepted the write directly.
@@ -193,7 +197,7 @@ func (s *Server) ingestMarkdown(ctx context.Context, p ingestParams) (*ingestRes
 		if s.deps.Lifecycle != nil {
 			s.deps.Lifecycle.RecordWrite()
 		}
-		return &ingestResult{Status: "stored", RelativePath: dest, SHA: sha, Notice: notice}, "", true
+		return &ingestResult{RelativePath: dest, SHA: sha, Notice: notice}, "", true
 	}
 }
 

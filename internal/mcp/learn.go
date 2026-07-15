@@ -10,20 +10,20 @@ import (
 
 // learnTool defines the brain_learn MCP tool schema.
 //
-// brain_learn ingests operator-curated content into Raw/curated/.
-// Same flow as brain_perceive but the destination subdir tells the
-// synthesizer to treat it as higher-reliability source material.
+// brain_learn ingests operator-curated content into long-term memory.
+// Same flow as brain_perceive but curation is the quality signal, so it
+// skips the LLM reliability gate (defaults to medium).
 //
 // Supports batch ingest via the items[] array; up to 100 per call.
 // On batch ingest the response lists per-item statuses (stored vs
-// duplicate vs error) so the caller can act on partial failure.
+// error) so the caller can act on partial failure.
 func learnTool() mcp.Tool {
 	return mcp.NewTool("brain_learn",
 		mcp.WithDescription(
-			`Ingest operator-curated content into Raw/curated/. Single mode: pass `+
+			`Ingest operator-curated content into long-term memory. Single mode: pass `+
 				`content + title + filename. Batch mode: pass items[] (up to 100; each item `+
-				`is {content, title, filename, source_url?}). Duplicates are detected by `+
-				`canonical SHA256 and skipped.`,
+				`is {content, title, filename, source_url?}). Re-ingesting identical content `+
+				`is a safe no-op (SHA dedup).`,
 		),
 		mcp.WithString("content",
 			mcp.Description("Single-item mode: raw markdown body."),
@@ -82,7 +82,7 @@ func (s *Server) handleLearn(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	}
 
 	var b strings.Builder
-	stored, dups, failed := 0, 0, 0
+	stored, failed := 0, 0
 	queuedItems := 0
 	for i, it := range items {
 		res, errMsg, success := s.ingestMarkdown(ctx, ingestParams{
@@ -98,31 +98,25 @@ func (s *Server) handleLearn(ctx context.Context, req mcp.CallToolRequest) (*mcp
 			fmt.Fprintf(&b, "[%d] %s — ERROR: %s\n", i+1, it.Title, errMsg)
 			continue
 		}
-		switch res.Status {
-		case "duplicate":
-			dups++
-			fmt.Fprintf(&b, "[%d] %s — duplicate (SHA %s)\n", i+1, it.Title, res.SHA[:12])
-		default:
-			stored++
-			notice := res.Notice
-			if notice != "" {
-				queuedItems++
-			}
-			// Cap per-item notice output: after queueNoticeCap items
-			// have emitted a notice, drop the per-item suffix and let
-			// the batch-level summary line carry the count.
-			if queuedItems > queueNoticeCap {
-				notice = ""
-			}
-			fmt.Fprintf(&b, "[%d] %s — stored to %s (SHA %s)%s\n", i+1, it.Title, res.RelativePath, res.SHA[:12], notice)
+		stored++
+		notice := res.Notice
+		if notice != "" {
+			queuedItems++
 		}
+		// Cap per-item notice output: after queueNoticeCap items
+		// have emitted a notice, drop the per-item suffix and let
+		// the batch-level summary line carry the count.
+		if queuedItems > queueNoticeCap {
+			notice = ""
+		}
+		fmt.Fprintf(&b, "[%d] %s — stored to %s (SHA %s)%s\n", i+1, it.Title, res.RelativePath, res.SHA[:12], notice)
 	}
 	if queuedItems > queueNoticeCap {
 		fmt.Fprintf(&b, "... and %d more pending (%d total queued).\n", queuedItems-queueNoticeCap, queuedItems)
 	}
 
-	header := fmt.Sprintf("brain_learn: %d stored, %d duplicate, %d failed (of %d)\n\n",
-		stored, dups, failed, len(items))
+	header := fmt.Sprintf("brain_learn: %d stored, %d failed (of %d)\n\n",
+		stored, failed, len(items))
 	return mcp.NewToolResultText(header + b.String()), nil
 }
 

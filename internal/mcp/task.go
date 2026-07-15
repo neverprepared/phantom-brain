@@ -293,24 +293,18 @@ func (s *Server) handleTaskComplete(ctx context.Context, req mcp.CallToolRequest
 		return mcp.NewToolResultError(fmt.Sprintf("mark complete: %v", err)), nil
 	}
 
-	status := res.Status
-	if status == "stored" {
-		msg := fmt.Sprintf(
-			"Task %s complete. Promoted %d finding(s), %d artifact(s), %d question(s) to %s. SHA: %s.",
-			taskID, len(important), len(artifacts), len(questions), res.RelativePath, res.SHA,
-		)
-		// Surface the offline-queue notice like every other write tool — else a
-		// promotion that only reached the local wqueue (daemon unreachable)
-		// reads as if it landed in long-term memory, when recall can't see it
-		// until the drainer syncs.
-		if res.Notice != "" {
-			msg += " " + res.Notice
-		}
-		return mcp.NewToolResultText(msg), nil
+	msg := fmt.Sprintf(
+		"Task %s complete. Promoted %d finding(s), %d artifact(s), %d question(s) to %s. SHA: %s.",
+		taskID, len(important), len(artifacts), len(questions), res.RelativePath, res.SHA,
+	)
+	// Surface the offline-queue notice like every other write tool — else a
+	// promotion that only reached the local wqueue (daemon unreachable)
+	// reads as if it landed in long-term memory, when recall can't see it
+	// until the drainer syncs.
+	if res.Notice != "" {
+		msg += " " + res.Notice
 	}
-	return mcp.NewToolResultText(fmt.Sprintf(
-		"Task %s complete. Promotion was a duplicate of an existing note (SHA: %s).", taskID, res.SHA,
-	)), nil
+	return mcp.NewToolResultText(msg), nil
 }
 
 func renderPromotedTaskBody(task *working.Task, findings []working.Finding, artifacts []working.Artifact, questions []working.Question) string {

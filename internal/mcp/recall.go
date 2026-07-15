@@ -16,20 +16,21 @@ const defaultRecallLimit = 10
 
 // recallTool defines the brain_recall MCP tool schema.
 //
-// brain_recall is the search-side primary entry point. It runs a
-// hybrid (vector + FTS5) query against the brain's vectors.db and
-// returns matched documents formatted as MCP text content for the
-// agent to consume.
+// brain_recall is the search-side primary entry point. It embeds the
+// query locally and POSTs the daemon, which runs a hybrid BM25+kNN
+// query over the pb_records projection and returns matched records
+// formatted as MCP text content for the agent to consume.
 func recallTool() mcp.Tool {
 	return mcp.NewTool("brain_recall",
 		mcp.WithDescription(
-			`Hybrid (vector + full-text) search over the brain's Wiki pages. `+
-				`Returns the top-K matching pages with scores, paths, and snippets. `+
-				`Use whenever you need to find prior knowledge stored in the brain.`,
+			`Hybrid (semantic + keyword) search over long-term memory. `+
+				`Returns the top-K matching records with a relevance score, kind, SHA, and snippet. `+
+				`Fetch a record's full body with brain_fetch using its SHA. `+
+				`Always fresh (live daemon read); call it first, before web search or codebase exploration.`,
 		),
 		mcp.WithString("query",
 			mcp.Required(),
-			mcp.Description("Natural-language query string. Matched against page titles, tags, and body via FTS5 AND against page embeddings via vector similarity."),
+			mcp.Description("Natural-language query string. Matched against record titles, tags, and body via keyword search AND against record embeddings via vector similarity."),
 		),
 		mcp.WithNumber("limit",
 			mcp.Description("Maximum number of results (default 10, max 50)."),
