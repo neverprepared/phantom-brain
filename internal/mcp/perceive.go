@@ -13,18 +13,17 @@ import (
 
 // perceiveTool defines the brain_perceive MCP tool schema.
 //
-// brain_perceive ingests web-gathered content into Raw/gathered/. It
+// brain_perceive ingests web-gathered content into long-term memory. It
 // is the "you went looking, here's what you found" entry point —
 // distinct from brain_learn, which is for content the operator has
-// already curated. Both end up in Raw/ but in different
-// subdirectories so the synthesizer can apply different reliability
-// gates.
+// already curated. The two write with different reliability gates so
+// the daemon's synth pass can weight them differently.
 func perceiveTool() mcp.Tool {
 	return mcp.NewTool("brain_perceive",
 		mcp.WithDescription(
-			`Ingest gathered web content into Raw/gathered/. Writes the markdown to disk, `+
-				`computes a content SHA256, embeds for vector search, and indexes for FTS5. `+
-				`Duplicates (same canonical content) are detected and skipped via SHA dedup. `+
+			`Ingest gathered web content into long-term memory. Computes a content SHA256, `+
+				`embeds it for semantic search, and POSTs it to the daemon, which persists and `+
+				`synthesizes it. Re-ingesting identical content is a safe no-op (SHA dedup). `+
 				`Use after a WebSearch / WebFetch when the result is worth remembering.`,
 		),
 		mcp.WithString("content",
@@ -67,9 +66,6 @@ func (s *Server) handlePerceive(ctx context.Context, req mcp.CallToolRequest) (*
 	})
 	if !ok {
 		return mcp.NewToolResultError(errMsg), nil
-	}
-	if res.Status == "duplicate" {
-		return mcp.NewToolResultText(fmt.Sprintf("Duplicate (already in index). SHA: %s", res.SHA)), nil
 	}
 	return mcp.NewToolResultText(fmt.Sprintf("Stored to %s. SHA: %s. Queued for synthesis.%s", res.RelativePath, res.SHA, res.Notice)), nil
 }

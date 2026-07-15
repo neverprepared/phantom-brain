@@ -229,11 +229,7 @@ func syncOne(spec mart.Spec, reg *mart.Registry, client *brain.Client, cmd *cobr
 	if err := reg.SaveCursor(spec.Name, next); err != nil {
 		return fmt.Errorf("synced but failed to persist cursor: %w", err)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "synced mart %q: %d changed record(s), %d attachment(s) → %s\n",
-		spec.Name, res.RecordsWritten, res.AttachmentsWritten, res.DestPath)
-	if res.AttachmentsSkipped > 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "warning: %d attachment(s) could not be materialized (see [!warning] callouts)\n", res.AttachmentsSkipped)
-	}
+	fmt.Fprintln(cmd.OutOrStdout(), res.Summary("synced", spec.Name))
 	return nil
 }
 
@@ -392,11 +388,7 @@ func buildOne(cmd *cobra.Command, spec mart.Spec, client *brain.Client, pageSize
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "built mart %q: %d record(s), %d attachment(s) → %s\n",
-		spec.Name, res.RecordsWritten, res.AttachmentsWritten, res.DestPath)
-	if res.AttachmentsSkipped > 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "warning: %d attachment(s) could not be materialized (see [!warning] callouts)\n", res.AttachmentsSkipped)
-	}
+	fmt.Fprintln(cmd.OutOrStdout(), res.Summary("built", spec.Name))
 	return nil
 }
 

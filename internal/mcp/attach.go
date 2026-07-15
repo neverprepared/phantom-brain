@@ -21,23 +21,19 @@ import (
 
 // attachTool defines the brain_attach MCP tool schema.
 //
-// brain_attach ingests a binary file (PDF, image, .docx, …) into the
-// brain. Storage scheme:
-//
-//	Raw/attachments/<sha>[ext]   the raw bytes, named by sha256
-//	Raw/attachments/<sha>.md     a searchable stub with title, description,
-//	                             attached_at, and any source URL
-//
-// The stub is what gets indexed for FTS5 + vector search; the binary
-// itself is opaque to the index. PDF/text extraction is deferred to
-// the synthesizer (Phase 2) so we don't shell out to pdftotext at
-// ingest time from the agent process.
+// brain_attach ingests a binary file (PDF, image, .docx, …) into
+// long-term memory. The agent hashes the bytes and POSTs them to the
+// daemon, which stores the blob in MinIO and indexes a searchable
+// record (title + description + metadata) in the Postgres SoR. PDF/text
+// extraction is deferred to the daemon's synth pass — the agent never
+// shells out to pdftotext.
 func attachTool() mcp.Tool {
 	return mcp.NewTool("brain_attach",
 		mcp.WithDescription(
-			`Attach a binary file (PDF, image, .docx, etc.) to the brain. Stores by `+
-				`SHA256 under Raw/attachments/ and writes a searchable markdown stub. `+
-				`Text extraction (PDF -> text) happens later at synthesis time.`,
+			`Attach a binary file (PDF, image, .docx, etc.) to long-term memory. The bytes `+
+				`are stored in object storage keyed by SHA256 and a searchable record is indexed `+
+				`from the title + description. Text extraction (PDF -> text) happens later at `+
+				`synthesis time.`,
 		),
 		mcp.WithString("file_path",
 			mcp.Required(),
@@ -48,7 +44,7 @@ func attachTool() mcp.Tool {
 			mcp.Description("Human-readable title for the attachment."),
 		),
 		mcp.WithString("description",
-			mcp.Description("Optional prose description. Indexed for FTS5 + vector recall. Pass at least a sentence — empty descriptions are searchable only by filename and title."),
+			mcp.Description("Optional prose description. Indexed for keyword + semantic recall. Pass at least a sentence — empty descriptions are searchable only by filename and title."),
 		),
 		mcp.WithString("source_url",
 			mcp.Description("URL the file came from, when known."),

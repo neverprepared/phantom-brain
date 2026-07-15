@@ -123,6 +123,26 @@ type Result struct {
 	DestPath           string
 }
 
+// Summary renders a one-line human summary for the given verb ("built" /
+// "synced") and mart name. It is SINGLE-LINE by contract: the MCP mart
+// aggregator packs one bullet per mart, so the summary must not contain a
+// newline. AttachmentsSkipped is folded in as a trailing clause rather than a
+// separate line so a caller can't silently drop it (the bug this replaces —
+// both MCP handlers omitted the skipped count entirely). "synced" reports
+// "changed record(s)" since a sync is incremental.
+func (r Result) Summary(verb, name string) string {
+	noun := "record(s)"
+	if verb == "synced" {
+		noun = "changed record(s)"
+	}
+	s := fmt.Sprintf("%s %q: %d %s, %d attachment(s) → %s",
+		verb, name, r.RecordsWritten, noun, r.AttachmentsWritten, r.DestPath)
+	if r.AttachmentsSkipped > 0 {
+		s += fmt.Sprintf(" (%d attachment(s) could not be materialized — see [!warning] callouts)", r.AttachmentsSkipped)
+	}
+	return s
+}
+
 // Build renders the mart described by spec into spec.Dest, paging through src.
 //
 // Ownership safety (critical): Build refuses to wipe or write into a non-empty

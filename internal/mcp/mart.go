@@ -71,7 +71,7 @@ func (s *Server) handleMartBuild(ctx context.Context, req mcp.CallToolRequest) (
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("built %q: %d record(s), %d attachment(s) → %s", spec.Name, res.RecordsWritten, res.AttachmentsWritten, res.DestPath), nil
+		return res.Summary("built", spec.Name), nil
 	})
 }
 
@@ -101,7 +101,7 @@ func (s *Server) handleMartSync(ctx context.Context, req mcp.CallToolRequest) (*
 		if err := reg.SaveCursor(spec.Name, next); err != nil {
 			return "", fmt.Errorf("synced but cursor save failed: %w", err)
 		}
-		return fmt.Sprintf("synced %q: %d changed record(s), %d attachment(s) → %s", spec.Name, res.RecordsWritten, res.AttachmentsWritten, res.DestPath), nil
+		return res.Summary("synced", spec.Name), nil
 	})
 }
 
