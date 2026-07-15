@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.17.0](https://github.com/neverprepared/phantom-brain/compare/v3.16.0...v3.17.0) (2026-07-15)
+
+
+### Features
+
+* **mart:** attachment note quality — friendly titles + suppress apology bodies ([#143](https://github.com/neverprepared/phantom-brain/issues/143)) ([#157](https://github.com/neverprepared/phantom-brain/issues/157)) ([fff6bd2](https://github.com/neverprepared/phantom-brain/commit/fff6bd21c3f930f9895e5484eb81ac92e012ab49))
+
 ## [3.16.0](https://github.com/neverprepared/phantom-brain/compare/v3.15.0...v3.16.0) (2026-07-14)
 
 
