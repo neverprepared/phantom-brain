@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.17.1](https://github.com/neverprepared/phantom-brain/compare/v3.17.0...v3.17.1) (2026-07-15)
+
+
+### Bug Fixes
+
+* **mcp:** task_complete surfaces the offline-queue notice like other write tools ([#159](https://github.com/neverprepared/phantom-brain/issues/159)) ([06472fd](https://github.com/neverprepared/phantom-brain/commit/06472fd0968175afc005b82e171fa15a10620bbf))
+
 ## [3.17.0](https://github.com/neverprepared/phantom-brain/compare/v3.16.0...v3.17.0) (2026-07-15)
 
 
