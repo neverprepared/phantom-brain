@@ -77,8 +77,32 @@ type ServerConfig struct {
 	// bundled `claude` CLI instead. See SynthConfig + internal/server/llm.go.
 	Synth SynthConfig `toml:"synth"`
 
+	// Auth optionally enables phantom-auth JWT verification alongside the
+	// per-vault bearer tokens. When JWKSURL is empty, only the legacy
+	// opaque per-vault tokens are accepted (fully backward compatible).
+	Auth AuthConfig `toml:"auth"`
+
 	Defaults VaultDefaults `toml:"defaults"`
 }
+
+// AuthConfig mirrors the [auth] block in server.toml:
+//
+//	[auth]
+//	jwks_url = "http://phantom-auth:9930/.well-known/jwks.json"
+//	issuer   = "phantom-auth"   # default
+//	audience = "phantom"        # default
+//
+// Env overrides (win over the TOML): PB_AUTH_JWKS_URL, PB_AUTH_ISSUER,
+// PB_AUTH_AUDIENCE. Empty JWKSURL ⇒ JWT verification disabled; the daemon
+// authenticates callers only by their per-vault bearer_token (legacy path).
+type AuthConfig struct {
+	JWKSURL  string `toml:"jwks_url"`
+	Issuer   string `toml:"issuer"`
+	Audience string `toml:"audience"`
+}
+
+// Enabled reports whether phantom-auth JWT verification is wired.
+func (c AuthConfig) Enabled() bool { return strings.TrimSpace(c.JWKSURL) != "" }
 
 // SynthConfig mirrors the [synth] block in server.toml:
 //
@@ -213,6 +237,25 @@ func applyServerDefaults(cfg *ServerConfig) {
 	}
 	if s.TimeoutSecs <= 0 {
 		s.TimeoutSecs = defaultSynthTimeoutSecs
+	}
+
+	// Auth (phantom-auth JWT). Env overrides win over the TOML; empty
+	// JWKS URL leaves JWT verification disabled (legacy tokens only).
+	a := &cfg.Auth
+	if v := strings.TrimSpace(os.Getenv("PB_AUTH_JWKS_URL")); v != "" {
+		a.JWKSURL = v
+	}
+	if v := strings.TrimSpace(os.Getenv("PB_AUTH_ISSUER")); v != "" {
+		a.Issuer = v
+	}
+	if v := strings.TrimSpace(os.Getenv("PB_AUTH_AUDIENCE")); v != "" {
+		a.Audience = v
+	}
+	if a.Issuer == "" {
+		a.Issuer = "phantom-auth"
+	}
+	if a.Audience == "" {
+		a.Audience = "phantom"
 	}
 
 	d := &cfg.Defaults

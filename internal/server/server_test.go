@@ -384,7 +384,7 @@ func TestBearerFromHeader(t *testing.T) {
 
 func TestAuthMiddleware_RejectsMissing(t *testing.T) {
 	r := NewRegistry()
-	mw := AuthMiddleware(r)
+	mw := AuthMiddleware(r, nil)
 	h := mw(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("inner handler should not have run")
 	}))
@@ -410,7 +410,7 @@ func TestAuthMiddleware_AcceptsValidAndPlumbsBinding(t *testing.T) {
 	if _, err := r.Load(LoadOpts{ConfigDir: dir}); err != nil {
 		t.Fatal(err)
 	}
-	mw := AuthMiddleware(r)
+	mw := AuthMiddleware(r, nil)
 	var gotBinding VaultBinding
 	h := mw(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		gotBinding, _ = BindingFromContext(req.Context())

@@ -20,17 +20,20 @@ func BindingFromContext(ctx context.Context) (VaultBinding, bool) {
 	return b, ok
 }
 
-// AuthMiddleware enforces bearer-token auth backed by the registry.
-// Returns 401 INVALID_TOKEN for missing or unknown tokens, with the
-// standard error envelope. On success, stashes the resolved
-// VaultBinding on the request context for downstream handlers.
+// AuthMiddleware enforces bearer auth for the daemon. Two token shapes are
+// accepted, distinguished by structure:
 //
-// Bearer tokens are looked up in constant time against the registry's
-// internal map — there's no string-compare loop, so timing attacks
-// against the token set don't get you the per-vault token (you can
-// still confirm presence/absence via timing, but that's an acceptable
-// trade given the tokens are 32+ bytes of random anyway).
-func AuthMiddleware(registry *Registry) func(http.Handler) http.Handler {
+//   - a **phantom-auth JWT** (three dot-separated parts) — verified locally
+//     against the JWKS when a verifier is configured. Its `profile` claim
+//     selects the binding; a caller with several vaults picks one via the
+//     `X-Brain-Vault` header. This is the unified platform identity.
+//   - a **legacy per-vault bearer token** — looked up in constant time in the
+//     registry's map. Kept so existing vault tokens keep working.
+//
+// verifier may be nil (no [auth] block): only legacy tokens are then accepted.
+// Returns 401 INVALID_TOKEN for missing/unknown/invalid tokens; on success,
+// stashes the resolved VaultBinding on the request context.
+func AuthMiddleware(registry *Registry, verifier *Verifier) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			token, ok := bearerFromHeader(r.Header.Get("Authorization"))
@@ -39,16 +42,71 @@ func AuthMiddleware(registry *Registry) func(http.Handler) http.Handler {
 					"missing or malformed Authorization header (expected: Bearer <token>)", nil)
 				return
 			}
-			binding, ok := registry.LookupByToken(token)
-			if !ok {
-				WriteErrorEnvelope(w, http.StatusUnauthorized, ErrCodeInvalidToken,
-					"unknown bearer token", nil)
-				return
+
+			var binding VaultBinding
+			if verifier != nil && looksLikeJWT(token) {
+				claims, err := verifier.Verify(token)
+				if err != nil {
+					WriteErrorEnvelope(w, http.StatusUnauthorized, ErrCodeInvalidToken,
+						"invalid phantom-auth token", nil)
+					return
+				}
+				b, status, msg := resolveBindingForProfile(
+					registry, claims.Profile, r.Header.Get("X-Brain-Vault"))
+				if status != 0 {
+					WriteErrorEnvelope(w, status, ErrCodeInvalidToken, msg, nil)
+					return
+				}
+				binding = b
+			} else {
+				b, found := registry.LookupByToken(token)
+				if !found {
+					WriteErrorEnvelope(w, http.StatusUnauthorized, ErrCodeInvalidToken,
+						"unknown bearer token", nil)
+					return
+				}
+				binding = b
 			}
+
 			ctx := context.WithValue(r.Context(), authCtxKey{}, binding)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// looksLikeJWT reports whether a token has the compact-JWS three-part shape.
+// A legacy opaque vault token is a single random string (no dots), so this
+// cleanly separates the two paths without one masking the other.
+func looksLikeJWT(token string) bool {
+	return strings.Count(token, ".") == 2
+}
+
+// resolveBindingForProfile maps a JWT's profile (+ optional X-Brain-Vault) to
+// exactly one vault binding. Returns (binding, 0, "") on success, else a
+// non-zero HTTP status + message. A profile JWT can only reach its own
+// profile's vaults — cross-profile access can't be expressed.
+func resolveBindingForProfile(registry *Registry, profile, vault string) (VaultBinding, int, string) {
+	if strings.TrimSpace(profile) == "" {
+		return VaultBinding{}, http.StatusForbidden, "token carries no profile claim"
+	}
+	vaults := registry.LookupByProfile(profile)
+	if len(vaults) == 0 {
+		return VaultBinding{}, http.StatusForbidden, "no vault provisioned for profile " + profile
+	}
+	if vault != "" {
+		for _, b := range vaults {
+			if b.Key.Vault == vault {
+				return b, 0, ""
+			}
+		}
+		return VaultBinding{}, http.StatusForbidden,
+			"token does not grant access to " + profile + "/" + vault
+	}
+	if len(vaults) == 1 {
+		return vaults[0], 0, ""
+	}
+	return VaultBinding{}, http.StatusBadRequest,
+		"profile " + profile + " has multiple vaults; specify one via the X-Brain-Vault header"
 }
 
 // bearerFromHeader extracts the token from "Bearer <token>".

@@ -34,6 +34,7 @@ type Daemon struct {
 	Logger    *slog.Logger
 
 	registry *Registry
+	verifier *Verifier // phantom-auth JWT verifier; nil when [auth] is absent
 	runners  *runnerSet
 	storage  StorageBackend
 	router   chi.Router
@@ -192,6 +193,16 @@ func Start(opts StartOpts) (*Daemon, error) {
 		parentCancel: parentCancel,
 		synth:        noopSynthQueue{}, // Day 5 swaps in the real worker
 		bindings:     newBindingDepCache(),
+	}
+
+	// Optional phantom-auth JWT verification. Absent [auth] block ⇒ nil
+	// verifier ⇒ only legacy per-vault bearer tokens are accepted.
+	if cfg.Auth.Enabled() {
+		d.verifier = NewVerifier(cfg.Auth.JWKSURL, cfg.Auth.Issuer, cfg.Auth.Audience)
+		opts.Logger.Info("phantom-brain: phantom-auth JWT verification enabled",
+			slog.String("jwks_url", cfg.Auth.JWKSURL),
+			slog.String("issuer", cfg.Auth.Issuer),
+			slog.String("audience", cfg.Auth.Audience))
 	}
 
 	// Phase 6: the MinIO backend doubles as the AttachmentStore for
@@ -408,7 +419,7 @@ func (d *Daemon) buildRouter() chi.Router {
 
 		// Everything else requires bearer auth.
 		r.Group(func(r chi.Router) {
-			r.Use(AuthMiddleware(d.registry))
+			r.Use(AuthMiddleware(d.registry, d.verifier))
 			r.Post("/merge/init", d.handleMergeInit)
 			r.Post("/merge/complete/{uploadID}", d.handleMergeComplete)
 			r.Get("/merge/{brainID}", d.handleMergeStatus)

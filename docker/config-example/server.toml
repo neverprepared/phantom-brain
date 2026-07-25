@@ -86,6 +86,18 @@ ollama_model    = "qwen2.5:7b"
 # PB_SYNTH_TIMEOUT_SECS.
 timeout_secs    = 120
 
+# Optional: phantom-auth JWT verification. When set, callers may present a
+# phantom-auth JWT (minted for their workspace profile) instead of the vault's
+# opaque bearer_token; the daemon verifies it locally against the JWKS and
+# resolves the token's `profile` claim to that profile's vault (a caller with
+# several vaults selects one via the `X-Brain-Vault` header). Leaving this out
+# keeps only the legacy per-vault bearer_token path (fully backward compatible).
+# Env overrides: PB_AUTH_JWKS_URL, PB_AUTH_ISSUER, PB_AUTH_AUDIENCE.
+# [auth]
+# jwks_url = "http://phantom-auth:9930/.well-known/jwks.json"
+# issuer   = "phantom-auth"
+# audience = "phantom"
+
 [defaults]
 retention_gens = 30
 reaper_poll_interval_secs = 5

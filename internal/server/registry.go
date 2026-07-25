@@ -88,6 +88,23 @@ func (r *Registry) LookupByVault(k VaultKey) (VaultBinding, bool) {
 	return b, ok
 }
 
+// LookupByProfile returns every binding belonging to a profile, sorted by
+// vault name for stable selection. Used by the phantom-auth JWT path: a JWT
+// authenticates a profile, and the daemon resolves it to that profile's
+// vault(s) (a caller picks among several via the X-Brain-Vault header).
+func (r *Registry) LookupByProfile(profile string) []VaultBinding {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []VaultBinding
+	for k, b := range r.byVault {
+		if k.Profile == profile {
+			out = append(out, b)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key.Vault < out[j].Key.Vault })
+	return out
+}
+
 // Vaults returns every binding sorted by VaultKey for stable iteration
 // (registry tests + /api/brain/health output benefit from determinism).
 func (r *Registry) Vaults() []VaultBinding {
