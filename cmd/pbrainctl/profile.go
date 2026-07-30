@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -31,6 +32,7 @@ func profileCreateCmd() *cobra.Command {
 		indexPrefix string
 		token       string
 		noReload    bool
+		jsonOut     bool
 	)
 	c := &cobra.Command{
 		Use:   "create <profile> <vault>",
@@ -86,11 +88,6 @@ $PB_POSTGRES_DSN, then $DATABASE_URL, then server.toml [postgres] dsn.`,
 				return err // precondition failure (invalid name/prefix/token)
 			}
 
-			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "provisioning binding %s\n", res.Key)
-			fmt.Fprintf(out, "  bucket       : %s\n", res.Bucket)
-			fmt.Fprintf(out, "  index_prefix : %s\n\n", res.IndexPrefix)
-
 			steps := res.Steps
 			// Annotate a Postgres connect failure with the host/container hint.
 			for i := range steps {
@@ -104,6 +101,18 @@ $PB_POSTGRES_DSN, then $DATABASE_URL, then server.toml [postgres] dsn.`,
 			} else {
 				steps = append(steps, reloadDaemonStep(cmd))
 			}
+
+			out := cmd.OutOrStdout()
+			if jsonOut {
+				// Machine-readable output for the provisioning orchestrator:
+				// the effective bearer token is included so the caller can
+				// thread it into phantom-credentials. Treat this output as a
+				// secret — do not log it.
+				return emitProvisionJSON(out, res, steps)
+			}
+			fmt.Fprintf(out, "provisioning binding %s\n", res.Key)
+			fmt.Fprintf(out, "  bucket       : %s\n", res.Bucket)
+			fmt.Fprintf(out, "  index_prefix : %s\n\n", res.IndexPrefix)
 			return reportSteps(out, steps)
 		},
 	}
@@ -113,7 +122,57 @@ $PB_POSTGRES_DSN, then $DATABASE_URL, then server.toml [postgres] dsn.`,
 	c.Flags().StringVar(&indexPrefix, "index-prefix", "", "OS index prefix override (default: <profile>_)")
 	c.Flags().StringVar(&token, "token", "", "bearer token (default: generated; ignored if the binding already has one)")
 	c.Flags().BoolVar(&noReload, "no-reload", false, "do not SIGHUP the daemon; just print the reload hint")
+	c.Flags().BoolVar(&jsonOut, "json", false, "emit the result (incl. bearer token) as JSON for machine consumers; treat the output as a secret")
 	return c
+}
+
+// emitProvisionJSON writes the machine-readable provisioning result to
+// out (used by --json). It carries the effective bearer token so the
+// orchestrator can thread it into phantom-credentials; the caller must
+// treat this as secret. Returns a non-nil error when any step failed, so
+// the command still exits non-zero.
+func emitProvisionJSON(out writer, res provision.Result, steps []provision.StepResult) error {
+	type stepView struct {
+		Name   string `json:"name"`
+		Result string `json:"result"`
+		Detail string `json:"detail,omitempty"`
+		Error  string `json:"error,omitempty"`
+	}
+	view := struct {
+		Profile      string     `json:"profile"`
+		Vault        string     `json:"vault"`
+		Bucket       string     `json:"bucket"`
+		IndexPrefix  string     `json:"index_prefix"`
+		Token        string     `json:"token"`
+		TokenCreated bool       `json:"token_created"`
+		OK           bool       `json:"ok"`
+		Steps        []stepView `json:"steps"`
+	}{
+		Profile:      res.Key.Profile,
+		Vault:        res.Key.Vault,
+		Bucket:       res.Bucket,
+		IndexPrefix:  res.IndexPrefix,
+		Token:        res.Token,
+		TokenCreated: res.TokenCreated,
+		OK:           true,
+	}
+	for _, s := range steps {
+		sv := stepView{Name: s.Name, Result: s.Result, Detail: s.Detail}
+		if s.Err != nil {
+			sv.Error = s.Err.Error()
+			view.OK = false
+		}
+		view.Steps = append(view.Steps, sv)
+	}
+	b, err := json.MarshalIndent(view, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(out, string(b))
+	if !view.OK {
+		return fmt.Errorf("provisioning had failed steps (see JSON output)")
+	}
+	return nil
 }
 
 // annotatePGConnectErr appends the host/container DSN hint when the
