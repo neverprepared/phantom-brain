@@ -69,6 +69,12 @@ $PB_POSTGRES_DSN, then $DATABASE_URL, then server.toml [postgres] dsn.`,
 				mb = m
 			}
 			configDir := resolveConfigDir(cmd)
+			// Naming templates come from server.toml [naming]; a load error is
+			// non-fatal — empty Naming falls back to the historical defaults.
+			var naming provision.Naming
+			if cfg, cfgErr := pbserver.LoadServerConfig(configDir); cfgErr == nil {
+				naming = provision.Naming{Bucket: cfg.Naming.Bucket, IndexPrefix: cfg.Naming.IndexPrefix}
+			}
 
 			ctx, cancel := signalCancel(cmd.Context())
 			defer cancel()
@@ -77,6 +83,7 @@ $PB_POSTGRES_DSN, then $DATABASE_URL, then server.toml [postgres] dsn.`,
 				BaseDSN:   base,
 				MinIO:     mb,
 				ConfigDir: configDir,
+				Naming:    naming,
 			}, provision.Spec{
 				Profile:     profile,
 				Vault:       vault,
