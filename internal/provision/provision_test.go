@@ -155,6 +155,43 @@ func TestProfileCreate_RejectsBadSegments(t *testing.T) {
 	}
 }
 
+// TestProfileCreate_NamingTemplateApplied covers the configurable
+// convention: a custom template (with {profile}/{vault}) drives the
+// derived bucket + index prefix instead of the hardcoded default.
+func TestProfileCreate_NamingTemplateApplied(t *testing.T) {
+	cfgDir := seedConfigDir(t)
+	res, err := ProfileCreate(context.Background(),
+		Deps{ConfigDir: cfgDir, Naming: Naming{
+			Bucket:      "{profile}-{vault}-store",
+			IndexPrefix: "mem_{profile}_",
+		}},
+		Spec{Profile: "gsa", Vault: "memory"})
+	if err != nil || res.Failed() {
+		t.Fatalf("create failed: err=%v steps=%+v", err, res.Steps)
+	}
+	if res.Bucket != "gsa-memory-store" {
+		t.Errorf("bucket template not applied: %q", res.Bucket)
+	}
+	if res.IndexPrefix != "mem_gsa_" {
+		t.Errorf("index prefix template not applied: %q", res.IndexPrefix)
+	}
+}
+
+// TestProfileCreate_OverrideBeatsTemplate confirms a per-binding override
+// still wins over the naming template.
+func TestProfileCreate_OverrideBeatsTemplate(t *testing.T) {
+	cfgDir := seedConfigDir(t)
+	res, err := ProfileCreate(context.Background(),
+		Deps{ConfigDir: cfgDir, Naming: Naming{Bucket: "{profile}-archives"}},
+		Spec{Profile: "gsa", Vault: "memory", Bucket: "hand-picked-bucket"})
+	if err != nil || res.Failed() {
+		t.Fatalf("create failed: err=%v steps=%+v", err, res.Steps)
+	}
+	if res.Bucket != "hand-picked-bucket" {
+		t.Errorf("override should beat template, got %q", res.Bucket)
+	}
+}
+
 // TestProfileCreate_VaultKeyPreserved is a small guard that Result echoes
 // the key the caller asked for (the orchestrator records it).
 func TestProfileCreate_VaultKeyPreserved(t *testing.T) {

@@ -51,6 +51,41 @@ type Deps struct {
 	MinIO *pbserver.MinIOBackend
 	// ConfigDir is the root under which profiles/<p>/vaults/<v>/ lives.
 	ConfigDir string
+	// Naming holds the resource-name templates. Zero value → historical
+	// defaults, so callers that don't care get today's behavior.
+	Naming Naming
+}
+
+// Naming makes the per-binding storage-name convention configurable
+// instead of hardcoded. Templates support {profile} and {vault}
+// placeholders. An empty field falls back to the historical default.
+// A per-binding override (Spec.Bucket / Spec.IndexPrefix) always wins
+// over the template. NOTE: this governs the MinIO bucket and OpenSearch
+// index prefix only — the Postgres database name (pb_<profile>) is
+// resolved by convention in both provisioning and the daemon's runtime
+// recall path, so templatizing it is a separate, coordinated change.
+type Naming struct {
+	Bucket      string // default "{profile}-archives"
+	IndexPrefix string // default "{profile}_"
+}
+
+func (n Naming) bucketFor(profile, vault string) string {
+	return expandName(orDefault(n.Bucket, "{profile}-archives"), profile, vault)
+}
+
+func (n Naming) indexPrefixFor(profile, vault string) string {
+	return expandName(orDefault(n.IndexPrefix, "{profile}_"), profile, vault)
+}
+
+func orDefault(v, def string) string {
+	if strings.TrimSpace(v) == "" {
+		return def
+	}
+	return v
+}
+
+func expandName(tmpl, profile, vault string) string {
+	return strings.NewReplacer("{profile}", profile, "{vault}", vault).Replace(tmpl)
 }
 
 // StepResult is one step's outcome. Result is one of:
@@ -105,13 +140,15 @@ func ProfileCreate(ctx context.Context, deps Deps, spec Spec) (Result, error) {
 	}
 
 	key := pbserver.VaultKey{Profile: spec.Profile, Vault: spec.Vault}
+	// Per-binding override wins; otherwise derive from the (configurable)
+	// naming template.
 	bucket := spec.Bucket
 	if bucket == "" {
-		bucket = spec.Profile + "-archives"
+		bucket = deps.Naming.bucketFor(spec.Profile, spec.Vault)
 	}
 	indexPrefix := spec.IndexPrefix
 	if indexPrefix == "" {
-		indexPrefix = spec.Profile + "_"
+		indexPrefix = deps.Naming.indexPrefixFor(spec.Profile, spec.Vault)
 	}
 	if err := pbserver.ValidateStorageOverridePrefix(indexPrefix); err != nil {
 		return Result{}, err
