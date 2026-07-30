@@ -82,7 +82,25 @@ type ServerConfig struct {
 	// opaque per-vault tokens are accepted (fully backward compatible).
 	Auth AuthConfig `toml:"auth"`
 
+	// Naming templates the per-binding resource names ({profile}/{vault}
+	// placeholders). Empty fields fall back to the historical defaults, so
+	// omitting the block is fully backward compatible. Governs the MinIO
+	// bucket + OpenSearch index prefix only — the Postgres database name is
+	// convention-derived in both provisioning and the runtime recall path,
+	// so it is intentionally not templated here.
+	Naming NamingConfig `toml:"naming"`
+
 	Defaults VaultDefaults `toml:"defaults"`
+}
+
+// NamingConfig mirrors the [naming] block in server.toml:
+//
+//	[naming]
+//	bucket       = "{profile}-archives"
+//	index_prefix = "{profile}_"
+type NamingConfig struct {
+	Bucket      string `toml:"bucket"`
+	IndexPrefix string `toml:"index_prefix"`
 }
 
 // AuthConfig mirrors the [auth] block in server.toml:
