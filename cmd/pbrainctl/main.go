@@ -439,6 +439,10 @@ to prevent a second instance from corrupting the data dir.`,
 			if err != nil {
 				return err
 			}
+			// Wire the admin endpoint's provisioning to internal/provision
+			// (injected — provision imports pbserver, so pbserver can't import
+			// it back without a cycle).
+			d.ProvisionFn = provisionAdapter
 			return d.Run()
 		},
 	}
