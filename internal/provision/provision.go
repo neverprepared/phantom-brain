@@ -158,8 +158,9 @@ func ProfileCreate(ctx context.Context, deps Deps, spec Spec) (Result, error) {
 
 	// 1. Postgres SoR (pb_<profile>)
 	res.Steps = append(res.Steps, provisionPostgres(ctx, deps.BaseDSN, spec.Profile))
-	// 2. MinIO bucket (<profile>-archives)
-	res.Steps = append(res.Steps, provisionBucket(ctx, deps.MinIO, bucket))
+	// 2. MinIO bucket + the <profile>/<vault>/ folder placeholder so the
+	//    binding is browsable before any real data is written.
+	res.Steps = append(res.Steps, provisionBucket(ctx, deps.MinIO, bucket, spec.Profile, spec.Vault))
 	// 3. Binding config (auth.toml + config.toml) — resolves the effective token
 	cfgStep, token, created := writeBindingConfig(deps.ConfigDir, key, indexPrefix, bucket, spec.Token)
 	res.Steps = append(res.Steps, cfgStep)
@@ -184,7 +185,7 @@ func provisionPostgres(ctx context.Context, baseDSN, profile string) StepResult 
 	return s
 }
 
-func provisionBucket(ctx context.Context, mb *pbserver.MinIOBackend, bucket string) StepResult {
+func provisionBucket(ctx context.Context, mb *pbserver.MinIOBackend, bucket, profile, vault string) StepResult {
 	s := StepResult{Name: "minio bucket (" + bucket + ")"}
 	if mb == nil {
 		s.Result, s.Detail = "skipped", "storage backend is not minio"
@@ -194,7 +195,15 @@ func provisionBucket(ctx context.Context, mb *pbserver.MinIOBackend, bucket stri
 		s.Result, s.Err = "failed", err
 		return s
 	}
-	s.Result = "ok"
+	// The daemon keys objects at <profile>/<vault>/…; write that folder
+	// placeholder so the binding shows up in the app's Files browser even
+	// while empty. Non-fatal on error — the binding itself is fine.
+	folder := profile + "/" + vault + "/"
+	if err := mb.EnsureFolder(ctx, bucket, folder); err != nil {
+		s.Result, s.Detail = "ok", "bucket ready; folder placeholder failed: "+err.Error()
+		return s
+	}
+	s.Result, s.Detail = "ok", "bucket + "+folder+" placeholder"
 	return s
 }
 
