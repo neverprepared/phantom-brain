@@ -33,6 +33,13 @@ type Daemon struct {
 	DataDir   DataDir
 	Logger    *slog.Logger
 
+	// ProvisionFn is the injected binding-provisioning function (the admin
+	// endpoint calls it). It is wired by cmd to internal/provision.ProfileCreate;
+	// injected rather than imported because internal/provision imports THIS
+	// package, so a direct import here would be a cycle. Nil ⇒ the admin
+	// provisioning endpoint returns 501.
+	ProvisionFn ProvisionFunc
+
 	registry *Registry
 	verifier *Verifier // phantom-auth JWT verifier; nil when [auth] is absent
 	runners  *runnerSet
@@ -52,12 +59,12 @@ type Daemon struct {
 	// each binding the daemon caches a per-binding view in bindings
 	// (built at Start + on reload). Handlers / synth resolve through
 	// depsForBinding which falls back to the shared views.
-	osClient   osWriter
-	osBase     *osearch.Client // raw client, used to derive WithPrefix views
-	minioBase  *MinIOBackend   // raw MinIO backend, used to derive per-bucket views
-	synth      SynthQueue
-	attach     AttachmentStore
-	bindings   *bindingDepCache
+	osClient  osWriter
+	osBase    *osearch.Client // raw client, used to derive WithPrefix views
+	minioBase *MinIOBackend   // raw MinIO backend, used to derive per-bucket views
+	synth     SynthQueue
+	attach    AttachmentStore
+	bindings  *bindingDepCache
 
 	// Phase A (dormant): per-profile Postgres System-of-Record. pgBaseDSN
 	// is the resolved base/maintenance DSN ("" = Postgres disabled).
@@ -82,8 +89,14 @@ type Daemon struct {
 	// build a Daemon by hand set it to keep the legacy paths working.
 	allowSharedFallback bool
 
-	parentCtx context.Context
+	parentCtx    context.Context
 	parentCancel context.CancelFunc
+
+	// provisionMu serializes admin provisioning (ProfileCreate + reload).
+	// reload() mutates registry/runners/bindings and is otherwise driven
+	// only by the single-threaded SIGHUP loop, so concurrent admin calls
+	// must not race it.
+	provisionMu sync.Mutex
 
 	mu      sync.Mutex
 	started bool
@@ -455,6 +468,17 @@ func (d *Daemon) buildRouter() chi.Router {
 			r.Post("/resynth", d.handleResynth)
 		})
 
+		// Operator/admin surface — provisioning ACROSS profiles. Mounted
+		// OUTSIDE AuthMiddleware on purpose: these ops create a binding
+		// that does not exist yet, so they authenticate with a single
+		// operator key (PB_ADMIN_KEY), never a per-binding profile/vault
+		// token. A profile-scoped token must not reach here.
+		r.Group(func(r chi.Router) {
+			r.Use(d.adminAuthMiddleware())
+			r.Post("/admin/profiles", d.handleAdminProfileCreate)
+			r.Get("/admin/profiles/{profile}/{vault}", d.handleAdminProfileGet)
+		})
+
 		// Upload route is local-backend only and uses its own
 		// HMAC-token auth rather than bearer (so brains can use
 		// the presigned URL with curl without forwarding their
@@ -701,8 +725,8 @@ func (d *Daemon) LookupBindingForTest(k VaultKey) (VaultBinding, bool) {
 // agents will parse out of /api/brain/health. Vaults are listed
 // alphabetically; tokens are NEVER returned.
 type healthResponse struct {
-	Status string         `json:"status"`
-	Vaults []healthVault  `json:"vaults"`
+	Status string        `json:"status"`
+	Vaults []healthVault `json:"vaults"`
 }
 
 type healthVault struct {

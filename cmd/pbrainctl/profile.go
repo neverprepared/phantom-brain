@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,6 +13,41 @@ import (
 	"github.com/neverprepared/phantom-brain/internal/provision"
 	pbserver "github.com/neverprepared/phantom-brain/internal/server"
 )
+
+// provisionAdapter bridges the daemon's injected ProvisionFn seam to
+// internal/provision.ProfileCreate. It lives in cmd (which imports both
+// packages) because internal/provision imports internal/server, so the daemon
+// cannot import provision back without a cycle. Wired in serveCmd.
+func provisionAdapter(ctx context.Context, deps pbserver.ProvisionDeps, req pbserver.ProvisionRequest) (pbserver.ProvisionResult, error) {
+	res, err := provision.ProfileCreate(ctx, provision.Deps{
+		BaseDSN:   deps.BaseDSN,
+		MinIO:     deps.MinIO,
+		ConfigDir: deps.ConfigDir,
+		Naming:    provision.Naming{Bucket: deps.NamingBucket, IndexPrefix: deps.NamingIndexPrefix},
+	}, provision.Spec{
+		Profile:     req.Profile,
+		Vault:       req.Vault,
+		Token:       req.Token,
+		Bucket:      req.Bucket,
+		IndexPrefix: req.IndexPrefix,
+	})
+	out := pbserver.ProvisionResult{
+		Profile:      res.Key.Profile,
+		Vault:        res.Key.Vault,
+		Bucket:       res.Bucket,
+		IndexPrefix:  res.IndexPrefix,
+		Token:        res.Token,
+		TokenCreated: res.TokenCreated,
+	}
+	for _, s := range res.Steps {
+		e := ""
+		if s.Err != nil {
+			e = s.Err.Error()
+		}
+		out.Steps = append(out.Steps, pbserver.ProvisionStep{Name: s.Name, Result: s.Result, Detail: s.Detail, Err: e})
+	}
+	return out, err
+}
 
 // profileCmd groups the all-in-one binding lifecycle. Where `binding
 // create`, `db provision`, and `bucket create` each do one thing,
