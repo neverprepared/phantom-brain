@@ -557,6 +557,25 @@ func (m *MinIOBackend) CreateBucket(ctx context.Context, name string) error {
 	return fmt.Errorf("server: minio make bucket %q: %w", name, err)
 }
 
+// EnsureFolder writes a zero-byte object at the given prefix (a trailing
+// slash is added if missing) so that an otherwise-empty binding shows its
+// <profile>/<vault>/ folder in S3 browsers immediately, before any real
+// data is written. Idempotent — PutObject overwrites the same key.
+func (m *MinIOBackend) EnsureFolder(ctx context.Context, bucket, prefix string) error {
+	if strings.TrimSpace(bucket) == "" || strings.TrimSpace(prefix) == "" {
+		return errors.New("server: EnsureFolder requires bucket and prefix")
+	}
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	_, err := m.client.PutObject(ctx, bucket, prefix, bytes.NewReader(nil), 0,
+		minio.PutObjectOptions{ContentType: "application/x-directory"})
+	if err != nil {
+		return fmt.Errorf("server: minio ensure folder %s/%s: %w", bucket, prefix, err)
+	}
+	return nil
+}
+
 // ListBuckets returns every bucket the daemon's MinIO credentials can
 // see. Used by the operator CLI; daemon code paths use the binding-
 // resolved bucket directly.
