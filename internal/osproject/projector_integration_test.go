@@ -304,6 +304,50 @@ func TestOSProjectionIntegration(t *testing.T) {
 		}
 	})
 
+	t.Run("VersionGuardRejectsStaleWrite", func(t *testing.T) {
+		// Reproduce the initial-projection vs post-synth re-projection race:
+		// the distilled (newer updated_at) write lands first, then the raw
+		// (older updated_at) write arrives LAST under concurrent River workers.
+		// external_gte must reject the stale raw write so recall never regresses
+		// to the un-distilled body — the bug this guard fixes.
+		newer := baseRecord("sha-verguard", "Ledger summary", "DISTILLED body wins.")
+		newer.ID = 40
+		older := baseRecord("sha-verguard", "Ledger summary", "RAW body should lose.")
+		older.ID = 40
+		older.UpdatedAt = pgtype.Timestamptz{
+			Time:  newer.UpdatedAt.Time.Add(-time.Minute),
+			Valid: true,
+		}
+
+		// Distilled (newer) projects first.
+		if err := proj.Project(ctx, newer); err != nil {
+			t.Fatalf("Project (newer/distilled): %v", err)
+		}
+		// Raw (older) arrives last — the guard must drop it as a stale write and
+		// return nil (ErrVersionConflict is swallowed), NOT surface an error.
+		if err := proj.Project(ctx, older); err != nil {
+			t.Fatalf("Project (older/raw) must swallow version conflict, got: %v", err)
+		}
+
+		id := osearch.DocID(newer.Profile, newer.Vault, newer.Sha)
+		src, found := getDocSource(t, c, prefix, id)
+		if !found {
+			t.Fatalf("doc %s not found", id)
+		}
+		if src["body"] != "DISTILLED body wins." {
+			t.Fatalf("stale raw write clobbered the distilled body: got %v", src["body"])
+		}
+
+		// Equal-version re-delivery (River is at-least-once) must still succeed —
+		// external_gte accepts an equal version, keeping re-projection idempotent.
+		if err := proj.Project(ctx, newer); err != nil {
+			t.Fatalf("idempotent re-delivery of equal version must succeed, got: %v", err)
+		}
+		if src2, _ := getDocSource(t, c, prefix, id); src2["body"] != "DISTILLED body wins." {
+			t.Fatalf("equal-version re-project changed body: got %v", src2["body"])
+		}
+	})
+
 	t.Run("DeleteProjectionIdempotent", func(t *testing.T) {
 		rec := baseRecord("sha-del", "Doomed", "this doc will be deleted.")
 		rec.ID = 30

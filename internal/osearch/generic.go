@@ -27,7 +27,18 @@ func (c *Client) EnsureIndexWithMapping(ctx context.Context, prefix, logical str
 // doc searchable on return (test-only; production relies on the 1s
 // refresh_interval).
 func (c *Client) PutDoc(ctx context.Context, prefix, logical, id string, payload any, waitForRefresh bool) error {
-	return c.putDoc(ctx, prefix, logical, id, payload, waitForRefresh)
+	return c.putDoc(ctx, prefix, logical, id, payload, 0, waitForRefresh)
+}
+
+// PutDocVersioned is PutDoc with OpenSearch external_gte version control.
+// version must be a positive, per-_id monotonically-increasing value (the
+// record projection uses updated_at epoch-nanos): OpenSearch keeps the
+// highest version and rejects a strictly-older write with ErrVersionConflict,
+// so an out-of-order upsert cannot clobber newer content. An equal version is
+// accepted (idempotent re-delivery). version <= 0 falls back to an unversioned
+// upsert. Callers should treat ErrVersionConflict as success.
+func (c *Client) PutDocVersioned(ctx context.Context, prefix, logical, id string, payload any, version int64, waitForRefresh bool) error {
+	return c.putDoc(ctx, prefix, logical, id, payload, version, waitForRefresh)
 }
 
 // DeleteDoc removes a single document by _id from the index resolved
