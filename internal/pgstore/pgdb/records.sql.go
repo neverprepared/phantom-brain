@@ -198,6 +198,57 @@ func (q *Queries) GetRecordBySHA(ctx context.Context, arg GetRecordBySHAParams) 
 	return i, err
 }
 
+const listRecordSHAs = `-- name: ListRecordSHAs :many
+SELECT id, sha FROM records
+WHERE profile = $1 AND vault = $2 AND id > $3
+ORDER BY id
+LIMIT $4
+`
+
+type ListRecordSHAsParams struct {
+	Profile string
+	Vault   string
+	After   int64
+	Lim     int32
+}
+
+type ListRecordSHAsRow struct {
+	ID  int64
+	Sha string
+}
+
+// The projection reconciler's SoR enumeration (design-review item #5):
+// keyset-paginated (id, sha) pairs for one binding, BOTH synthesised states,
+// walked id > @after so the whole record set streams page by page. Deliberately
+// ignores `synthesised` — the reconciler diffs the ENTIRE SoR against pb_records,
+// not just the synthesised slice (an unsynthesised record must still be
+// projected). Distinct from ListSynthBacklog (synth-only) and ListRecords
+// (facet-filtered mart scan) for exactly that reason.
+func (q *Queries) ListRecordSHAs(ctx context.Context, arg ListRecordSHAsParams) ([]ListRecordSHAsRow, error) {
+	rows, err := q.db.Query(ctx, listRecordSHAs,
+		arg.Profile,
+		arg.Vault,
+		arg.After,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListRecordSHAsRow{}
+	for rows.Next() {
+		var i ListRecordSHAsRow
+		if err := rows.Scan(&i.ID, &i.Sha); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRecords = `-- name: ListRecords :many
 SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes, synth_attempts, last_synth_error, synth_failed_at FROM records
 WHERE profile = $1

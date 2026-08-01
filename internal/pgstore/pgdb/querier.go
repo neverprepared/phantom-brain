@@ -38,6 +38,14 @@ type Querier interface {
 	// Forward edge: this record mentions this entity.
 	LinkRecordEntity(ctx context.Context, arg LinkRecordEntityParams) error
 	ListFactsForEntity(ctx context.Context, entityID int64) ([]Fact, error)
+	// The projection reconciler's SoR enumeration (design-review item #5):
+	// keyset-paginated (id, sha) pairs for one binding, BOTH synthesised states,
+	// walked id > @after so the whole record set streams page by page. Deliberately
+	// ignores `synthesised` — the reconciler diffs the ENTIRE SoR against pb_records,
+	// not just the synthesised slice (an unsynthesised record must still be
+	// projected). Distinct from ListSynthBacklog (synth-only) and ListRecords
+	// (facet-filtered mart scan) for exactly that reason.
+	ListRecordSHAs(ctx context.Context, arg ListRecordSHAsParams) ([]ListRecordSHAsRow, error)
 	// Mart projection scan (pbrainctl mart): keyset-paginated enumeration of a
 	// tenant's records with optional facet filters. This is the generic "list
 	// records" read the resynth-only ListUnsynthesised never provided; the core

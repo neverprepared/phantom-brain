@@ -50,6 +50,19 @@ LIMIT @lim;
 SELECT count(*) FROM records
 WHERE profile = @profile AND vault = @vault AND NOT synthesised;
 
+-- name: ListRecordSHAs :many
+-- The projection reconciler's SoR enumeration (design-review item #5):
+-- keyset-paginated (id, sha) pairs for one binding, BOTH synthesised states,
+-- walked id > @after so the whole record set streams page by page. Deliberately
+-- ignores `synthesised` — the reconciler diffs the ENTIRE SoR against pb_records,
+-- not just the synthesised slice (an unsynthesised record must still be
+-- projected). Distinct from ListSynthBacklog (synth-only) and ListRecords
+-- (facet-filtered mart scan) for exactly that reason.
+SELECT id, sha FROM records
+WHERE profile = @profile AND vault = @vault AND id > @after
+ORDER BY id
+LIMIT @lim;
+
 -- name: CountSynthDead :one
 -- Count of dead-lettered records: unsynthesised AND out of retries
 -- (synth_attempts >= maxSynthAttempts). Reported by `pbrainctl server queue

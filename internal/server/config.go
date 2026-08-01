@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -82,6 +83,13 @@ type ServerConfig struct {
 	// opaque per-vault tokens are accepted (fully backward compatible).
 	Auth AuthConfig `toml:"auth"`
 
+	// Reconcile configures the pb_records projection reconciler (design-review
+	// item #5) — the drift-repair backstop that periodically diffs each
+	// binding's Postgres SoR against its OpenSearch projection and repairs
+	// both directions (re-project a missing doc, delete an orphan doc). See
+	// ReconcileConfig + internal/server/reconciler.go.
+	Reconcile ReconcileConfig `toml:"reconcile"`
+
 	// Naming templates the per-binding resource names ({profile}/{vault}
 	// placeholders). Empty fields fall back to the historical defaults, so
 	// omitting the block is fully backward compatible. Governs the MinIO
@@ -147,6 +155,39 @@ type SynthConfig struct {
 	// PB_SYNTH_TIMEOUT_SECS.
 	TimeoutSecs int `toml:"timeout_secs"`
 }
+
+// ReconcileConfig mirrors the [reconcile] block in server.toml:
+//
+//	[reconcile]
+//	interval_secs = 1800   # default 30m; 0 disables the reconciler
+//
+// The reconciler self-heals projection drift (a lost River project job leaves a
+// SoR record missing from pb_records; an exhausted brain_forget delete job
+// leaves an orphan pb_records doc). It periodically diffs the SoR record set
+// against the projection per binding and repairs both directions. Repairs are
+// idempotent, so the default cadence is deliberately conservative. Env override
+// (wins over the TOML): PB_RECONCILE_INTERVAL_SECS. A value <= 0 disables the
+// reconciler entirely (the goroutine is never spawned).
+type ReconcileConfig struct {
+	IntervalSecs int `toml:"interval_secs"`
+}
+
+// Interval returns the reconciler tick as a Duration, mapping any non-positive
+// IntervalSecs (the disable sentinel) to a zero Duration. The reconciler treats
+// interval <= 0 as "disabled" and never spawns its goroutine.
+func (c ReconcileConfig) Interval() time.Duration {
+	if c.IntervalSecs <= 0 {
+		return 0
+	}
+	return time.Duration(c.IntervalSecs) * time.Second
+}
+
+// defaultReconcileIntervalSecs is the projection-reconciler cadence when unset.
+// 30 minutes: drift is rare (River is at-least-once and the synth sweeper
+// already backstops write durability), so the reconciler only needs to catch
+// the exhausted-job tail. Sentinel -1 in the parsed config means "explicitly
+// disabled" and is left as-is; only a genuinely unset (0) value defaults here.
+const defaultReconcileIntervalSecs = 1800
 
 // defaultSynthTimeoutSecs is the per-call synth LLM ceiling when unset.
 // 120s covers an Ollama cold-load (~10–30s for a 7–8B model) plus a
@@ -255,6 +296,25 @@ func applyServerDefaults(cfg *ServerConfig) {
 	}
 	if s.TimeoutSecs <= 0 {
 		s.TimeoutSecs = defaultSynthTimeoutSecs
+	}
+
+	// Reconciler cadence. Env override wins. TOML can't distinguish "unset"
+	// from an explicit 0, so the disable knob is a NEGATIVE value (or the env
+	// var set to 0/negative): a bare unset field (0) defaults to 30m so the
+	// self-heal is on by default, while `interval_secs = -1` (or
+	// PB_RECONCILE_INTERVAL_SECS=0) turns it off. ResolvedReconcileInterval
+	// maps a non-positive value to a disabled (zero) Duration.
+	if v := strings.TrimSpace(os.Getenv("PB_RECONCILE_INTERVAL_SECS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			if n <= 0 {
+				cfg.Reconcile.IntervalSecs = -1 // explicit disable
+			} else {
+				cfg.Reconcile.IntervalSecs = n
+			}
+		}
+	}
+	if cfg.Reconcile.IntervalSecs == 0 {
+		cfg.Reconcile.IntervalSecs = defaultReconcileIntervalSecs
 	}
 
 	// Auth (phantom-auth JWT). Env overrides win over the TOML; empty

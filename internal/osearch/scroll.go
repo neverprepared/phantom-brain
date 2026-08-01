@@ -91,6 +91,104 @@ func scrollIndex[T any](ctx context.Context, c *Client, prefix, logical, profile
 	return nil
 }
 
+// ScrollRecordSHAsWithPrefix scrolls the pb_records index (resolved from the
+// supplied per-binding prefix) scoped to (profile, vault) and invokes fn for
+// every doc's `sha` field. `_source` is limited to ["sha"] so the reconciler
+// (design-review item #5) enumerates every projected doc's identity WITHOUT
+// pulling the full body — a cheap set-diff input, not a full re-read. Returning
+// an error from fn aborts the scroll. batchSize <= 0 falls back to 500.
+//
+// This is a bespoke scroll rather than a scrollIndex[T] specialisation because
+// it needs the SourceIncludes projection (scrollIndex fetches whole docs) and
+// reads the raw hit `_id`/`_source` rather than unmarshalling a typed doc.
+func (c *Client) ScrollRecordSHAsWithPrefix(ctx context.Context, prefix, profile, vault string, batchSize int, fn func(sha string) error) error {
+	const label = "osearch.ScrollRecordSHAs"
+	if profile == "" || vault == "" {
+		return fmt.Errorf("%s: profile and vault required", label)
+	}
+	if batchSize <= 0 {
+		batchSize = 500
+	}
+	keepAlive := time.Minute
+
+	query := map[string]any{
+		"query": map[string]any{
+			"bool": map[string]any{
+				"filter": []map[string]any{
+					{"term": map[string]any{"profile": profile}},
+					{"term": map[string]any{"vault": vault}},
+				},
+			},
+		},
+		"size": batchSize,
+		"sort": []map[string]any{{"_doc": map[string]any{"order": "asc"}}},
+	}
+	body, err := json.Marshal(query)
+	if err != nil {
+		return fmt.Errorf("%s: marshal query: %w", label, err)
+	}
+
+	resp, err := c.api.Search(ctx, &osapi.SearchReq{
+		Indices: []string{IndexNameWithPrefix(prefix, "pb_records")},
+		Body:    bytes.NewReader(body),
+		Params:  osapi.SearchParams{Scroll: keepAlive, SourceIncludes: []string{"sha"}},
+	})
+	if err != nil {
+		return fmt.Errorf("%s: initial search: %w", label, err)
+	}
+
+	scrollID := ""
+	if resp.ScrollID != nil {
+		scrollID = *resp.ScrollID
+	}
+	defer func() {
+		if scrollID != "" {
+			_, _ = c.api.Scroll.Delete(context.Background(), osapi.ScrollDeleteReq{ScrollIDs: []string{scrollID}})
+		}
+	}()
+
+	// srcSHA pulls the sha out of the limited _source. A hit whose _source
+	// somehow lacks sha (should never happen for a projected record) is
+	// skipped rather than erroring the whole scroll.
+	srcSHA := func(raw json.RawMessage) string {
+		var s struct {
+			SHA string `json:"sha"`
+		}
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return ""
+		}
+		return s.SHA
+	}
+
+	hits := resp.Hits.Hits
+	for len(hits) > 0 {
+		for _, h := range hits {
+			sha := srcSHA(h.Source)
+			if sha == "" {
+				continue
+			}
+			if err := fn(sha); err != nil {
+				return err
+			}
+		}
+		if scrollID == "" {
+			break
+		}
+		nextResp, err := c.api.Scroll.Get(ctx, osapi.ScrollGetReq{
+			ScrollID: scrollID,
+			Params:   osapi.ScrollGetParams{Scroll: keepAlive},
+		})
+		if err != nil {
+			return fmt.Errorf("%s: scroll get: %w", label, err)
+		}
+		hits = nextResp.Hits.Hits
+		if nextResp.ScrollID != nil {
+			scrollID = *nextResp.ScrollID
+		}
+	}
+	return nil
+}
+
 // ScrollAttachments paginates pb_attachments scoped to (profile, vault),
 // decoding each hit into an AttachmentDoc and invoking fn. Returning
 // an error from fn aborts the scroll. batchSize <= 0 falls back to 500.
