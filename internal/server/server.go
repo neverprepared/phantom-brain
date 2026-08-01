@@ -424,11 +424,20 @@ func (d *Daemon) buildRouter() chi.Router {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(60 * time.Second))
 
+	// /metrics is unauthenticated (Prometheus scrape target), mounted at
+	// the root per convention. Emits the synth backlog/dead gauges + the
+	// processed/failed/dual-write counters.
+	r.Get("/metrics", d.handleMetrics)
+
 	r.Route("/api/brain", func(r chi.Router) {
 		// /health is intentionally unauthenticated: load balancers
 		// and operators need to probe the daemon without holding a
 		// vault token.
 		r.Get("/health", d.handleHealth)
+		// /readyz is the readiness probe (vs /health's liveness): it pings
+		// Postgres + OpenSearch + MinIO per binding and returns 503 when any
+		// dependency is unreachable. Also unauthenticated — LBs gate on it.
+		r.Get("/readyz", d.handleReadyz)
 
 		// Everything else requires bearer auth.
 		r.Group(func(r chi.Router) {

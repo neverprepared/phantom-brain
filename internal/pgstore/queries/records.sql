@@ -50,6 +50,49 @@ LIMIT @lim;
 SELECT count(*) FROM records
 WHERE profile = @profile AND vault = @vault AND NOT synthesised;
 
+-- name: CountSynthDead :one
+-- Count of dead-lettered records: unsynthesised AND out of retries
+-- (synth_attempts >= maxSynthAttempts). Reported by `pbrainctl server queue
+-- depth` + the pb_synth_dead metric so an operator can see stuck records.
+SELECT count(*) FROM records
+WHERE profile = @profile AND vault = @vault
+  AND NOT synthesised AND synth_attempts >= @max_attempts;
+
+-- name: ListSynthBacklog :many
+-- The sweeper's keyset-paginated live backlog scan (records_synth_backlog_idx).
+-- Excludes dead-lettered rows (synth_attempts >= maxSynthAttempts) so a poison
+-- record neither wedges the page window nor hot-loops the LLM, and walks
+-- id > @after so the whole backlog drains page by page instead of re-scanning
+-- a top LIMIT. Distinct from ListUnsynthesised, which resynth --apply still
+-- uses to force-retry EVERY unsynthesised row (dead ones included).
+SELECT * FROM records
+WHERE profile = @profile AND vault = @vault
+  AND NOT synthesised
+  AND synth_attempts < @max_attempts
+  AND id > @after
+ORDER BY id
+LIMIT @lim;
+
+-- name: BumpSynthFailure :exec
+-- Record a synth-pipeline failure for one record: increment the attempt
+-- counter and stamp the error + time. Called after processJob returns a
+-- non-nil error; once synth_attempts reaches maxSynthAttempts the record
+-- falls out of ListSynthBacklog (dead-lettered).
+UPDATE records SET
+    synth_attempts   = synth_attempts + 1,
+    last_synth_error = @err_text,
+    synth_failed_at  = now()
+WHERE profile = @profile AND vault = @vault AND sha = @sha;
+
+-- name: ResetSynthFailure :exec
+-- Clear the dead-letter state for one record so an operator force-retry
+-- (resynth --apply) re-admits it to the sweeper backlog.
+UPDATE records SET
+    synth_attempts   = 0,
+    last_synth_error = NULL,
+    synth_failed_at  = NULL
+WHERE profile = @profile AND vault = @vault AND sha = @sha;
+
 -- name: MarkRecordSynthesised :exec
 -- Fill in the derived fields after the synthesis pipeline runs.
 -- updated_at is bumped by the records_set_updated_at trigger.

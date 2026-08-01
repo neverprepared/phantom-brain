@@ -6,17 +6,19 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 
 	"github.com/neverprepared/phantom-brain/internal/brain"
 	"github.com/neverprepared/phantom-brain/internal/config"
+	"github.com/neverprepared/phantom-brain/internal/pgstore"
+	"github.com/neverprepared/phantom-brain/internal/pgstore/pgdb"
 	pbserver "github.com/neverprepared/phantom-brain/internal/server"
 )
 
@@ -203,47 +205,95 @@ func queueCmd() *cobra.Command {
 }
 
 func queueDepthCmd() *cobra.Command {
+	var dsn string
+	var profileFlag, vaultFlag string
 	c := &cobra.Command{
 		Use:   "depth",
-		Short: "Count pending + claimed + dead queue items per vault",
+		Short: "Report the live synth backlog + dead-lettered count per vault (from Postgres)",
+		Long: `Report, per binding, the synth backlog held in the Postgres SoR:
+  backlog — unsynthesised records still eligible for the sweeper
+            (CountUnsynthesised minus the dead-lettered rows)
+  dead    — unsynthesised records that exhausted synth retries
+            (synth_attempts >= maxSynthAttempts; force-retry with
+            'pbrainctl client resynth --apply')
+
+The SoR record IS the queue, so these counts are authoritative. The base
+Postgres DSN resolves from --dsn, then $PB_POSTGRES_DSN / $DATABASE_URL,
+then server.toml [postgres] dsn (same fallback as 'server db provision').
+Restrict to one binding with --profile/--vault.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			d := resolveDataDir(cmd)
+			base, err := resolveDBDSN(cmd, dsn)
+			if err != nil {
+				return err
+			}
 			r, err := loadRegistryForOps(resolveConfigDir(cmd))
 			if err != nil {
 				return err
 			}
+			ctx, cancel := signalCancel(cmd.Context())
+			defer cancel()
+
+			// One pool per profile, reused across that profile's vaults.
+			pools := map[string]*pgxpool.Pool{}
+			defer func() {
+				for _, p := range pools {
+					p.Close()
+				}
+			}()
+
+			var firstErr error
 			for _, b := range r.Vaults() {
-				// queue_pending is always 0 in Phase 6 — the file queue is
-				// gone; the daemon's SynthWorker drains an in-memory chan.
-				pending := []string(nil)
-				claimed := countQueueDir(d, b.Key, "claimed")
-				dead := countQueueDir(d, b.Key, "dead")
-				done := countQueueDir(d, b.Key, "done")
-				fmt.Fprintf(cmd.OutOrStdout(), "%s\tpending=%d\tclaimed=%d\tdead=%d\tdone=%d\n",
-					b.Key, len(pending), claimed, dead, done)
+				if profileFlag != "" && b.Key.Profile != profileFlag {
+					continue
+				}
+				if vaultFlag != "" && b.Key.Vault != vaultFlag {
+					continue
+				}
+				pool, ok := pools[b.Key.Profile]
+				if !ok {
+					pDSN, derr := pgstore.DSNForProfile(base, b.Key.Profile)
+					if derr != nil {
+						firstErr = derr
+						fmt.Fprintf(cmd.OutOrStdout(), "%s\tERROR: %v\n", b.Key, derr)
+						continue
+					}
+					pool, derr = pgstore.Open(ctx, pDSN)
+					if derr != nil {
+						firstErr = derr
+						fmt.Fprintf(cmd.OutOrStdout(), "%s\tERROR: %v\n", b.Key, derr)
+						continue
+					}
+					pools[b.Key.Profile] = pool
+				}
+				q := pgstore.New(pool)
+				total, terr := q.CountUnsynthesised(ctx, pgdb.CountUnsynthesisedParams{
+					Profile: b.Key.Profile, Vault: b.Key.Vault,
+				})
+				if terr != nil {
+					firstErr = terr
+					fmt.Fprintf(cmd.OutOrStdout(), "%s\tERROR: %v\n", b.Key, terr)
+					continue
+				}
+				dead, derr := q.CountSynthDead(ctx, pgdb.CountSynthDeadParams{
+					Profile: b.Key.Profile, Vault: b.Key.Vault, MaxAttempts: pbserver.MaxSynthAttempts,
+				})
+				if derr != nil {
+					firstErr = derr
+					fmt.Fprintf(cmd.OutOrStdout(), "%s\tERROR: %v\n", b.Key, derr)
+					continue
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%s\tbacklog=%d\tdead=%d\n",
+					b.Key, total-dead, dead)
 			}
-			return nil
+			return firstErr
 		},
 	}
+	c.Flags().StringVar(&dsn, "dsn", "",
+		"base/maintenance Postgres DSN (default: $PB_POSTGRES_DSN, then $DATABASE_URL, then server.toml [postgres] dsn)")
+	c.Flags().StringVar(&profileFlag, "profile", "", "restrict to one profile")
+	c.Flags().StringVar(&vaultFlag, "vault", "", "restrict to one vault")
 	opsCommonFlags(c)
 	return c
-}
-
-// countQueueDir returns the number of .json entries in a queue
-// subdir. Returns 0 for missing dirs.
-func countQueueDir(d pbserver.DataDir, key pbserver.VaultKey, sub string) int {
-	dir := filepath.Join(d.VaultDir(key.Profile, key.Vault), "queue", sub)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0
-	}
-	n := 0
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
-			n++
-		}
-	}
-	return n
 }
 
 func queueContributorsCmd() *cobra.Command {

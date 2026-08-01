@@ -77,7 +77,7 @@ func (q *Queries) LinkRecordEntity(ctx context.Context, arg LinkRecordEntityPara
 }
 
 const recordsMentioningEntity = `-- name: RecordsMentioningEntity :many
-SELECT r.id, r.profile, r.vault, r.sha, r.kind, r.memory_type, r.title, r.raw_body, r.body, r.source_url, r.source, r.tags, r.captured_at, r.created_at, r.updated_at, r.reliability, r.topic, r.gate_reason, r.synthesised, r.minio_key, r.mime_type, r.size_bytes, r.original_filename, r.extracted_text, r.embedding, r.embedding_model, r.embedding_version, r.capture_minio_key, r.capture_size_bytes FROM records r
+SELECT r.id, r.profile, r.vault, r.sha, r.kind, r.memory_type, r.title, r.raw_body, r.body, r.source_url, r.source, r.tags, r.captured_at, r.created_at, r.updated_at, r.reliability, r.topic, r.gate_reason, r.synthesised, r.minio_key, r.mime_type, r.size_bytes, r.original_filename, r.extracted_text, r.embedding, r.embedding_model, r.embedding_version, r.capture_minio_key, r.capture_size_bytes, r.synth_attempts, r.last_synth_error, r.synth_failed_at FROM records r
 JOIN record_entities re ON re.record_id = r.id
 JOIN entities e         ON e.id = re.entity_id
 WHERE e.profile = $1 AND e.vault = $2 AND e.slug = $3
@@ -131,6 +131,9 @@ func (q *Queries) RecordsMentioningEntity(ctx context.Context, arg RecordsMentio
 			&i.EmbeddingVersion,
 			&i.CaptureMinioKey,
 			&i.CaptureSizeBytes,
+			&i.SynthAttempts,
+			&i.LastSynthError,
+			&i.SynthFailedAt,
 		); err != nil {
 			return nil, err
 		}

@@ -270,34 +270,6 @@ func TestVaultArgFromArgs(t *testing.T) {
 	}
 }
 
-func TestCountQueueDir(t *testing.T) {
-	data := t.TempDir()
-	d := pbserver.DataDir(data)
-	key := pbserver.VaultKey{Profile: "p", Vault: "v"}
-
-	// Missing dir => 0.
-	if n := countQueueDir(d, key, "claimed"); n != 0 {
-		t.Fatalf("missing dir should count 0, got %d", n)
-	}
-
-	sub := filepath.Join(d.VaultDir(key.Profile, key.Vault), "queue", "claimed")
-	if err := os.MkdirAll(sub, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	// Two .json files, one non-json, one nested dir (ignored).
-	for _, name := range []string{"a.json", "b.json", "note.txt"} {
-		if err := os.WriteFile(filepath.Join(sub, name), []byte("{}"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.MkdirAll(filepath.Join(sub, "nested.json"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if n := countQueueDir(d, key, "claimed"); n != 2 {
-		t.Fatalf("expected 2 json files, got %d", n)
-	}
-}
-
 func TestReadDaemonPID(t *testing.T) {
 	data := t.TempDir()
 	d := pbserver.DataDir(data)

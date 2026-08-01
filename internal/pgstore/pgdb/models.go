@@ -88,6 +88,12 @@ type Record struct {
 	CaptureMinioKey pgtype.Text
 	// Size in bytes of the captured raw-source blob. NULL when no capture was stored.
 	CaptureSizeBytes pgtype.Int8
+	// Count of failed synth attempts. Reaching maxSynthAttempts dead-letters the record (excluded from the sweeper backlog scan).
+	SynthAttempts int32
+	// Last synth failure message. NULL until a synth attempt fails; cleared by resynth --apply.
+	LastSynthError pgtype.Text
+	// Timestamp of the last synth failure. NULL until a synth attempt fails.
+	SynthFailedAt pgtype.Timestamptz
 }
 
 type RecordEntity struct {

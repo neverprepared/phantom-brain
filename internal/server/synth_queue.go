@@ -25,6 +25,7 @@ type synthRecord struct {
 	Doc              osearch.SummaryDoc // mapped summary view (pgRecordToSummaryDoc)
 	RecordID         int64
 	Synthesised      bool
+	SynthAttempts    int // failed-synth counter; >= maxSynthAttempts ⇒ dead-lettered
 	MIMEType         string
 	OriginalFilename string
 	MinIOKey         string
@@ -46,8 +47,20 @@ type synthStore interface {
 	SetExtractedText(ctx context.Context, recordID int64, text string) error
 	// ListUnsynthesised returns the Synthesised=false backlog for
 	// (profile, vault), ordered for stable sampling. Used by
-	// ResynthBacklog; len() doubles as the backlog count.
+	// ResynthBacklog; len() doubles as the backlog count. Includes
+	// dead-lettered rows — resynth force-retries everything.
 	ListUnsynthesised(ctx context.Context, profile, vault string) ([]synthRecord, error)
+	// ListSynthBacklog returns ONE keyset page of the LIVE backlog for
+	// (profile, vault): Synthesised=false rows with synth_attempts <
+	// maxSynthAttempts (dead-lettered rows excluded) whose id > after,
+	// ordered by id, capped at limit. The sweeper walks this page by page
+	// so a poison record can neither wedge the window nor hot-loop.
+	ListSynthBacklog(ctx context.Context, profile, vault string, after int64, limit int) ([]synthRecord, error)
+	// BumpSynthFailure records a synth-pipeline failure for (profile,
+	// vault, sha): increments synth_attempts and stamps the error + time.
+	// Once synth_attempts reaches maxSynthAttempts the record falls out of
+	// ListSynthBacklog (dead-lettered).
+	BumpSynthFailure(ctx context.Context, profile, vault, sha, errText string) error
 }
 
 // SynthWorker drains an in-memory channel of (profile, vault, sha) jobs.
@@ -163,7 +176,24 @@ type SynthWorker struct {
 	// drain. Wired from the daemon's registry. Nil-safe: when nil (e.g.
 	// unit tests that don't exercise the sweep) the sweeper is a no-op.
 	Bindings func() []VaultKey
+
+	// synthProcessed / synthFailed count jobs handled since daemon start:
+	// processed on a nil-error processJob, failed on a non-nil one. Read by
+	// the /metrics endpoint (pb_synth_processed_total / pb_synth_failed_total).
+	synthProcessed atomic.Int64
+	synthFailed    atomic.Int64
 }
+
+// MaxSynthAttempts is the dead-letter threshold: once a record's
+// synth_attempts reaches this, ListSynthBacklog stops returning it and the
+// sweeper leaves it alone (a poison record is no longer a 30s LLM hot-loop).
+// An operator force-retry (resynth --apply) clears the counter to re-admit it.
+// Exported so `pbrainctl server queue depth` + the /metrics endpoint pass the
+// SAME threshold to CountSynthDead the sweeper uses to dead-letter.
+const MaxSynthAttempts = 5
+
+// maxSynthAttempts is the package-internal alias used throughout the worker.
+const maxSynthAttempts = MaxSynthAttempts
 
 // defaultSynthSweepInterval is how often the durability sweeper drains
 // each binding's Synthesised=false backlog. The SoR record itself is the
@@ -318,10 +348,17 @@ type ResynthResult struct {
 // resynthSampleCap bounds the preview slice ResynthBacklog returns.
 const resynthSampleCap = 20
 
-// resynthScanLimit bounds the SoR ListUnsynthesised scan. The true total
-// comes from CountUnsynthesised; this caps how many rows we pull to
-// process + sample in one apply.
+// resynthScanLimit bounds the SoR ListUnsynthesised scan (resynth's
+// force-retry-everything path). The true total comes from CountUnsynthesised;
+// this caps how many rows we pull to process + sample in one apply.
 const resynthScanLimit = 10000
+
+// synthBacklogPageSize is the keyset page size drainBacklog walks the LIVE
+// backlog in. Small enough to bound each round-trip, large enough that the
+// whole backlog drains in a handful of pages. The page cursor (id > last)
+// means the drain is unbounded in total rows — it stops only when a short
+// page proves the backlog is exhausted.
+const synthBacklogPageSize = 500
 
 // ResynthBacklog reports + (on apply) re-processes Synthesised=false
 // records for (profile, vault) from the Postgres SoR. dryRun: report
@@ -393,12 +430,14 @@ func (w *SynthWorker) ResynthBacklog(ctx context.Context, profile, vault string,
 	return res, nil
 }
 
-// drainBacklog lists the Synthesised=false backlog for (profile, vault)
-// from the Postgres SoR and re-processes each record through handle (which
-// takes processMu, so it never races the live run() loop, a manual
-// resynth, or another sweep). limit<=0 processes the whole backlog (capped
-// at resynthScanLimit by the SoR query); limit>0 caps how many are
-// processed this pass. Returns the number processed.
+// drainBacklog walks the LIVE Synthesised=false backlog for (profile, vault)
+// from the Postgres SoR via keyset pagination (ListSynthBacklog, id > cursor)
+// and re-processes each record through handle (which takes processMu, so it
+// never races the live run() loop, a manual resynth, or another sweep).
+// Dead-lettered rows (synth_attempts >= maxSynthAttempts) are excluded by the
+// query, so a poison record can neither wedge the page window nor hot-loop.
+// limit<=0 drains the WHOLE live backlog (however many pages that takes);
+// limit>0 caps how many are processed this pass. Returns the number processed.
 //
 // This is THE single drain implementation shared by the continuous
 // sweeper (runSweeper), the resynth apply path (ResynthBacklog), and
@@ -408,24 +447,33 @@ func (w *SynthWorker) drainBacklog(ctx context.Context, profile, vault string, l
 	if !ok {
 		return 0, fmt.Errorf("drainBacklog: no binding view registered for %s/%s", profile, vault)
 	}
-	recs, err := store.ListUnsynthesised(ctx, profile, vault)
-	if err != nil {
-		return 0, fmt.Errorf("drainBacklog: list: %w", err)
-	}
 	processed := 0
-	for _, rec := range recs {
-		if limit > 0 && processed >= limit {
-			break
+	var cursor int64 // keyset: id of the last row processed; 0 starts from the top
+	for {
+		page := synthBacklogPageSize
+		if limit > 0 && limit-processed < page {
+			page = limit - processed
 		}
-		select {
-		case <-ctx.Done():
-			return processed, ctx.Err()
-		default:
+		recs, err := store.ListSynthBacklog(ctx, profile, vault, cursor, page)
+		if err != nil {
+			return processed, fmt.Errorf("drainBacklog: list: %w", err)
 		}
-		w.handle(ctx, synthJob{Profile: profile, Vault: vault, SHA: rec.Doc.SHA})
-		processed++
+		for _, rec := range recs {
+			select {
+			case <-ctx.Done():
+				return processed, ctx.Err()
+			default:
+			}
+			w.handle(ctx, synthJob{Profile: profile, Vault: vault, SHA: rec.Doc.SHA})
+			cursor = rec.RecordID
+			processed++
+		}
+		// A short page means the (remaining) backlog is exhausted. Also stop
+		// once we've hit the caller's limit.
+		if len(recs) < page || (limit > 0 && processed >= limit) {
+			return processed, nil
+		}
 	}
-	return processed, nil
 }
 
 // runSweeper is the durability backstop for the lossy Enqueue fast path.
@@ -520,17 +568,61 @@ func (w *SynthWorker) run(ctx context.Context) {
 }
 
 // handle runs one job under processMu (serialized with backfill).
-// Shared by the live loop and backfill.
+// Shared by the live loop and backfill. On a non-nil error it records the
+// failure on the SoR record (BumpSynthFailure) so a repeatedly-failing
+// record dead-letters out of the sweeper backlog instead of hot-looping;
+// on success it just counts the job. Both branches feed the /metrics
+// counters (synthProcessed / synthFailed).
 func (w *SynthWorker) handle(ctx context.Context, job synthJob) {
 	w.processMu.Lock()
 	err := w.processJob(ctx, job)
 	w.processMu.Unlock()
-	if err != nil {
-		w.logger.Warn("phantom-brain: synth job failed",
+	if err == nil {
+		w.synthProcessed.Add(1)
+		return
+	}
+	w.synthFailed.Add(1)
+	w.logger.Warn("phantom-brain: synth job failed",
+		slog.String("vault", job.Profile+"/"+job.Vault),
+		slog.String("sha", job.SHA), slog.String("err", err.Error()))
+	w.recordSynthFailure(ctx, job, err)
+}
+
+// recordSynthFailure bumps the record's synth_attempts + stamps the error so
+// the sweeper's ListSynthBacklog scan eventually excludes a poison record
+// (once attempts reach maxSynthAttempts). Best-effort: a bump failure is
+// logged, never fatal — worst case the record is retried once more. Logs a
+// distinct Warn when the record crosses into the dead-lettered state.
+func (w *SynthWorker) recordSynthFailure(ctx context.Context, job synthJob, cause error) {
+	store, _, ok := w.resolveForJob(job)
+	if !ok {
+		// No binding view — nothing to bump. The dropped-job Error log in
+		// processJob already covered this case.
+		return
+	}
+	if err := store.BumpSynthFailure(ctx, job.Profile, job.Vault, job.SHA, cause.Error()); err != nil {
+		w.logger.Warn("phantom-brain: bump synth failure counter failed",
 			slog.String("vault", job.Profile+"/"+job.Vault),
 			slog.String("sha", job.SHA), slog.String("err", err.Error()))
+		return
+	}
+	// Re-read to detect the dead-letter crossing. A Fetch failure here is
+	// non-fatal (we just skip the distinct log).
+	if rec, ferr := store.Fetch(ctx, job.Profile, job.Vault, job.SHA); ferr == nil && rec != nil &&
+		rec.SynthAttempts >= maxSynthAttempts {
+		w.logger.Warn("phantom-brain: synth record dead-lettered (exhausted retries)",
+			slog.String("vault", job.Profile+"/"+job.Vault),
+			slog.String("sha", job.SHA),
+			slog.Int("attempts", rec.SynthAttempts),
+			slog.Int("max_attempts", maxSynthAttempts))
 	}
 }
+
+// SynthProcessedCount / SynthFailedCount return the cumulative processed /
+// failed synth-job counts since daemon start. Exposed for the /metrics
+// endpoint (pb_synth_processed_total / pb_synth_failed_total).
+func (w *SynthWorker) SynthProcessedCount() int64 { return w.synthProcessed.Load() }
+func (w *SynthWorker) SynthFailedCount() int64     { return w.synthFailed.Load() }
 
 // resolveForJob returns the per-binding synthStore + AttachmentStore for
 // a job's (profile, vault). v3.2 per-binding storage overrides: each

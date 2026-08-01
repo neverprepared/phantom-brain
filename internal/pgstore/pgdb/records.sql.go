@@ -12,6 +12,57 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 )
 
+const bumpSynthFailure = `-- name: BumpSynthFailure :exec
+UPDATE records SET
+    synth_attempts   = synth_attempts + 1,
+    last_synth_error = $1,
+    synth_failed_at  = now()
+WHERE profile = $2 AND vault = $3 AND sha = $4
+`
+
+type BumpSynthFailureParams struct {
+	ErrText pgtype.Text
+	Profile string
+	Vault   string
+	Sha     string
+}
+
+// Record a synth-pipeline failure for one record: increment the attempt
+// counter and stamp the error + time. Called after processJob returns a
+// non-nil error; once synth_attempts reaches maxSynthAttempts the record
+// falls out of ListSynthBacklog (dead-lettered).
+func (q *Queries) BumpSynthFailure(ctx context.Context, arg BumpSynthFailureParams) error {
+	_, err := q.db.Exec(ctx, bumpSynthFailure,
+		arg.ErrText,
+		arg.Profile,
+		arg.Vault,
+		arg.Sha,
+	)
+	return err
+}
+
+const countSynthDead = `-- name: CountSynthDead :one
+SELECT count(*) FROM records
+WHERE profile = $1 AND vault = $2
+  AND NOT synthesised AND synth_attempts >= $3
+`
+
+type CountSynthDeadParams struct {
+	Profile     string
+	Vault       string
+	MaxAttempts int32
+}
+
+// Count of dead-lettered records: unsynthesised AND out of retries
+// (synth_attempts >= maxSynthAttempts). Reported by `pbrainctl server queue
+// depth` + the pb_synth_dead metric so an operator can see stuck records.
+func (q *Queries) CountSynthDead(ctx context.Context, arg CountSynthDeadParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countSynthDead, arg.Profile, arg.Vault, arg.MaxAttempts)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countUnsynthesised = `-- name: CountUnsynthesised :one
 SELECT count(*) FROM records
 WHERE profile = $1 AND vault = $2 AND NOT synthesised
@@ -53,7 +104,7 @@ func (q *Queries) DeleteRecordBySHA(ctx context.Context, arg DeleteRecordBySHAPa
 }
 
 const getRecordByID = `-- name: GetRecordByID :one
-SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes FROM records WHERE id = $1
+SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes, synth_attempts, last_synth_error, synth_failed_at FROM records WHERE id = $1
 `
 
 func (q *Queries) GetRecordByID(ctx context.Context, id int64) (Record, error) {
@@ -89,12 +140,15 @@ func (q *Queries) GetRecordByID(ctx context.Context, id int64) (Record, error) {
 		&i.EmbeddingVersion,
 		&i.CaptureMinioKey,
 		&i.CaptureSizeBytes,
+		&i.SynthAttempts,
+		&i.LastSynthError,
+		&i.SynthFailedAt,
 	)
 	return i, err
 }
 
 const getRecordBySHA = `-- name: GetRecordBySHA :one
-SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes FROM records
+SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes, synth_attempts, last_synth_error, synth_failed_at FROM records
 WHERE profile = $1 AND vault = $2 AND sha = $3
 `
 
@@ -137,12 +191,15 @@ func (q *Queries) GetRecordBySHA(ctx context.Context, arg GetRecordBySHAParams) 
 		&i.EmbeddingVersion,
 		&i.CaptureMinioKey,
 		&i.CaptureSizeBytes,
+		&i.SynthAttempts,
+		&i.LastSynthError,
+		&i.SynthFailedAt,
 	)
 	return i, err
 }
 
 const listRecords = `-- name: ListRecords :many
-SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes FROM records
+SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes, synth_attempts, last_synth_error, synth_failed_at FROM records
 WHERE profile = $1
   AND vault   = $2
   AND synthesised = $3
@@ -232,6 +289,9 @@ func (q *Queries) ListRecords(ctx context.Context, arg ListRecordsParams) ([]Rec
 			&i.EmbeddingVersion,
 			&i.CaptureMinioKey,
 			&i.CaptureSizeBytes,
+			&i.SynthAttempts,
+			&i.LastSynthError,
+			&i.SynthFailedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -244,7 +304,7 @@ func (q *Queries) ListRecords(ctx context.Context, arg ListRecordsParams) ([]Rec
 }
 
 const listRecordsSince = `-- name: ListRecordsSince :many
-SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes FROM records
+SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes, synth_attempts, last_synth_error, synth_failed_at FROM records
 WHERE profile = $1
   AND vault   = $2
   AND synthesised = $3
@@ -331,6 +391,92 @@ func (q *Queries) ListRecordsSince(ctx context.Context, arg ListRecordsSincePara
 			&i.EmbeddingVersion,
 			&i.CaptureMinioKey,
 			&i.CaptureSizeBytes,
+			&i.SynthAttempts,
+			&i.LastSynthError,
+			&i.SynthFailedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSynthBacklog = `-- name: ListSynthBacklog :many
+SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes, synth_attempts, last_synth_error, synth_failed_at FROM records
+WHERE profile = $1 AND vault = $2
+  AND NOT synthesised
+  AND synth_attempts < $3
+  AND id > $4
+ORDER BY id
+LIMIT $5
+`
+
+type ListSynthBacklogParams struct {
+	Profile     string
+	Vault       string
+	MaxAttempts int32
+	After       int64
+	Lim         int32
+}
+
+// The sweeper's keyset-paginated live backlog scan (records_synth_backlog_idx).
+// Excludes dead-lettered rows (synth_attempts >= maxSynthAttempts) so a poison
+// record neither wedges the page window nor hot-loops the LLM, and walks
+// id > @after so the whole backlog drains page by page instead of re-scanning
+// a top LIMIT. Distinct from ListUnsynthesised, which resynth --apply still
+// uses to force-retry EVERY unsynthesised row (dead ones included).
+func (q *Queries) ListSynthBacklog(ctx context.Context, arg ListSynthBacklogParams) ([]Record, error) {
+	rows, err := q.db.Query(ctx, listSynthBacklog,
+		arg.Profile,
+		arg.Vault,
+		arg.MaxAttempts,
+		arg.After,
+		arg.Lim,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Record{}
+	for rows.Next() {
+		var i Record
+		if err := rows.Scan(
+			&i.ID,
+			&i.Profile,
+			&i.Vault,
+			&i.Sha,
+			&i.Kind,
+			&i.MemoryType,
+			&i.Title,
+			&i.RawBody,
+			&i.Body,
+			&i.SourceUrl,
+			&i.Source,
+			&i.Tags,
+			&i.CapturedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Reliability,
+			&i.Topic,
+			&i.GateReason,
+			&i.Synthesised,
+			&i.MinioKey,
+			&i.MimeType,
+			&i.SizeBytes,
+			&i.OriginalFilename,
+			&i.ExtractedText,
+			&i.Embedding,
+			&i.EmbeddingModel,
+			&i.EmbeddingVersion,
+			&i.CaptureMinioKey,
+			&i.CaptureSizeBytes,
+			&i.SynthAttempts,
+			&i.LastSynthError,
+			&i.SynthFailedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -343,7 +489,7 @@ func (q *Queries) ListRecordsSince(ctx context.Context, arg ListRecordsSincePara
 }
 
 const listUnsynthesised = `-- name: ListUnsynthesised :many
-SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes FROM records
+SELECT id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes, synth_attempts, last_synth_error, synth_failed_at FROM records
 WHERE profile = $1 AND vault = $2 AND NOT synthesised
 ORDER BY id
 LIMIT $3
@@ -396,6 +542,9 @@ func (q *Queries) ListUnsynthesised(ctx context.Context, arg ListUnsynthesisedPa
 			&i.EmbeddingVersion,
 			&i.CaptureMinioKey,
 			&i.CaptureSizeBytes,
+			&i.SynthAttempts,
+			&i.LastSynthError,
+			&i.SynthFailedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -453,6 +602,27 @@ func (q *Queries) MarkRecordSynthesised(ctx context.Context, arg MarkRecordSynth
 	return err
 }
 
+const resetSynthFailure = `-- name: ResetSynthFailure :exec
+UPDATE records SET
+    synth_attempts   = 0,
+    last_synth_error = NULL,
+    synth_failed_at  = NULL
+WHERE profile = $1 AND vault = $2 AND sha = $3
+`
+
+type ResetSynthFailureParams struct {
+	Profile string
+	Vault   string
+	Sha     string
+}
+
+// Clear the dead-letter state for one record so an operator force-retry
+// (resynth --apply) re-admits it to the sweeper backlog.
+func (q *Queries) ResetSynthFailure(ctx context.Context, arg ResetSynthFailureParams) error {
+	_, err := q.db.Exec(ctx, resetSynthFailure, arg.Profile, arg.Vault, arg.Sha)
+	return err
+}
+
 const setRecordExtractedText = `-- name: SetRecordExtractedText :exec
 UPDATE records SET extracted_text = $1 WHERE id = $2
 `
@@ -481,7 +651,7 @@ INSERT INTO records (
 )
 ON CONFLICT (profile, vault, sha) DO UPDATE SET
     embedding = COALESCE(records.embedding, EXCLUDED.embedding)
-RETURNING id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes
+RETURNING id, profile, vault, sha, kind, memory_type, title, raw_body, body, source_url, source, tags, captured_at, created_at, updated_at, reliability, topic, gate_reason, synthesised, minio_key, mime_type, size_bytes, original_filename, extracted_text, embedding, embedding_model, embedding_version, capture_minio_key, capture_size_bytes, synth_attempts, last_synth_error, synth_failed_at
 `
 
 type UpsertRecordParams struct {
@@ -562,6 +732,9 @@ func (q *Queries) UpsertRecord(ctx context.Context, arg UpsertRecordParams) (Rec
 		&i.EmbeddingVersion,
 		&i.CaptureMinioKey,
 		&i.CaptureSizeBytes,
+		&i.SynthAttempts,
+		&i.LastSynthError,
+		&i.SynthFailedAt,
 	)
 	return i, err
 }

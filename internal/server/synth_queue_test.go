@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -106,6 +107,44 @@ func (f *fakeSynthStore) ListUnsynthesised(_ context.Context, profile, vault str
 	return out, nil
 }
 
+// ListSynthBacklog mirrors the SQL keyset scan: live (unsynthesised, under the
+// retry ceiling) rows with id > after, ordered by RecordID, capped at limit.
+// Dead-lettered rows (SynthAttempts >= maxSynthAttempts) are excluded — this
+// is what proves a poison record stops being swept.
+func (f *fakeSynthStore) ListSynthBacklog(_ context.Context, profile, vault string, after int64, limit int) ([]synthRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	out := []synthRecord{}
+	for _, r := range f.recs {
+		if r.Doc.Profile != profile || r.Doc.Vault != vault || r.Synthesised {
+			continue
+		}
+		if r.SynthAttempts >= maxSynthAttempts || r.RecordID <= after {
+			continue
+		}
+		out = append(out, *r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].RecordID < out[j].RecordID })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// BumpSynthFailure increments the stored record's SynthAttempts, matching the
+// SQL UPDATE so the dead-letter crossing is observable in tests.
+func (f *fakeSynthStore) BumpSynthFailure(_ context.Context, _, _, sha, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if r, ok := f.recs[sha]; ok {
+		r.SynthAttempts++
+	}
+	return nil
+}
+
 func (f *fakeSynthStore) setCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -116,6 +155,17 @@ func (f *fakeSynthStore) extractedFor(id int64) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.extracted[id]
+}
+
+// attemptsFor reports the stored record's current SynthAttempts (the
+// dead-letter counter BumpSynthFailure drives).
+func (f *fakeSynthStore) attemptsFor(sha string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if r, ok := f.recs[sha]; ok {
+		return r.SynthAttempts
+	}
+	return -1
 }
 
 // synthCapture records the synthResults the worker hands to WriteSynth,
@@ -226,6 +276,68 @@ func TestSynthWorker_SweeperDrainsBacklogWithoutEnqueue(t *testing.T) {
 	}
 	if res.Reliability == "" {
 		t.Error("sweeper-synthesised record missing reliability")
+	}
+}
+
+// TestSynthWorker_RepeatedFailureDeadLetters is the design-review item #2
+// proof: a job that fails every time bumps synth_attempts on each handle,
+// and once it reaches maxSynthAttempts it drops out of ListSynthBacklog —
+// so the sweeper stops re-processing it (no permanent 30s LLM hot-loop).
+func TestSynthWorker_RepeatedFailureDeadLetters(t *testing.T) {
+	store := newFakeSynthStore()
+	const sha = "poison"
+	store.put(noteRecord("p", "v", sha, "always fails", "body", 1))
+
+	cap := newSynthCapture()
+	cap.writeErr = errors.New("synth backend exploded") // every WriteSynth fails
+
+	w := NewSynthWorker(SynthWorkerOpts{
+		Logger:     slog.New(slog.DiscardHandler),
+		BufferSize: 16,
+		DisableCLI: true,
+	})
+	w.Resolve = func(string, string) (synthStore, AttachmentStore, bool) { return store, nil, true }
+	w.WriteSynth = cap.writeSynth
+
+	ctx := context.Background()
+
+	// Drive handle() maxSynthAttempts times — each fails, each bumps the
+	// counter. (handle is the shared entry point the live loop + sweeper use.)
+	for i := 1; i <= maxSynthAttempts; i++ {
+		w.handle(ctx, synthJob{Profile: "p", Vault: "v", SHA: sha})
+		if got := store.attemptsFor(sha); got != i {
+			t.Fatalf("after %d handle calls, synth_attempts = %d, want %d", i, got, i)
+		}
+	}
+
+	// The failed counter is reflected in the /metrics atomic.
+	if got := w.SynthFailedCount(); got != int64(maxSynthAttempts) {
+		t.Errorf("SynthFailedCount = %d, want %d", got, maxSynthAttempts)
+	}
+	if got := w.SynthProcessedCount(); got != 0 {
+		t.Errorf("SynthProcessedCount = %d, want 0 (all failed)", got)
+	}
+
+	// Now dead-lettered: ListSynthBacklog (what drainBacklog scans) excludes it.
+	backlog, err := store.ListSynthBacklog(ctx, "p", "v", 0, 100)
+	if err != nil {
+		t.Fatalf("ListSynthBacklog: %v", err)
+	}
+	for _, r := range backlog {
+		if r.Doc.SHA == sha {
+			t.Fatalf("dead-lettered %q still in ListSynthBacklog (attempts=%d)", sha, store.attemptsFor(sha))
+		}
+	}
+
+	// And the drain loop no longer touches it: a full drainBacklog processes
+	// zero rows (the only record is dead-lettered).
+	w.Resolve = func(string, string) (synthStore, AttachmentStore, bool) { return store, nil, true }
+	n, err := w.drainBacklog(ctx, "p", "v", 0)
+	if err != nil {
+		t.Fatalf("drainBacklog: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("drainBacklog processed %d rows, want 0 (poison record dead-lettered)", n)
 	}
 }
 

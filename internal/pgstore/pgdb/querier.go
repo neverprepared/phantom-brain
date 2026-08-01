@@ -11,6 +11,15 @@ import (
 type Querier interface {
 	// Alternate names that resolve to the same entity (renames, "Bob"↔"Robert").
 	AddEntityAlias(ctx context.Context, arg AddEntityAliasParams) error
+	// Record a synth-pipeline failure for one record: increment the attempt
+	// counter and stamp the error + time. Called after processJob returns a
+	// non-nil error; once synth_attempts reaches maxSynthAttempts the record
+	// falls out of ListSynthBacklog (dead-lettered).
+	BumpSynthFailure(ctx context.Context, arg BumpSynthFailureParams) error
+	// Count of dead-lettered records: unsynthesised AND out of retries
+	// (synth_attempts >= maxSynthAttempts). Reported by `pbrainctl server queue
+	// depth` + the pb_synth_dead metric so an operator can see stuck records.
+	CountSynthDead(ctx context.Context, arg CountSynthDeadParams) (int64, error)
 	CountUnsynthesised(ctx context.Context, arg CountUnsynthesisedParams) (int64, error)
 	// The brain_forget primitive (issue #72): delete one record by its
 	// content-addressed identity, RETURNING its id so the caller can enqueue
@@ -52,6 +61,13 @@ type Querier interface {
 	// a bare `updated_at > @since` would. Deletes are NOT visible here (a forgotten
 	// row simply stops appearing) — pruning is a periodic full rebuild's job.
 	ListRecordsSince(ctx context.Context, arg ListRecordsSinceParams) ([]Record, error)
+	// The sweeper's keyset-paginated live backlog scan (records_synth_backlog_idx).
+	// Excludes dead-lettered rows (synth_attempts >= maxSynthAttempts) so a poison
+	// record neither wedges the page window nor hot-loops the LLM, and walks
+	// id > @after so the whole backlog drains page by page instead of re-scanning
+	// a top LIMIT. Distinct from ListUnsynthesised, which resynth --apply still
+	// uses to force-retry EVERY unsynthesised row (dead ones included).
+	ListSynthBacklog(ctx context.Context, arg ListSynthBacklogParams) ([]Record, error)
 	// The resynth scan: records still awaiting the gate + distill + embed pass.
 	// Rows may carry a NULL embedding, exercising the nullable vector override.
 	ListUnsynthesised(ctx context.Context, arg ListUnsynthesisedParams) ([]Record, error)
@@ -61,6 +77,9 @@ type Querier interface {
 	// Reverse backlink (the mentioned_by[] replacement): every record that
 	// mentions the entity identified by slug, within a tenant.
 	RecordsMentioningEntity(ctx context.Context, arg RecordsMentioningEntityParams) ([]Record, error)
+	// Clear the dead-letter state for one record so an operator force-retry
+	// (resynth --apply) re-admits it to the sweeper backlog.
+	ResetSynthFailure(ctx context.Context, arg ResetSynthFailureParams) error
 	// Find the canonical entity for an alias within a tenant.
 	ResolveEntityByAlias(ctx context.Context, arg ResolveEntityByAliasParams) (Entity, error)
 	// Attachment enrichment: store OCR / pdftotext / office-extract output.
