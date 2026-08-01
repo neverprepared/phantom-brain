@@ -101,6 +101,34 @@ func (c *Client) DeleteIndex(ctx context.Context, logical string) error {
 	return nil
 }
 
+// IndexExists probes whether the physical index resolved from this client's
+// prefix + logical name exists. It is the lightweight OpenSearch reachability
+// check the daemon's /readyz endpoint uses: a 200 confirms both cluster
+// reachability AND that the binding's projection index is present; a 404 (or
+// any error) reports the dependency as not ready. Never creates anything.
+func (c *Client) IndexExists(ctx context.Context, logical string) (bool, error) {
+	name := c.IndexName(logical)
+	resp, err := c.api.Indices.Exists(ctx, osapi.IndicesExistsReq{Indices: []string{name}})
+	status := 0
+	if resp != nil {
+		status = resp.StatusCode
+	}
+	if status == 0 {
+		status = statusFromErr(err)
+	}
+	switch status {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusNotFound:
+		return false, nil
+	default:
+		if err != nil {
+			return false, fmt.Errorf("exists probe %s: %w", name, err)
+		}
+		return false, fmt.Errorf("exists probe %s: unexpected status %d", name, status)
+	}
+}
+
 func isAlreadyExists(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "resource_already_exists_exception")
 }

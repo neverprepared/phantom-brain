@@ -119,7 +119,8 @@ func (s *pgSynthStore) SetExtractedText(ctx context.Context, recordID int64, tex
 
 // ListUnsynthesised returns the Synthesised=false backlog for
 // (profile, vault), capped at resynthScanLimit (the same bound the old
-// ResynthBacklog passed to the SoR query).
+// ResynthBacklog passed to the SoR query). Includes dead-lettered rows —
+// resynth --apply force-retries everything.
 func (s *pgSynthStore) ListUnsynthesised(ctx context.Context, profile, vault string) ([]synthRecord, error) {
 	q := pgstore.New(s.view.Pool())
 	recs, err := q.ListUnsynthesised(ctx, pgdb.ListUnsynthesisedParams{
@@ -137,6 +138,42 @@ func (s *pgSynthStore) ListUnsynthesised(ctx context.Context, profile, vault str
 	return out, nil
 }
 
+// ListSynthBacklog returns one keyset page of the LIVE backlog: unsynthesised
+// rows still under the retry ceiling (synth_attempts < maxSynthAttempts) whose
+// id > after, ordered by id, capped at limit. Dead-lettered rows are excluded
+// by the query so the sweeper stops re-processing a poison record.
+func (s *pgSynthStore) ListSynthBacklog(ctx context.Context, profile, vault string, after int64, limit int) ([]synthRecord, error) {
+	q := pgstore.New(s.view.Pool())
+	recs, err := q.ListSynthBacklog(ctx, pgdb.ListSynthBacklogParams{
+		Profile:     profile,
+		Vault:       vault,
+		MaxAttempts: maxSynthAttempts,
+		After:       after,
+		Lim:         int32(limit),
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]synthRecord, 0, len(recs))
+	for _, rec := range recs {
+		out = append(out, *pgRecordToSynthRecord(rec))
+	}
+	return out, nil
+}
+
+// BumpSynthFailure increments the record's synth_attempts and stamps the
+// error + failure time, so a repeatedly-failing record dead-letters out of
+// ListSynthBacklog once it reaches maxSynthAttempts.
+func (s *pgSynthStore) BumpSynthFailure(ctx context.Context, profile, vault, sha, errText string) error {
+	q := pgstore.New(s.view.Pool())
+	return q.BumpSynthFailure(ctx, pgdb.BumpSynthFailureParams{
+		ErrText: pgstore.OptText(errText),
+		Profile: profile,
+		Vault:   vault,
+		Sha:     sha,
+	})
+}
+
 // pgRecordToSynthRecord maps a SoR pgdb.Record into the worker's read
 // view, reusing pgRecordToSummaryDoc for the SummaryDoc fields and pulling
 // the relational identity + attachment metadata across.
@@ -145,6 +182,7 @@ func pgRecordToSynthRecord(rec pgdb.Record) *synthRecord {
 		Doc:              pgRecordToSummaryDoc(rec),
 		RecordID:         rec.ID,
 		Synthesised:      rec.Synthesised,
+		SynthAttempts:    int(rec.SynthAttempts),
 		MIMEType:         rec.MimeType.String,
 		OriginalFilename: rec.OriginalFilename.String,
 		MinIOKey:         rec.MinioKey.String,

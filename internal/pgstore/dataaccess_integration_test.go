@@ -363,3 +363,161 @@ func TestDataAccessIntegration(t *testing.T) {
 		t.Fatalf("ListFactsForEntity = %d rows (want 1, value shipped): %+v", len(facts), facts)
 	}
 }
+
+// TestSynthFailureTrackingIntegration covers migration 0007's failure-tracking
+// surface end to end against a real Postgres: BumpSynthFailure increments +
+// stamps, CountSynthDead / ListSynthBacklog respect the maxAttempts ceiling
+// (dead-letter exclusion), ListSynthBacklog keyset-paginates by id, and
+// ResetSynthFailure clears the dead state so a row re-enters the backlog.
+func TestSynthFailureTrackingIntegration(t *testing.T) {
+	ctx := context.Background()
+	baseDSN := startPGVector(ctx, t)
+
+	const profile, vault = "synthfail", "main"
+	const maxAttempts = 5
+
+	if err := Provision(ctx, baseDSN, profile); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	profileDSN, err := DSNForProfile(baseDSN, profile)
+	if err != nil {
+		t.Fatalf("DSNForProfile: %v", err)
+	}
+	pool, err := Open(ctx, profileDSN)
+	if err != nil {
+		t.Fatalf("Open pool: %v", err)
+	}
+	defer pool.Close()
+	q := New(pool)
+
+	// Seed three raw (unsynthesised) records.
+	ids := map[string]int64{}
+	for _, sha := range []string{"f1", "f2", "f3"} {
+		rec, err := q.UpsertRecord(ctx, pgdb.UpsertRecordParams{
+			Profile: profile, Vault: vault, Sha: sha, Kind: "note", Title: "raw " + sha,
+			// source/tags are NOT NULL in the schema; production coerces via
+			// pgstore.NonNilStrings, so mirror that here.
+			Source: NonNilStrings(nil), Tags: NonNilStrings(nil),
+		})
+		if err != nil {
+			t.Fatalf("UpsertRecord %s: %v", sha, err)
+		}
+		ids[sha] = rec.ID
+	}
+
+	// Fresh records: fully in the live backlog, none dead.
+	backlog, err := q.ListSynthBacklog(ctx, pgdb.ListSynthBacklogParams{
+		Profile: profile, Vault: vault, MaxAttempts: maxAttempts, After: 0, Lim: 100,
+	})
+	if err != nil {
+		t.Fatalf("ListSynthBacklog (fresh): %v", err)
+	}
+	if len(backlog) != 3 {
+		t.Fatalf("ListSynthBacklog (fresh) = %d rows, want 3", len(backlog))
+	}
+	// Keyset order is by id ascending.
+	for i := 1; i < len(backlog); i++ {
+		if backlog[i-1].ID >= backlog[i].ID {
+			t.Fatalf("ListSynthBacklog not id-ordered: %d then %d", backlog[i-1].ID, backlog[i].ID)
+		}
+	}
+	if dead, _ := q.CountSynthDead(ctx, pgdb.CountSynthDeadParams{
+		Profile: profile, Vault: vault, MaxAttempts: maxAttempts,
+	}); dead != 0 {
+		t.Fatalf("CountSynthDead (fresh) = %d, want 0", dead)
+	}
+
+	// Keyset pagination: page 1 (limit 2) then page 2 (id > cursor).
+	page1, err := q.ListSynthBacklog(ctx, pgdb.ListSynthBacklogParams{
+		Profile: profile, Vault: vault, MaxAttempts: maxAttempts, After: 0, Lim: 2,
+	})
+	if err != nil || len(page1) != 2 {
+		t.Fatalf("ListSynthBacklog page1 = %d rows (err %v), want 2", len(page1), err)
+	}
+	page2, err := q.ListSynthBacklog(ctx, pgdb.ListSynthBacklogParams{
+		Profile: profile, Vault: vault, MaxAttempts: maxAttempts, After: page1[1].ID, Lim: 2,
+	})
+	if err != nil {
+		t.Fatalf("ListSynthBacklog page2: %v", err)
+	}
+	if len(page2) != 1 || page2[0].ID <= page1[1].ID {
+		t.Fatalf("ListSynthBacklog page2 = %+v, want 1 row with id > %d", page2, page1[1].ID)
+	}
+
+	// Bump f2 to the dead-letter threshold.
+	for i := 0; i < maxAttempts; i++ {
+		if err := q.BumpSynthFailure(ctx, pgdb.BumpSynthFailureParams{
+			ErrText: text("boom"), Profile: profile, Vault: vault, Sha: "f2",
+		}); err != nil {
+			t.Fatalf("BumpSynthFailure f2 (%d): %v", i, err)
+		}
+	}
+	dead2, err := q.GetRecordBySHA(ctx, pgdb.GetRecordBySHAParams{Profile: profile, Vault: vault, Sha: "f2"})
+	if err != nil {
+		t.Fatalf("GetRecordBySHA f2: %v", err)
+	}
+	if dead2.SynthAttempts != maxAttempts {
+		t.Fatalf("f2 synth_attempts = %d, want %d", dead2.SynthAttempts, maxAttempts)
+	}
+	if !dead2.LastSynthError.Valid || dead2.LastSynthError.String != "boom" {
+		t.Errorf("f2 last_synth_error = %+v, want 'boom'", dead2.LastSynthError)
+	}
+	if !dead2.SynthFailedAt.Valid {
+		t.Error("f2 synth_failed_at not stamped")
+	}
+
+	// f2 is now excluded from the live backlog and counted as dead.
+	backlog, err = q.ListSynthBacklog(ctx, pgdb.ListSynthBacklogParams{
+		Profile: profile, Vault: vault, MaxAttempts: maxAttempts, After: 0, Lim: 100,
+	})
+	if err != nil {
+		t.Fatalf("ListSynthBacklog (post-dead): %v", err)
+	}
+	if len(backlog) != 2 {
+		t.Fatalf("ListSynthBacklog (post-dead) = %d rows, want 2 (f2 excluded)", len(backlog))
+	}
+	for _, r := range backlog {
+		if r.Sha == "f2" {
+			t.Fatal("dead-lettered f2 must not appear in ListSynthBacklog")
+		}
+	}
+	dead, err := q.CountSynthDead(ctx, pgdb.CountSynthDeadParams{
+		Profile: profile, Vault: vault, MaxAttempts: maxAttempts,
+	})
+	if err != nil {
+		t.Fatalf("CountSynthDead: %v", err)
+	}
+	if dead != 1 {
+		t.Fatalf("CountSynthDead = %d, want 1", dead)
+	}
+	// CountUnsynthesised still counts f2 (it's raw); backlog = total - dead = 2.
+	total, err := q.CountUnsynthesised(ctx, pgdb.CountUnsynthesisedParams{Profile: profile, Vault: vault})
+	if err != nil {
+		t.Fatalf("CountUnsynthesised: %v", err)
+	}
+	if total != 3 || total-dead != 2 {
+		t.Fatalf("CountUnsynthesised = %d (backlog %d), want 3 (2)", total, total-dead)
+	}
+
+	// ResetSynthFailure re-admits f2 to the live backlog.
+	if err := q.ResetSynthFailure(ctx, pgdb.ResetSynthFailureParams{Profile: profile, Vault: vault, Sha: "f2"}); err != nil {
+		t.Fatalf("ResetSynthFailure: %v", err)
+	}
+	reset, err := q.GetRecordBySHA(ctx, pgdb.GetRecordBySHAParams{Profile: profile, Vault: vault, Sha: "f2"})
+	if err != nil {
+		t.Fatalf("GetRecordBySHA f2 (post-reset): %v", err)
+	}
+	if reset.SynthAttempts != 0 || reset.LastSynthError.Valid || reset.SynthFailedAt.Valid {
+		t.Errorf("ResetSynthFailure did not clear state: attempts=%d err=%+v failed_at=%+v",
+			reset.SynthAttempts, reset.LastSynthError, reset.SynthFailedAt)
+	}
+	backlog, err = q.ListSynthBacklog(ctx, pgdb.ListSynthBacklogParams{
+		Profile: profile, Vault: vault, MaxAttempts: maxAttempts, After: 0, Lim: 100,
+	})
+	if err != nil {
+		t.Fatalf("ListSynthBacklog (post-reset): %v", err)
+	}
+	if len(backlog) != 3 {
+		t.Fatalf("ListSynthBacklog (post-reset) = %d rows, want 3 (f2 re-admitted)", len(backlog))
+	}
+}
