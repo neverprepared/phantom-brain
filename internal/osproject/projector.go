@@ -2,7 +2,9 @@ package osproject
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -131,10 +133,37 @@ func (p *Projector) Project(ctx context.Context, rec pgdb.Record) error {
 	}
 
 	id := osearch.DocID(rec.Profile, rec.Vault, rec.Sha)
-	if err := p.client.PutDoc(ctx, p.prefix, LogicalRecords, id, doc, p.waitForRefresh); err != nil {
+	version := projectionVersion(rec)
+	if err := p.client.PutDocVersioned(ctx, p.prefix, LogicalRecords, id, doc, version, p.waitForRefresh); err != nil {
+		if errors.Is(err, osearch.ErrVersionConflict) {
+			// A newer version of this record already won the race in pb_records
+			// (e.g. the post-synth distilled re-projection landed before this
+			// older raw upsert). Dropping the stale write IS the desired end
+			// state, so this is success — not an error to retry.
+			slog.Debug("osproject: dropped stale projection (version conflict)",
+				"record_id", rec.ID, "id", id, "version", version)
+			return nil
+		}
 		return fmt.Errorf("osproject: project record %d (%s): %w", rec.ID, id, err)
 	}
 	return nil
+}
+
+// projectionVersion derives the OpenSearch external_gte version for a record
+// from updated_at — the timestamp synth bumps when it rewrites the row — so a
+// post-synth re-projection always outranks the initial raw projection
+// regardless of which HTTP write lands last. Falls back to created_at, then to
+// 0 (unversioned last-write-wins) when neither timestamp is set. Postgres
+// stores microsecond resolution, so distinct writes differ by >=1000ns; the
+// initial and post-synth writes are seconds apart, well clear of collision.
+func projectionVersion(rec pgdb.Record) int64 {
+	if rec.UpdatedAt.Valid {
+		return rec.UpdatedAt.Time.UnixNano()
+	}
+	if rec.CreatedAt.Valid {
+		return rec.CreatedAt.Time.UnixNano()
+	}
+	return 0
 }
 
 // DeleteProjection removes the pb_records doc for (profile, vault, sha).

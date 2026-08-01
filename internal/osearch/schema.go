@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
+	opensearch "github.com/opensearch-project/opensearch-go/v4"
 	osapi "github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 )
 
@@ -124,4 +126,25 @@ func statusFromErr(err error) int {
 		n = n*10 + int(ch-'0')
 	}
 	return n
+}
+
+// statusCode extracts the HTTP status from an opensearch-go API error. It
+// prefers the typed StructError/StringError (which carry Status directly and
+// survive error wrapping), falling back to statusFromErr's string scan. This
+// matters for the Index version-conflict error, which formats as
+// "status: 409, type: version_conflict_engine_exception, ..." — no brackets —
+// so statusFromErr's "status: [" scan misses it.
+func statusCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var se *opensearch.StructError
+	if errors.As(err, &se) {
+		return se.Status
+	}
+	var stre *opensearch.StringError
+	if errors.As(err, &stre) {
+		return stre.Status
+	}
+	return statusFromErr(err)
 }
