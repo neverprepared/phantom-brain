@@ -66,6 +66,11 @@ type Daemon struct {
 	attach    AttachmentStore
 	bindings  *bindingDepCache
 
+	// reconciler is the pb_records projection drift-repair loop (design-review
+	// item #5). Nil / disabled when [reconcile] interval_secs <= 0; otherwise
+	// started alongside the synth worker and stopped in Shutdown.
+	reconciler *Reconciler
+
 	// Phase A (dormant): per-profile Postgres System-of-Record. pgBaseDSN
 	// is the resolved base/maintenance DSN ("" = Postgres disabled).
 	// pgProfiles caches the per-PROFILE resources (one *pgxpool.Pool +
@@ -388,6 +393,44 @@ func Start(opts StartOpts) (*Daemon, error) {
 		}
 		w.Start(parentCtx)
 		d.synth = w
+
+		// Projection reconciler (design-review item #5): the drift-repair
+		// backstop for pb_records. It periodically diffs each binding's SoR
+		// record set against the projection and repairs both directions —
+		// re-project a missing doc (lost River project job), delete an orphan
+		// doc (exhausted brain_forget delete job). Mirror of the synth
+		// sweeper. Disabled when [reconcile] interval_secs <= 0.
+		rec := NewReconciler(opts.Logger, cfg.Reconcile.Interval())
+		rec.Bindings = func() []VaultKey {
+			vs := d.registry.Vaults()
+			out := make([]VaultKey, 0, len(vs))
+			for _, b := range vs {
+				out = append(out, b.Key)
+			}
+			return out
+		}
+		rec.Resolve = func(profile, vaultName string) (reconcileSoR, reconcileProjection, bool) {
+			deps, ok := d.bindings.Get(VaultKey{Profile: profile, Vault: vaultName})
+			if !ok || deps == nil || deps.PG == nil {
+				return nil, nil, false
+			}
+			if d.osBase == nil {
+				return nil, nil, false
+			}
+			b, ok := d.registry.LookupByVault(VaultKey{Profile: profile, Vault: vaultName})
+			if !ok {
+				return nil, nil, false
+			}
+			sor := &pgReconcileSoR{view: deps.PG}
+			proj := &osReconcileProjection{
+				client:    d.osBase.WithPrefix(b.Storage.IndexPrefix),
+				prefix:    b.Storage.IndexPrefix,
+				projector: deps.PG.projector,
+			}
+			return sor, proj, true
+		}
+		rec.Start(parentCtx)
+		d.reconciler = rec
 	}
 
 	// Spawn per-vault runners (no-op stubs in day 1; real loops in
@@ -634,6 +677,9 @@ func (d *Daemon) Shutdown(ctx context.Context) error {
 	}
 
 	d.parentCancel()
+	if d.reconciler != nil {
+		d.reconciler.Stop()
+	}
 	d.runners.StopAll()
 	// Phase A: stop every per-profile River client + close its pool. Logs
 	// warns on error; never blocks shutdown.
