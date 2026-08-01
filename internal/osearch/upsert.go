@@ -28,7 +28,7 @@ func (c *Client) UpsertSummaryWithPrefix(ctx context.Context, prefix string, doc
 	if doc.Profile == "" || doc.Vault == "" || doc.SHA == "" {
 		return errors.New("osearch: summary doc requires profile, vault, sha")
 	}
-	return c.putDoc(ctx, prefix, IndexSummaries, DocID(doc.Profile, doc.Vault, doc.SHA), doc, waitForRefresh)
+	return c.putDoc(ctx, prefix, IndexSummaries, DocID(doc.Profile, doc.Vault, doc.SHA), doc, 0, waitForRefresh)
 }
 
 // UpsertEntity writes or replaces an entity doc by canonical slug.
@@ -45,7 +45,7 @@ func (c *Client) UpsertEntityWithPrefix(ctx context.Context, prefix string, doc 
 	if doc.Profile == "" || doc.Vault == "" || doc.Slug == "" {
 		return errors.New("osearch: entity doc requires profile, vault, slug")
 	}
-	return c.putDoc(ctx, prefix, IndexEntities, DocID(doc.Profile, doc.Vault, doc.Slug), doc, waitForRefresh)
+	return c.putDoc(ctx, prefix, IndexEntities, DocID(doc.Profile, doc.Vault, doc.Slug), doc, 0, waitForRefresh)
 }
 
 // UpsertAttachment writes or replaces an attachment metadata doc.
@@ -61,10 +61,27 @@ func (c *Client) UpsertAttachmentWithPrefix(ctx context.Context, prefix string, 
 	if doc.Profile == "" || doc.Vault == "" || doc.SHA == "" {
 		return errors.New("osearch: attachment doc requires profile, vault, sha")
 	}
-	return c.putDoc(ctx, prefix, IndexAttachments, DocID(doc.Profile, doc.Vault, doc.SHA), doc, waitForRefresh)
+	return c.putDoc(ctx, prefix, IndexAttachments, DocID(doc.Profile, doc.Vault, doc.SHA), doc, 0, waitForRefresh)
 }
 
-func (c *Client) putDoc(ctx context.Context, prefix, logical, id string, payload any, waitForRefresh bool) error {
+// ErrVersionConflict is returned by a versioned putDoc when OpenSearch
+// rejects the write because a strictly-newer version of the _id already
+// exists (HTTP 409, version_conflict_engine_exception). For an
+// external_gte upsert this is not a failure: it means a later write
+// already won, so the desired end state is in place. Callers should
+// treat it as success (drop the stale write), not retry.
+var ErrVersionConflict = errors.New("osearch: version conflict (stale write rejected)")
+
+// putDoc upserts payload at _id=id. When version > 0 it uses OpenSearch
+// external_gte concurrency control: OS keeps the highest version seen and
+// rejects a strictly-older write (returned as ErrVersionConflict), so an
+// out-of-order write — e.g. a stale raw-body projection arriving after the
+// distilled re-projection under concurrent River workers — cannot clobber
+// newer content. external_gte (not external) still accepts an EQUAL-version
+// re-delivery, which the projection's at-least-once delivery needs to stay
+// idempotent. version <= 0 is a plain unversioned last-write-wins upsert
+// (the legacy callers).
+func (c *Client) putDoc(ctx context.Context, prefix, logical, id string, payload any, version int64, waitForRefresh bool) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
@@ -78,14 +95,29 @@ func (c *Client) putDoc(ctx context.Context, prefix, logical, id string, payload
 	if waitForRefresh {
 		req.Params.Refresh = "true"
 	}
+	if version > 0 {
+		// int is 64-bit on the daemon's targets (linux/amd64); epoch-nanos
+		// (~1.7e18) fits without truncation.
+		v := int(version)
+		req.Params.Version = &v
+		req.Params.VersionType = "external_gte"
+	}
 
 	resp, err := c.api.Index(ctx, req)
 	if err != nil {
+		// The client surfaces 4xx/5xx as an error in some paths; a versioned
+		// write that 409s is a superseded (stale) write, not a real failure.
+		if version > 0 && statusCode(err) == http.StatusConflict {
+			return ErrVersionConflict
+		}
 		return fmt.Errorf("index %s/%s: %w", logical, id, err)
 	}
 	if resp != nil {
 		ir := resp.Inspect().Response
 		if ir != nil && ir.StatusCode >= 400 {
+			if version > 0 && ir.StatusCode == http.StatusConflict {
+				return ErrVersionConflict
+			}
 			b, _ := io.ReadAll(ir.Body)
 			return fmt.Errorf("index %s/%s: status %d: %s", logical, id, ir.StatusCode, string(b))
 		}
