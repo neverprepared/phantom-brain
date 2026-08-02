@@ -46,6 +46,13 @@ const (
 	KindAttachmentStub Kind = "attachment_stub" // sidecar summary for an attachment
 	KindEmailImport    Kind = "email_import"    // bulk loader: legacy email-scrape doc
 	KindManualCurate   Kind = "manual_curate"   // bulk loader: future/non-email formats
+
+	// Verbatim kinds — authored content stored as-is (body = raw_body, no
+	// LLM distill). See Kind.IsVerbatim and the synth worker's processJob
+	// early branch. These back the centralized skills/todo/sessions vaults.
+	KindSkill   Kind = "skill"   // an authored, reusable skill (rendered into runtimes)
+	KindTodo    Kind = "todo"    // an authored todo / actionable item
+	KindSession Kind = "session" // a promoted, curated session summary
 )
 
 // SoRKind translates a legacy Kind to the Postgres SoR records.kind
@@ -71,7 +78,20 @@ func SoRKind(k Kind) string {
 func (k Kind) IsValid() bool {
 	switch k {
 	case KindNote, KindWebScrape, KindTaskSummary,
-		KindAttachmentStub, KindEmailImport, KindManualCurate:
+		KindAttachmentStub, KindEmailImport, KindManualCurate,
+		KindSkill, KindTodo, KindSession:
+		return true
+	}
+	return false
+}
+
+// IsVerbatim reports whether k is authored content that must be stored
+// as-is: the synth worker persists raw_body as the canonical body and runs
+// NO LLM gate/distill/entity pass (a skill/todo/session is not a raw source
+// to distill). See internal/server/synth_queue.go processJob.
+func (k Kind) IsVerbatim() bool {
+	switch k {
+	case KindSkill, KindTodo, KindSession:
 		return true
 	}
 	return false

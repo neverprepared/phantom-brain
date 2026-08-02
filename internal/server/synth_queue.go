@@ -679,6 +679,28 @@ func (w *SynthWorker) processJob(ctx context.Context, job synthJob) error {
 
 	doc := rec.Doc
 
+	// Verbatim kinds (skill/todo/session) are authored content, not raw
+	// sources to distill. Persist raw_body AS the canonical body with NO LLM
+	// gate/distill/entity pass — the synth worker must never rewrite an
+	// authored skill/todo/session. WriteSynth marks the record synthesised
+	// and re-projects it into pb_records, so it stays out of the backlog.
+	if doc.Kind.IsVerbatim() {
+		if w.WriteSynth == nil {
+			return errors.New("synth: WriteSynth not wired")
+		}
+		body := doc.RawBody
+		if body == "" {
+			body = doc.Body
+		}
+		return w.WriteSynth(ctx, job.Profile, job.Vault, job.SHA, synthResult{
+			Body:        body,
+			Reliability: string(ReliabilityMedium),
+			Topic:       string(TopicGeneral),
+			GateReason:  "verbatim (" + string(doc.Kind) + ")",
+			Embedding:   doc.Embedding,
+		})
+	}
+
 	// Attachment records (kind "attachment" → KindAttachmentStub): before
 	// gate/distill, attempt text extraction (PDF/OCR/office) and fold it
 	// into the RawBody so the downstream distill pass sees real content
