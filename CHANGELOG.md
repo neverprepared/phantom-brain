@@ -1,5 +1,24 @@
 # Changelog
 
+## [3.18.0](https://github.com/neverprepared/phantom-brain/compare/v3.17.1...v3.18.0) (2026-08-02)
+
+
+### Features
+
+* add verbatim record kinds (skill/todo/session) ([b05d81a](https://github.com/neverprepared/phantom-brain/commit/b05d81a7fdedd912e15dc40f057a3bd03b7c82b2))
+* **admin:** operator /admin/profiles endpoint (Phase 2 foundation) ([fb1a2dd](https://github.com/neverprepared/phantom-brain/commit/fb1a2dde520cb80b7f58752d1eaaac848b73a4b9))
+* **admin:** operator endpoint POST/GET /admin/profiles for remote provisioning ([e2165d4](https://github.com/neverprepared/phantom-brain/commit/e2165d4b0cd067a4f0875235fb033d83cec26726))
+* **config:** [naming] section drives per-binding bucket/index templates ([5f0358d](https://github.com/neverprepared/phantom-brain/commit/5f0358d36604d57904b4bbbe2bec37c5b420a67c))
+* **profile:** --json output for `server profile create` ([be5078d](https://github.com/neverprepared/phantom-brain/commit/be5078d47e5b1a272369c8431b8ceee18635b40b))
+* **projection:** add pb_records drift reconciler (SoR↔OS repair) ([#168](https://github.com/neverprepared/phantom-brain/issues/168)) ([4dade14](https://github.com/neverprepared/phantom-brain/commit/4dade14f9e2836c0cdbeb15e65de51ed31ec5d66))
+* **provision:** configurable naming templates for bucket + index prefix ([550a591](https://github.com/neverprepared/phantom-brain/commit/550a591bb6671a3b3ed8ee40ff2c082ec49bd4e2))
+* **synth:** surface + dead-letter synth failures, fix queue depth, add readyz/metrics ([#167](https://github.com/neverprepared/phantom-brain/issues/167)) ([c2aabcf](https://github.com/neverprepared/phantom-brain/commit/c2aabcf827e51181099947ee8b70388b32e95ada))
+
+
+### Bug Fixes
+
+* **projection:** version-guard pb_records upserts to stop stale-body regression ([#166](https://github.com/neverprepared/phantom-brain/issues/166)) ([147d7d1](https://github.com/neverprepared/phantom-brain/commit/147d7d186b9e0fd2a0647422420cb769f1e7abe2))
+
 ## [3.17.1](https://github.com/neverprepared/phantom-brain/compare/v3.17.0...v3.17.1) (2026-07-15)
 
 
