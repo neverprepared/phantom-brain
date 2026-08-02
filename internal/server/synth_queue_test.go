@@ -675,3 +675,72 @@ func TestSynthWorker_SurvivesWriteSynthFailure(t *testing.T) {
 		t.Fatal("worker appears to have deadlocked after WriteSynth failure")
 	}
 }
+
+// countingLLM is a fake LLMBackend that records how many times it was
+// invoked, so a test can assert the verbatim path never calls the LLM.
+type countingLLM struct{ calls int }
+
+func (c *countingLLM) Complete(_ context.Context, _ LLMRequest) (string, error) {
+	c.calls++
+	return "DISTILLED-BY-LLM", nil
+}
+func (c *countingLLM) Available() bool { return true }
+func (c *countingLLM) Name() string    { return "counting" }
+
+// TestSynthWorker_VerbatimKindSkipsLLM proves the verbatim branch: an
+// authored skill/todo/session record is persisted with raw_body AS the body
+// and NO LLM gate/distill pass — even when an LLM backend is available. A
+// control note in the same worker DOES reach the LLM, so the zero-call
+// assertion is meaningful.
+func TestSynthWorker_VerbatimKindSkipsLLM(t *testing.T) {
+	store := newFakeSynthStore()
+
+	skill := noteRecord("personal", "skills", "sha-skill", "deploy-canary", "RAW SKILL BODY — do not distill", 1)
+	skill.Doc.Kind = osearch.KindSkill
+	store.put(skill)
+
+	// Control: a normal note with coherent prose so the gate/distill runs.
+	note := noteRecord("personal", "memory", "sha-note", "k8s note",
+		"Kubernetes rollout strategy: tune maxSurge and maxUnavailable to control "+
+			"rolling updates, and gate traffic behind readiness probes before shifting load.", 2)
+	store.put(note)
+
+	cap := newSynthCapture()
+	llm := &countingLLM{}
+	w := NewSynthWorker(SynthWorkerOpts{
+		Logger:     slog.New(slog.DiscardHandler),
+		BufferSize: 16,
+		DisableCLI: true, // don't build a real backend...
+	})
+	w.llm = llm // ...then force an available fake so llmReady() is true
+	w.Resolve = func(string, string) (synthStore, AttachmentStore, bool) {
+		return store, nil, true
+	}
+	w.WriteSynth = cap.writeSynth
+
+	// Verbatim skill → persisted verbatim, no LLM.
+	if err := w.processJob(context.Background(), synthJob{Profile: "personal", Vault: "skills", SHA: "sha-skill"}); err != nil {
+		t.Fatalf("processJob(skill): %v", err)
+	}
+	res, ok := cap.result("sha-skill")
+	if !ok {
+		t.Fatal("verbatim skill was not written through WriteSynth")
+	}
+	if res.Body != "RAW SKILL BODY — do not distill" {
+		t.Errorf("verbatim body = %q, want the raw body unchanged", res.Body)
+	}
+	if res.GateReason != "verbatim (skill)" {
+		t.Errorf("gate reason = %q, want %q", res.GateReason, "verbatim (skill)")
+	}
+	if llm.calls != 0 {
+		t.Errorf("verbatim record invoked the LLM %d times, want 0", llm.calls)
+	}
+
+	// Control note → the same worker DOES reach the LLM.
+	if err := w.processJob(context.Background(), synthJob{Profile: "personal", Vault: "memory", SHA: "sha-note"}); err != nil {
+		t.Fatalf("processJob(note): %v", err)
+	}
+	if llm.calls == 0 {
+		t.Error("control note should have called the LLM (proves the fake is wired)")
+	}
+}
