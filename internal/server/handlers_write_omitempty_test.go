@@ -84,3 +84,32 @@ func TestCapturedAtOmittedWhenNil(t *testing.T) {
 		}
 	})
 }
+
+// TestApplyMemoryFields_VaultKindDefault guards the vault→kind default: an
+// unclassified write to a verbatim vault inherits that vault's kind (so the
+// synth bypass fires), while an explicit kind always wins and non-verbatim
+// vaults stay unset.
+func TestApplyMemoryFields_VaultKindDefault(t *testing.T) {
+	cases := []struct {
+		name    string
+		vault   string
+		reqKind string
+		want    osearch.Kind
+	}{
+		{"todo vault defaults to todo kind", "todo", "", osearch.KindTodo},
+		{"sessions vault defaults to session kind", "sessions", "", osearch.KindSession},
+		{"skills vault defaults to skill kind", "skills", "", osearch.KindSkill},
+		{"memory vault stays unset", "memory", "", ""},
+		{"artifacts vault stays unset", "artifacts", "", ""},
+		{"explicit kind wins over vault default", "todo", string(osearch.KindNote), osearch.KindNote},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := osearch.SummaryDoc{Vault: tc.vault}
+			applyMemoryFields(&doc, MemoryFields{Kind: tc.reqKind})
+			if doc.Kind != tc.want {
+				t.Errorf("vault=%q reqKind=%q: got kind %q, want %q", tc.vault, tc.reqKind, doc.Kind, tc.want)
+			}
+		})
+	}
+}

@@ -237,10 +237,34 @@ func validateMemoryFields(m MemoryFields) string {
 // pattern stays consistent.
 func applyMemoryFields(doc *osearch.SummaryDoc, m MemoryFields) {
 	doc.Kind = osearch.Kind(m.Kind)
+	if doc.Kind == "" {
+		// Vault→kind default: an unclassified write to a verbatim vault inherits
+		// that vault's kind, so the synth bypass fires and the record is stored
+		// as authored (todo/sessions/skills) instead of LLM-rewritten. An
+		// explicit kind in the request always wins. Vaults with no mapping
+		// (memory, artifacts) leave kind unset → normal note synthesis.
+		doc.Kind = defaultKindForVault(doc.Vault)
+	}
 	doc.MemoryType = osearch.MemoryType(m.MemoryType)
 	doc.Source = m.Source
 	doc.References = m.References
 	doc.CapturedAt = m.CapturedAt
+}
+
+// defaultKindForVault maps a verbatim vault to the record kind it holds. The
+// vault names match the platform's provisioned set (CL_BRAIN__VAULTS); vaults
+// without a verbatim kind (memory, artifacts, …) return "".
+func defaultKindForVault(vault string) osearch.Kind {
+	switch vault {
+	case "todo":
+		return osearch.KindTodo
+	case "sessions":
+		return osearch.KindSession
+	case "skills":
+		return osearch.KindSkill
+	default:
+		return ""
+	}
 }
 
 // TraceRequest is an append-only audit-log line. No synth, no OS
