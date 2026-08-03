@@ -346,6 +346,7 @@ type RecordDTO struct {
 	MemoryType  string     `json:"memory_type,omitempty"`
 	Title       string     `json:"title"`
 	Body        string     `json:"body"`
+	RawBody     string     `json:"raw_body,omitempty"` // pre-synthesis body; the SHA is derived over these bytes
 	SourceURL   string     `json:"source_url,omitempty"`
 	Source      []string   `json:"source,omitempty"`
 	Tags        []string   `json:"tags,omitempty"`
