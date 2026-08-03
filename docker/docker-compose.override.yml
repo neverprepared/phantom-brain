@@ -1,0 +1,12 @@
+# Local overrides (auto-loaded by docker compose). Not the repo's canonical
+# compose — machine-specific fixes for this workstation.
+services:
+  # Point the daemon at its own Postgres SoR (now mandatory post epic-#92).
+  pbrainctl:
+    environment:
+      PB_POSTGRES_DSN: postgres://${POSTGRES_USER:-pbrain}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-phantom_brain}?sslmode=disable
+
+  # 5601 is taken by an unrelated opensearch stack on this host — remap.
+  opensearch-dashboards:
+    ports:
+      - "5602:5601"
