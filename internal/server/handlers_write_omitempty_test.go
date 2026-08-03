@@ -85,10 +85,11 @@ func TestCapturedAtOmittedWhenNil(t *testing.T) {
 	})
 }
 
-// TestApplyMemoryFields_VaultKindDefault guards the vault→kind default: an
-// unclassified write to a verbatim vault inherits that vault's kind (so the
-// synth bypass fires), while an explicit kind always wins and non-verbatim
-// vaults stay unset.
+// TestApplyMemoryFields_VaultKindDefault guards the vault→kind rule: an
+// unclassified write to a verbatim vault (empty OR the note default that
+// brain_learn hardcodes) inherits that vault's kind so the synth bypass fires;
+// an explicit non-note kind is still honored, and non-verbatim vaults are
+// untouched.
 func TestApplyMemoryFields_VaultKindDefault(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -96,12 +97,15 @@ func TestApplyMemoryFields_VaultKindDefault(t *testing.T) {
 		reqKind string
 		want    osearch.Kind
 	}{
-		{"todo vault defaults to todo kind", "todo", "", osearch.KindTodo},
-		{"sessions vault defaults to session kind", "sessions", "", osearch.KindSession},
-		{"skills vault defaults to skill kind", "skills", "", osearch.KindSkill},
-		{"memory vault stays unset", "memory", "", ""},
-		{"artifacts vault stays unset", "artifacts", "", ""},
-		{"explicit kind wins over vault default", "todo", string(osearch.KindNote), osearch.KindNote},
+		{"todo vault, empty kind -> todo", "todo", "", osearch.KindTodo},
+		{"sessions vault, empty kind -> session", "sessions", "", osearch.KindSession},
+		{"skills vault, empty kind -> skill", "skills", "", osearch.KindSkill},
+		{"todo vault, note kind (brain_learn default) -> todo", "todo", string(osearch.KindNote), osearch.KindTodo},
+		{"skills vault, note kind -> skill", "skills", string(osearch.KindNote), osearch.KindSkill},
+		{"todo vault, explicit non-note kind is honored", "todo", string(osearch.KindWebScrape), osearch.KindWebScrape},
+		{"memory vault, empty stays unset", "memory", "", ""},
+		{"memory vault, note stays note", "memory", string(osearch.KindNote), osearch.KindNote},
+		{"artifacts vault, note stays note", "artifacts", string(osearch.KindNote), osearch.KindNote},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

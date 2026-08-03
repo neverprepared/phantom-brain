@@ -237,13 +237,14 @@ func validateMemoryFields(m MemoryFields) string {
 // pattern stays consistent.
 func applyMemoryFields(doc *osearch.SummaryDoc, m MemoryFields) {
 	doc.Kind = osearch.Kind(m.Kind)
-	if doc.Kind == "" {
-		// Vault→kind default: an unclassified write to a verbatim vault inherits
-		// that vault's kind, so the synth bypass fires and the record is stored
-		// as authored (todo/sessions/skills) instead of LLM-rewritten. An
-		// explicit kind in the request always wins. Vaults with no mapping
-		// (memory, artifacts) leave kind unset → normal note synthesis.
-		doc.Kind = defaultKindForVault(doc.Vault)
+	// Verbatim vaults (todo/sessions/skills) hold exactly one kind. brain_learn
+	// hardcodes kind=note (the MCP tool has no kind param), so an empty OR note
+	// kind into such a vault is "unclassified" — let the vault decide, so the
+	// synth bypass fires and the record is stored as authored instead of
+	// LLM-rewritten. A caller that sends an explicit non-note kind is still
+	// honored. Non-verbatim vaults (memory, artifacts) are untouched.
+	if vk := verbatimKindForVault(doc.Vault); vk != "" && (doc.Kind == "" || doc.Kind == osearch.KindNote) {
+		doc.Kind = vk
 	}
 	doc.MemoryType = osearch.MemoryType(m.MemoryType)
 	doc.Source = m.Source
@@ -251,10 +252,10 @@ func applyMemoryFields(doc *osearch.SummaryDoc, m MemoryFields) {
 	doc.CapturedAt = m.CapturedAt
 }
 
-// defaultKindForVault maps a verbatim vault to the record kind it holds. The
+// verbatimKindForVault maps a verbatim vault to the record kind it holds. The
 // vault names match the platform's provisioned set (CL_BRAIN__VAULTS); vaults
 // without a verbatim kind (memory, artifacts, …) return "".
-func defaultKindForVault(vault string) osearch.Kind {
+func verbatimKindForVault(vault string) osearch.Kind {
 	switch vault {
 	case "todo":
 		return osearch.KindTodo
