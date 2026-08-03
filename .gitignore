@@ -16,3 +16,6 @@ docker/config/
 docker/data/
 docker/*/.env
 docker/*/data/
+# Local compose overrides (auto-loaded by docker compose; machine-specific)
+docker/docker-compose.override.yml
+docker-compose.override.yml
