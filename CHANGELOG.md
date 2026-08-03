@@ -1,5 +1,17 @@
 # Changelog
 
+## [3.19.0](https://github.com/neverprepared/phantom-brain/compare/v3.18.0...v3.19.0) (2026-08-03)
+
+
+### Features
+
+* default record kind from vault so verbatim vaults store as authored ([#170](https://github.com/neverprepared/phantom-brain/issues/170)) ([2ae84d5](https://github.com/neverprepared/phantom-brain/commit/2ae84d54882fea1c5ad4cbc71511ac98b049bfed))
+
+
+### Bug Fixes
+
+* untrack machine-specific docker-compose.override.yml ([#172](https://github.com/neverprepared/phantom-brain/issues/172)) ([bcf43e2](https://github.com/neverprepared/phantom-brain/commit/bcf43e2af510c8eeb9765bbeb5858de64020d3ca))
+
 ## [3.18.0](https://github.com/neverprepared/phantom-brain/compare/v3.17.1...v3.18.0) (2026-08-02)
 
 
