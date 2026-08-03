@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/neverprepared/phantom-brain/internal/canonicalize"
 	"github.com/neverprepared/phantom-brain/internal/osearch"
 	"github.com/neverprepared/phantom-brain/internal/pgstore"
 	"github.com/neverprepared/phantom-brain/internal/pgstore/pgdb"
@@ -252,6 +253,22 @@ func applyMemoryFields(doc *osearch.SummaryDoc, m MemoryFields) {
 	doc.CapturedAt = m.CapturedAt
 }
 
+// canonicalSHAForKind derives a record's content-address daemon-side, so no
+// client (router, app, ingest-bulk) can diverge on identity — the client-sent
+// SHA is advisory only. Verbatim kinds key on the FULL canonical doc: their
+// frontmatter is semantic (a skill's name/description edit IS a new version), so
+// it must be part of identity (canonicalize.Sum). Other kinds key on the
+// canonical BODY only (canonicalize.SumBody), so ingestion-timestamp frontmatter
+// does not fragment dedup — matching ingest-bulk's long-standing behavior.
+func canonicalSHAForKind(kind osearch.Kind, body string) (string, error) {
+	switch kind {
+	case osearch.KindSkill, osearch.KindTodo, osearch.KindSession:
+		return canonicalize.Sum([]byte(body))
+	default:
+		return canonicalize.SumBody([]byte(body))
+	}
+}
+
 // verbatimKindForVault maps a verbatim vault to the record kind it holds. The
 // vault names match the platform's provisioned set (CL_BRAIN__VAULTS); vaults
 // without a verbatim kind (memory, artifacts, …) return "".
@@ -360,6 +377,16 @@ func (d *Daemon) handleLearn(w http.ResponseWriter, r *http.Request) {
 		Embedding:   req.Embedding,
 	}
 	applyMemoryFields(&doc, req.MemoryFields)
+	// Derive the content-address daemon-side (kind-aware) so identity is
+	// canonical and consistent across every client; the client-supplied SHA is
+	// advisory. This is what lets a vault round-trip (mart export → re-ingest)
+	// dedup, and stops the router's naive hash from fragmenting the skills vault.
+	canonSHA, cerr := canonicalSHAForKind(doc.Kind, req.Body)
+	if cerr != nil {
+		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, "canonicalize body: "+cerr.Error(), nil)
+		return
+	}
+	doc.SHA = canonSHA
 	// Phase D1: the Postgres SoR is THE write. finishRecordWrite returns 502
 	// on error so the agent's write-ahead queue retries (SHA-dedup makes
 	// retries safe).
