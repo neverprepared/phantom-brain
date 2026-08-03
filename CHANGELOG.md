@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.20.0](https://github.com/neverprepared/phantom-brain/compare/v3.19.0...v3.20.0) (2026-08-03)
+
+
+### Features
+
+* verbatim vault kind wins over brain_learn's note default ([#173](https://github.com/neverprepared/phantom-brain/issues/173)) ([717f8e8](https://github.com/neverprepared/phantom-brain/commit/717f8e85efddc330dbeb1c7ff3d4d1fa0d68d961))
+
 ## [3.19.0](https://github.com/neverprepared/phantom-brain/compare/v3.18.0...v3.19.0) (2026-08-03)
 
 
