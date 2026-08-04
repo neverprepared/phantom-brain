@@ -72,6 +72,8 @@ func clientCmd() *cobra.Command {
 	}
 	c.AddCommand(mcpCmd())
 	c.AddCommand(ingestBulkCmd())
+	c.AddCommand(exportCmd())
+	c.AddCommand(importCmd())
 	c.AddCommand(migrateLegacyCmd())
 	c.AddCommand(brainCmd())
 	c.AddCommand(gcBrainsCmd())

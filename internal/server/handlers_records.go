@@ -23,11 +23,15 @@ const (
 // to raw_body, matching handleFetch. UpdatedAt is carried so the future
 // mart-daemon change-feed can cursor on it without an endpoint change.
 type RecordDTO struct {
-	SHA         string     `json:"sha"`
-	Kind        string     `json:"kind"`
-	MemoryType  string     `json:"memory_type,omitempty"`
-	Title       string     `json:"title"`
-	Body        string     `json:"body"`
+	SHA        string `json:"sha"`
+	Kind       string `json:"kind"`
+	MemoryType string `json:"memory_type,omitempty"`
+	Title      string `json:"title"`
+	Body       string `json:"body"`
+	// RawBody is the untrimmed, pre-synthesis body — the exact bytes the SHA is
+	// derived over. Body (above) may be the distilled/synthesised text; a faithful
+	// vault export MUST use RawBody so a re-import recomputes the same identity.
+	RawBody     string     `json:"raw_body,omitempty"`
 	SourceURL   string     `json:"source_url,omitempty"`
 	Source      []string   `json:"source,omitempty"`
 	Tags        []string   `json:"tags,omitempty"`
@@ -188,6 +192,7 @@ func (d *Daemon) handleListRecords(w http.ResponseWriter, r *http.Request) {
 			MemoryType:  rec.MemoryType.String,
 			Title:       rec.Title,
 			Body:        body,
+			RawBody:     rec.RawBody.String, // untrimmed — the SHA is derived over these bytes
 			SourceURL:   rec.SourceUrl.String,
 			Source:      rec.Source,
 			Tags:        rec.Tags,

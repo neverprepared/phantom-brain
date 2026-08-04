@@ -53,3 +53,26 @@ func TestCanonicalSHAForKind(t *testing.T) {
 		t.Error("note: cosmetic framing must not change identity")
 	}
 }
+
+// A faithful vault import preserves topic + reliability verbatim; empty means
+// "don't override" the caller's default (learn's reliability=medium, etc.).
+func TestApplyMemoryFieldsPreservesTopicReliability(t *testing.T) {
+	doc := osearch.SummaryDoc{Vault: "memory", Reliability: osearch.ReliabilityMedium}
+	applyMemoryFields(&doc, MemoryFields{Kind: "note", Topic: "governance", Reliability: "high"})
+	if doc.Topic != "governance" {
+		t.Errorf("topic not preserved: %q", doc.Topic)
+	}
+	if doc.Reliability != osearch.ReliabilityHigh {
+		t.Errorf("reliability not preserved: %q", doc.Reliability)
+	}
+
+	kept := osearch.SummaryDoc{Vault: "memory", Topic: "keep", Reliability: osearch.ReliabilityMedium}
+	applyMemoryFields(&kept, MemoryFields{Kind: "note"}) // empty topic/reliability
+	if kept.Topic != "keep" || kept.Reliability != osearch.ReliabilityMedium {
+		t.Errorf("empty fields must not override: topic=%q reliability=%q", kept.Topic, kept.Reliability)
+	}
+
+	if msg := validateMemoryFields(MemoryFields{Reliability: "bogus"}); msg == "" {
+		t.Error("expected invalid reliability to be rejected")
+	}
+}

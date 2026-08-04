@@ -168,11 +168,13 @@ var ErrAttachmentStoreUnavailable = errors.New("attachment store not configured"
 // agent side. The daemon validates Kind against osearch.Kind's
 // closed enum and rejects unknowns at the boundary.
 type MemoryFields struct {
-	Kind       string     `json:"kind,omitempty"`        // closed enum: see osearch.Kind
-	MemoryType string     `json:"memory_type,omitempty"` // semantic | episodic | procedural | ""
-	Source     []string   `json:"source,omitempty"`      // provenance: URLs, task IDs, agent IDs, file paths
-	References []string   `json:"references,omitempty"`  // SHAs of related summaries
-	CapturedAt *time.Time `json:"captured_at,omitempty"` // when the content was authored, not when OS got it; nil = unset
+	Kind        string     `json:"kind,omitempty"`        // closed enum: see osearch.Kind
+	MemoryType  string     `json:"memory_type,omitempty"` // semantic | episodic | procedural | ""
+	Topic       string     `json:"topic,omitempty"`       // subject matter; preserved verbatim (e.g. a faithful import)
+	Reliability string     `json:"reliability,omitempty"` // high|medium|low|contested; preserved verbatim, else defaults
+	Source      []string   `json:"source,omitempty"`      // provenance: URLs, task IDs, agent IDs, file paths
+	References  []string   `json:"references,omitempty"`  // SHAs of related summaries
+	CapturedAt  *time.Time `json:"captured_at,omitempty"` // when the content was authored, not when OS got it; nil = unset
 }
 
 // PerceiveRequest mirrors the agent's brain_perceive payload, plus
@@ -230,6 +232,11 @@ func validateMemoryFields(m MemoryFields) string {
 	if !osearch.MemoryType(m.MemoryType).IsValid() {
 		return "unknown memory_type: " + m.MemoryType
 	}
+	switch osearch.Reliability(m.Reliability) {
+	case "", osearch.ReliabilityHigh, osearch.ReliabilityMedium, osearch.ReliabilityLow, osearch.ReliabilityContested:
+	default:
+		return "unknown reliability: " + m.Reliability
+	}
 	return ""
 }
 
@@ -251,6 +258,15 @@ func applyMemoryFields(doc *osearch.SummaryDoc, m MemoryFields) {
 	doc.Source = m.Source
 	doc.References = m.References
 	doc.CapturedAt = m.CapturedAt
+	// Topic + Reliability are preserved verbatim when supplied (a faithful vault
+	// import), else left at the caller's default (e.g. learn's reliability=medium,
+	// or synth-derived topic). Empty means "don't override".
+	if m.Topic != "" {
+		doc.Topic = m.Topic
+	}
+	if m.Reliability != "" {
+		doc.Reliability = osearch.Reliability(m.Reliability)
+	}
 }
 
 // canonicalSHAForKind derives a record's content-address daemon-side, so no
