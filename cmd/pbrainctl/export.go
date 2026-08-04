@@ -15,12 +15,15 @@ import (
 )
 
 // exportCmd materializes the token-scoped vault into a portable, re-importable
-// markdown vault — the export half of the round-trip pair (import is the other).
-// Unlike `mart build` (a human-facing read-only projection that emits a distilled
-// body + an index and injects cosmetic framing), export writes the RAW body
-// verbatim with full metadata under records/, so `pbrainctl client import`
-// recomputes the same canonical identity and dedups. This is the basis for
-// merge, portability, and archival.
+// markdown vault — the export half of the round-trip pair. Unlike `mart build`
+// (a human-facing read-only projection: distilled body, cosmetic framing, an
+// index.md), export writes the RAW body verbatim with full metadata under
+// records/, so `pbrainctl client import` recomputes the same canonical identity
+// and dedups. Basis for merge, portability, and archival.
+//
+// Text records only: attachment blobs are not yet handled — stubs live in the
+// OpenSearch projection, not the records SoR, so ListRecords can't enumerate
+// them. A dedicated attachment path is a follow-up.
 func exportCmd() *cobra.Command {
 	var api, token string
 	var pageSize int
@@ -31,8 +34,8 @@ func exportCmd() *cobra.Command {
 record: metadata frontmatter (kind, tags, captured_at, source, …) then the RAW
 body verbatim. Pair with 'pbrainctl client import' for a faithful, idempotent
 (SHA-deduped) round-trip. Prefer this over 'mart build' for anything you intend
-to re-import: mart is a lossy human projection (distilled body, cosmetic framing,
-an index.md) that does not round-trip.`,
+to re-import: mart is a lossy human projection that does not round-trip. Text
+records only for now (attachment blobs are a follow-up).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dest := args[0]
@@ -58,53 +61,53 @@ an index.md) that does not round-trip.`,
 			}
 
 			ctx := cmd.Context()
-			var afterID int64
-			written, skipped := 0, 0
-			for {
-				resp, err := client.ListRecords(ctx, brain.ListRecordsRequest{AfterID: afterID, Limit: pageSize})
-				if err != nil {
-					return fmt.Errorf("list records: %w", err)
-				}
-				for _, rec := range resp.Records {
-					// Attachment stubs have no re-importable text body — blob
-					// export is a follow-up. Skip for now.
-					if rec.Kind == string(osearch.KindAttachmentStub) {
-						skipped++
-						continue
-					}
-					body := rec.RawBody // the exact bytes the SHA is derived over
-					if body == "" {
-						body = rec.Body
-					}
-					meta := vaultxfer.Meta{
-						SHA: rec.SHA, Kind: rec.Kind, Title: rec.Title, Tags: rec.Tags,
-						Topic: rec.Topic, Reliability: rec.Reliability, MemoryType: rec.MemoryType,
-						Source: rec.Source, SourceURL: rec.SourceURL,
-					}
-					if rec.CapturedAt != nil {
-						meta.CapturedAt = rec.CapturedAt.UTC().Format(time.RFC3339)
-					}
-					raw, err := vaultxfer.Encode(meta, body)
+			written := 0
+			// Enumerate BOTH synthesised states: pending-synth records are
+			// Synthesised=false and the server defaults the filter to true, so a
+			// single pass would miss them.
+			for _, synth := range []bool{true, false} {
+				s := synth
+				var afterID int64
+				for {
+					resp, err := client.ListRecords(ctx, brain.ListRecordsRequest{AfterID: afterID, Limit: pageSize, Synthesised: &s})
 					if err != nil {
-						return err
+						return fmt.Errorf("list records: %w", err)
 					}
-					fn := vaultxfer.Filename(rec.Title, rec.SHA)
-					if err := os.WriteFile(filepath.Join(recordsDir, fn), raw, 0o644); err != nil {
-						return err
+					for _, rec := range resp.Records {
+						// Attachment stubs aren't text records — skip (blob export TODO).
+						if rec.Kind == string(osearch.KindAttachmentStub) {
+							continue
+						}
+						body := rec.RawBody // the exact bytes the SHA is derived over
+						if body == "" {
+							body = rec.Body
+						}
+						meta := vaultxfer.Meta{
+							SHA: rec.SHA, Kind: rec.Kind, Title: rec.Title, Tags: rec.Tags,
+							Topic: rec.Topic, Reliability: rec.Reliability, MemoryType: rec.MemoryType,
+							Source: rec.Source, SourceURL: rec.SourceURL,
+						}
+						if rec.CapturedAt != nil {
+							meta.CapturedAt = rec.CapturedAt.UTC().Format(time.RFC3339)
+						}
+						raw, err := vaultxfer.Encode(meta, body)
+						if err != nil {
+							return err
+						}
+						fn := vaultxfer.Filename(rec.Title, rec.SHA)
+						if err := os.WriteFile(filepath.Join(recordsDir, fn), raw, 0o644); err != nil {
+							return err
+						}
+						written++
 					}
-					written++
+					if resp.NextAfterID == 0 || len(resp.Records) == 0 {
+						break
+					}
+					afterID = resp.NextAfterID
 				}
-				if resp.NextAfterID == 0 || len(resp.Records) == 0 {
-					break
-				}
-				afterID = resp.NextAfterID
 			}
 
-			tail := ""
-			if skipped > 0 {
-				tail = fmt.Sprintf(" (%d attachment stub(s) skipped)", skipped)
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "exported %d record(s)%s → %s\n", written, tail, recordsDir)
+			fmt.Fprintf(cmd.OutOrStdout(), "exported %d record(s) → %s\n", written, dest)
 			return nil
 		},
 	}

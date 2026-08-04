@@ -20,7 +20,7 @@ import (
 // daemon derives the canonical, kind-aware SHA, so re-importing an unchanged
 // vault is a no-op and importing two vaults is a dedup-safe union (the merge
 // story). Skips index.md + dotfiles so a `mart build` directory does not inject
-// spurious records.
+// spurious records. Text records only (attachment blobs are a follow-up).
 func importCmd() *cobra.Command {
 	var api, token string
 	var dryRun bool
@@ -103,7 +103,10 @@ are skipped so a 'mart build' directory does not inject spurious records.`,
 				if len(sha) != 64 {
 					sha = osearch.SHA256Hex([]byte(body))
 				}
-				mf := brain.MemoryFields{Kind: meta.Kind, MemoryType: meta.MemoryType, Source: meta.Source}
+				mf := brain.MemoryFields{
+					Kind: meta.Kind, MemoryType: meta.MemoryType, Topic: meta.Topic,
+					Reliability: meta.Reliability, Source: meta.Source,
+				}
 				if meta.CapturedAt != "" {
 					if t, e := time.Parse(time.RFC3339, meta.CapturedAt); e == nil {
 						mf.CapturedAt = &t

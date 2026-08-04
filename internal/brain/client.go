@@ -168,11 +168,13 @@ func (c *Client) GetMergeStatus(ctx context.Context, brainID string) (*MergeStat
 // daemon validates Kind against the closed enum and rejects unknowns.
 // MemoryType is optional (empty = "undecided / not applicable").
 type MemoryFields struct {
-	Kind       string     `json:"kind,omitempty"`        // closed enum — see osearch.Kind
-	MemoryType string     `json:"memory_type,omitempty"` // semantic | episodic | procedural | ""
-	Source     []string   `json:"source,omitempty"`      // provenance: URLs, task IDs, agent IDs, file paths
-	References []string   `json:"references,omitempty"`  // SHAs of related summaries (graph hook)
-	CapturedAt *time.Time `json:"captured_at,omitempty"` // when the content was authored, not when OS got it; nil = unset
+	Kind        string     `json:"kind,omitempty"`        // closed enum — see osearch.Kind
+	MemoryType  string     `json:"memory_type,omitempty"` // semantic | episodic | procedural | ""
+	Topic       string     `json:"topic,omitempty"`       // subject matter; preserved verbatim on a faithful import
+	Reliability string     `json:"reliability,omitempty"` // high|medium|low|contested; preserved verbatim, else defaults
+	Source      []string   `json:"source,omitempty"`      // provenance: URLs, task IDs, agent IDs, file paths
+	References  []string   `json:"references,omitempty"`  // SHAs of related summaries (graph hook)
+	CapturedAt  *time.Time `json:"captured_at,omitempty"` // when the content was authored, not when OS got it; nil = unset
 }
 
 // PerceiveRequest mirrors internal/server.PerceiveRequest. Defined
