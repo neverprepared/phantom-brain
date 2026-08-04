@@ -455,6 +455,27 @@ func (c *Client) AttachGet(ctx context.Context, sha string) (*AttachGetResponse,
 	return &out, nil
 }
 
+// AttachBytes streams an attachment's raw blob bytes through the daemon (GET
+// /api/brain/attach/{sha}/bytes), so a client that can't reach the internal
+// MinIO endpoint (or reuse its host-bound presigned URL) can still fetch it.
+func (c *Client) AttachBytes(ctx context.Context, sha string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/brain/attach/"+sha+"/bytes", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return nil, fmt.Errorf("attach bytes %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
+	}
+	return io.ReadAll(resp.Body)
+}
+
 // CaptureGetResponse mirrors internal/server's handleCaptureGet
 // envelope: presigned URL to the raw bytes captured at synth time.
 // 404 surfaces as *APIError with Code=NOT_FOUND when no capture

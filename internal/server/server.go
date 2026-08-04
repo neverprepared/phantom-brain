@@ -509,6 +509,7 @@ func (d *Daemon) buildRouter() chi.Router {
 			r.Post("/attach", d.handleAttach)
 			r.Post("/trace", d.handleTrace)
 			r.Get("/attach/{sha}", d.handleAttachGet)
+			r.Get("/attach/{sha}/bytes", d.handleAttachBytes)
 			r.Get("/capture/{sha}", d.handleCaptureGet)
 
 			// v3.3 brain_reflect maintenance cycle (issue #72 Phase 1).

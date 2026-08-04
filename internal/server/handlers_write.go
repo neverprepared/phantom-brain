@@ -699,6 +699,59 @@ func (d *Daemon) getRecordBySHA(ctx context.Context, view *pgBindingView, b Vaul
 // key field is presigned (keySel), the not-found message, and the response
 // shape (respBuilder). op labels the feature for the disabled-store / 503
 // messages.
+// handleAttachBytes streams an attachment's raw blob bytes THROUGH the daemon
+// (daemon → MinIO internal → client). The presigned /attach/{sha} route is for
+// same-network clients that want direct MinIO access; a host-run client can't
+// resolve the internal MinIO endpoint (or reuse its host-bound presigned
+// signature), so it fetches bytes here instead. Powers `pbrainctl client export`.
+func (d *Daemon) handleAttachBytes(w http.ResponseWriter, r *http.Request) {
+	if d.attach == nil {
+		WriteErrorEnvelope(w, http.StatusServiceUnavailable, ErrCodeStorageBackendErr,
+			"attach disabled (attachment store missing)", nil)
+		return
+	}
+	binding, _ := BindingFromContext(r.Context())
+	view, ok := d.resolvePGOrError(w, binding, "attach bytes")
+	if !ok {
+		return
+	}
+	attach, err := d.resolveAttach(binding)
+	if err != nil {
+		d.writeBindingConfigError(w, err)
+		return
+	}
+	sha := chi.URLParam(r, "sha")
+	if err := validateSHA(sha); err != nil {
+		WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, err.Error(), nil)
+		return
+	}
+	rec, err := d.getRecordBySHA(r.Context(), view, binding, sha)
+	if err != nil {
+		if errors.Is(err, errRecordNotFound) {
+			WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound, "attachment not found", nil)
+			return
+		}
+		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr, "postgres get failed: "+err.Error(), nil)
+		return
+	}
+	if !rec.MinioKey.Valid || rec.MinioKey.String == "" {
+		WriteErrorEnvelope(w, http.StatusNotFound, ErrCodeNotFound, "attachment not found", nil)
+		return
+	}
+	data, err := attach.GetAttachmentBytes(r.Context(), rec.MinioKey.String, 0)
+	if err != nil {
+		WriteErrorEnvelope(w, http.StatusBadGateway, ErrCodeStorageBackendErr, "read blob failed: "+err.Error(), nil)
+		return
+	}
+	ct := "application/octet-stream"
+	if rec.MimeType.Valid && rec.MimeType.String != "" {
+		ct = rec.MimeType.String
+	}
+	w.Header().Set("Content-Type", ct)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
 func (d *Daemon) servePresignedRecordKey(
 	w http.ResponseWriter, r *http.Request, op, notFoundMsg string,
 	keySel func(pgdb.Record) (string, bool),

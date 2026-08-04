@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,7 +22,7 @@ import (
 // daemon derives the canonical, kind-aware SHA, so re-importing an unchanged
 // vault is a no-op and importing two vaults is a dedup-safe union (the merge
 // story). Skips index.md + dotfiles so a `mart build` directory does not inject
-// spurious records. Text records only (attachment blobs are a follow-up).
+// spurious records. Also re-attaches any blobs under attachments/.
 func importCmd() *cobra.Command {
 	var api, token string
 	var dryRun bool
@@ -122,7 +124,54 @@ are skipped so a 'mart build' directory does not inject spurious records.`,
 				}
 				okN++
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "import done: ok=%d failed=%d\n", okN, failN)
+
+			// Attachments: attachments/<sha> (blob) + <sha>.json (sidecar). The
+			// daemon re-verifies sha == sha256(bytes) and recreates the companion
+			// stub; idempotent by SHA.
+			attOk, attFail := 0, 0
+			attDir := filepath.Join(args[0], "attachments")
+			if ents, rerr := os.ReadDir(attDir); rerr == nil {
+				for _, e := range ents {
+					if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+						continue
+					}
+					sha := strings.TrimSuffix(e.Name(), ".json")
+					var side struct {
+						OriginalFilename string   `json:"original_filename"`
+						MIMEType         string   `json:"mime_type"`
+						Tags             []string `json:"tags"`
+						ExtractedText    string   `json:"extracted_text"`
+					}
+					if sj, err := os.ReadFile(filepath.Join(attDir, e.Name())); err == nil {
+						_ = json.Unmarshal(sj, &side)
+					}
+					data, err := os.ReadFile(filepath.Join(attDir, sha))
+					if err != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "attachment %s: missing blob\n", e.Name())
+						attFail++
+						continue
+					}
+					if _, err := client.Attach(ctx, brain.AttachRequest{
+						SHA:              osearch.SHA256Hex(data),
+						OriginalFilename: side.OriginalFilename,
+						MIMEType:         side.MIMEType,
+						BytesB64:         base64.StdEncoding.EncodeToString(data),
+						ExtractedText:    side.ExtractedText,
+						Tags:             side.Tags,
+					}); err != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "attach %s: %v\n", e.Name(), err)
+						attFail++
+						continue
+					}
+					attOk++
+				}
+			}
+
+			tail := ""
+			if attOk > 0 || attFail > 0 {
+				tail = fmt.Sprintf(", attachments ok=%d failed=%d", attOk, attFail)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "import done: records ok=%d failed=%d%s\n", okN, failN, tail)
 			return nil
 		},
 	}
