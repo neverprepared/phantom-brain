@@ -17,6 +17,23 @@ import (
 	"github.com/neverprepared/phantom-brain/internal/vaultxfer"
 )
 
+// loadEmbeddingSidecar returns a carried vector from <vault>/embeddings/<sha>.json
+// when present and dimension-compatible, else (nil, false) so the caller re-embeds.
+func loadEmbeddingSidecar(vaultDir, sha string) ([]float32, bool) {
+	if sha == "" {
+		return nil, false
+	}
+	b, err := os.ReadFile(filepath.Join(vaultDir, "embeddings", sha+".json"))
+	if err != nil {
+		return nil, false
+	}
+	var v []float32
+	if json.Unmarshal(b, &v) != nil || len(v) != osearch.EmbeddingDim {
+		return nil, false
+	}
+	return v, true
+}
+
 // importCmd loads a vault produced by `pbrainctl client export` back into the
 // token-scoped vault — the import half of the round-trip pair. Idempotent: the
 // daemon derives the canonical, kind-aware SHA, so re-importing an unchanged
@@ -95,9 +112,14 @@ are skipped so a 'mart build' directory does not inject spurious records.`,
 					failN++
 					continue
 				}
-				embs, err := emb.Embed(ctx, []string{strings.TrimSpace(meta.Title + "\n\n" + body)})
-				if err != nil {
-					return fmt.Errorf("embed %s: %w", filepath.Base(f), err)
+				// Prefer a carried vector (export --with-embeddings) over re-embedding.
+				embedding, haveEmb := loadEmbeddingSidecar(args[0], meta.SHA)
+				if !haveEmb {
+					embs, err := emb.Embed(ctx, []string{strings.TrimSpace(meta.Title + "\n\n" + body)})
+					if err != nil {
+						return fmt.Errorf("embed %s: %w", filepath.Base(f), err)
+					}
+					embedding = embs[0]
 				}
 				// SHA is advisory — the daemon derives the canonical identity. Use
 				// the exported checksum when it is a valid 64-hex, else a placeholder.
@@ -116,7 +138,7 @@ are skipped so a 'mart build' directory does not inject spurious records.`,
 				}
 				if _, err := client.Learn(ctx, brain.LearnRequest{
 					SHA: sha, Title: meta.Title, Body: body, Tags: meta.Tags,
-					Embedding: embs[0], MemoryFields: mf,
+					Embedding: embedding, MemoryFields: mf,
 				}); err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "learn %s: %v\n", filepath.Base(f), err)
 					failN++
