@@ -66,6 +66,7 @@ func exportAttachment(ctx context.Context, client *brain.Client, dest string, re
 func exportCmd() *cobra.Command {
 	var api, token string
 	var pageSize int
+	var withEmb bool
 	c := &cobra.Command{
 		Use:   "export <dest-dir>",
 		Short: "Export a vault to a re-importable markdown vault (round-trip half)",
@@ -108,7 +109,7 @@ lossy human projection that does not round-trip.`,
 				s := synth
 				var afterID int64
 				for {
-					resp, err := client.ListRecords(ctx, brain.ListRecordsRequest{AfterID: afterID, Limit: pageSize, Synthesised: &s})
+					resp, err := client.ListRecords(ctx, brain.ListRecordsRequest{AfterID: afterID, Limit: pageSize, Synthesised: &s, Embeddings: withEmb})
 					if err != nil {
 						return fmt.Errorf("list records: %w", err)
 					}
@@ -142,6 +143,16 @@ lossy human projection that does not round-trip.`,
 						if err := os.WriteFile(filepath.Join(recordsDir, fn), raw, 0o644); err != nil {
 							return err
 						}
+						if withEmb && len(rec.Embedding) > 0 {
+							embDir := filepath.Join(dest, "embeddings")
+							if err := os.MkdirAll(embDir, 0o755); err != nil {
+								return err
+							}
+							ej, _ := json.Marshal(rec.Embedding)
+							if err := os.WriteFile(filepath.Join(embDir, rec.SHA+".json"), ej, 0o644); err != nil {
+								return err
+							}
+						}
 						written++
 					}
 					if resp.NextAfterID == 0 || len(resp.Records) == 0 {
@@ -162,5 +173,6 @@ lossy human projection that does not round-trip.`,
 	c.Flags().StringVar(&api, "api", "", "daemon URL (defaults to $CL_BRAIN_API)")
 	c.Flags().StringVar(&token, "token", "", "daemon bearer token (defaults to $CL_BRAIN_API_TOKEN)")
 	c.Flags().IntVar(&pageSize, "page-size", 100, "records fetched per daemon request")
+	c.Flags().BoolVar(&withEmb, "with-embeddings", false, "carry stored 768-dim vectors into embeddings/ (import skips re-embed; same-model migrations)")
 	return c
 }

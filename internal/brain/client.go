@@ -348,7 +348,8 @@ type RecordDTO struct {
 	MemoryType  string     `json:"memory_type,omitempty"`
 	Title       string     `json:"title"`
 	Body        string     `json:"body"`
-	RawBody     string     `json:"raw_body,omitempty"` // pre-synthesis body; the SHA is derived over these bytes
+	RawBody     string     `json:"raw_body,omitempty"`  // pre-synthesis body; the SHA is derived over these bytes
+	Embedding   []float32  `json:"embedding,omitempty"` // populated only when ListRecordsRequest.Embeddings is set
 	SourceURL   string     `json:"source_url,omitempty"`
 	Source      []string   `json:"source,omitempty"`
 	Tags        []string   `json:"tags,omitempty"`
@@ -376,6 +377,7 @@ type ListRecordsRequest struct {
 	Topic       string
 	Reliability []string
 	Synthesised *bool
+	Embeddings  bool // include the stored vector per row (?embeddings=true)
 	// Since (RFC3339) switches to change-feed mode: only records with
 	// updated_at at/after the (Since, AfterID) compound cursor. Empty = the
 	// default id-keyset full enumeration.
@@ -420,6 +422,9 @@ func (c *Client) ListRecords(ctx context.Context, req ListRecordsRequest) (*List
 	}
 	if req.Synthesised != nil {
 		q.Set("synthesised", strconv.FormatBool(*req.Synthesised))
+	}
+	if req.Embeddings {
+		q.Set("embeddings", "true")
 	}
 	if req.Since != "" {
 		q.Set("since", req.Since)

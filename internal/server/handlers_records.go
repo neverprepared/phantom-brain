@@ -31,7 +31,11 @@ type RecordDTO struct {
 	// RawBody is the untrimmed, pre-synthesis body — the exact bytes the SHA is
 	// derived over. Body (above) may be the distilled/synthesised text; a faithful
 	// vault export MUST use RawBody so a re-import recomputes the same identity.
-	RawBody     string     `json:"raw_body,omitempty"`
+	RawBody string `json:"raw_body,omitempty"`
+	// Embedding is the stored 768-dim vector, included ONLY when the request
+	// passes ?embeddings=true (it is large — omitted from normal enumeration). A
+	// faithful export (--with-embeddings) uses it to avoid re-embedding on import.
+	Embedding   []float32  `json:"embedding,omitempty"`
 	SourceURL   string     `json:"source_url,omitempty"`
 	Source      []string   `json:"source,omitempty"`
 	Tags        []string   `json:"tags,omitempty"`
@@ -112,6 +116,18 @@ func (d *Daemon) handleListRecords(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		synthesised = v
+	}
+
+	// embeddings=true includes the (large) stored vector per row — opt-in so
+	// normal enumeration stays lean. Used by a faithful vault export.
+	withEmbeddings := false
+	if s := strings.TrimSpace(q.Get("embeddings")); s != "" {
+		v, err := strconv.ParseBool(s)
+		if err != nil {
+			WriteErrorEnvelope(w, http.StatusBadRequest, ErrCodeBadRequest, "embeddings must be a boolean", nil)
+			return
+		}
+		withEmbeddings = v
 	}
 
 	// topic is single-valued on the wire but the query takes a slice; wrap it.
@@ -210,6 +226,9 @@ func (d *Daemon) handleListRecords(w http.ResponseWriter, r *http.Request) {
 		dto.MimeType = rec.MimeType.String
 		if rec.SizeBytes.Valid {
 			dto.SizeBytes = rec.SizeBytes.Int64
+		}
+		if withEmbeddings && rec.Embedding != nil {
+			dto.Embedding = rec.Embedding.Slice()
 		}
 		resp.Records = append(resp.Records, dto)
 	}
