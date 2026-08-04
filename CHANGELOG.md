@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.21.0](https://github.com/neverprepared/phantom-brain/compare/v3.20.0...v3.21.0) (2026-08-04)
+
+
+### Features
+
+* pbrainctl client export/import — vault round-trip commands ([#179](https://github.com/neverprepared/phantom-brain/issues/179)) ([7d837bf](https://github.com/neverprepared/phantom-brain/commit/7d837bf8f82e6a3502cbb0694ba6bf78ab461099))
+
 ## [3.20.0](https://github.com/neverprepared/phantom-brain/compare/v3.19.0...v3.20.0) (2026-08-03)
 
 
